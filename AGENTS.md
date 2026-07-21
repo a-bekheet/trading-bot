@@ -225,6 +225,12 @@ manufacture a result. `evaluate_cost_stress` must run identical policy logic
 under each scenario; default stress doubles both executable spread and
 commission. Episode reports retain return, drawdown, volatility/downside,
 turnover, costs, execution quality, and final/peak Greek exposure diagnostics.
+Held-out statistical comparisons pair agent and baseline returns by exact
+arrival timestamp and test seed, then use circular moving blocks. Do not pool
+duplicate deterministic seeds as independent observations. The default minimum
+is 20 transitions; shorter paths must report `insufficient_history` and null
+intervals. Bootstrap results are post-selection evidence only and may never
+affect features, hyperparameters, early stopping, or checkpoint choice.
 
 Underlying fills use the captured spot with explicit synthetic slippage and
 per-share commission because the current CSV has no underlying bid/ask. Keep

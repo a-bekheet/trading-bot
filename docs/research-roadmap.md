@@ -16,8 +16,8 @@ Every candidate must eventually pass:
    by rolling walk-forward evaluation.
 2. No-op, Black-Scholes delta hedge, and simple rules-based volatility or
    moneyness baselines using the same information and execution model.
-3. Multiple seeds, bootstrap confidence intervals, turnover and drawdown
-   reporting, and doubled-cost stress.
+3. Multiple genuinely distinct seeds or paths, paired moving-block confidence
+   intervals, turnover and drawdown reporting, and doubled-cost stress.
 4. Ablation against a smaller flat GRU. LSTM, hybrid GRU+LSTM, GNN, and surface
    latent models earn their complexity only through out-of-sample improvement.
 5. A feature-availability audit proving that every input existed before the
@@ -30,7 +30,7 @@ Every candidate must eventually pass:
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | Add CVaR or learned P&L-distribution objectives only after explicit short-option liability episodes and enough independent paths exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Add causal realized-volatility horizons and a formal walk-forward runner. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v4`, compact ATM-IV-minus-realized-volatility state, and Greek budgets implement the state/risk lesson; bootstrap intervals remain an evaluation gate. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v4`, compact ATM-IV-minus-realized-volatility state, Greek budgets, and paired moving-block intervals implement the state/risk lesson. |
 | [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Use a sparse trainable hold prior now. Benchmark an autoregressive multi-leg option policy later; never post-process sampled rows in a way that breaks PPO likelihoods. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
@@ -73,6 +73,13 @@ coefficient. This reduced untrained requested action density on the current
 AAPL surface without imposing a hard order cap or changing PPO likelihoods.
 Episode provenance reports requested option and hedge actions separately.
 
+Walk-forward artifacts now include post-selection, paired circular moving-block
+comparisons of the agent against every baseline. They report cumulative
+log-return lift, confidence bounds, and the fraction of bootstrap estimates
+above zero per held-out seed. Folds below the minimum sample count produce no
+bounds, preventing tiny integration datasets from masquerading as statistical
+evidence.
+
 ## Prioritized implementation sequence
 
 ### 1. Make evaluation credible
@@ -83,8 +90,9 @@ Episode provenance reports requested option and hedge actions separately.
   explicit history-coverage masks.
 - Report NAV return, downside deviation, Sharpe/Sortino, maximum drawdown,
   turnover, fees, invalid actions, and all four Greek exposure paths.
-- Add block-bootstrap intervals; normal/doubled spread-and-fee scenarios are
-  already executable.
+- Retain the implemented paired moving-block intervals and normal/doubled
+  spread-and-fee scenarios; add multiple-testing control when comparing many
+  model families.
 
 ### 2. Strengthen baselines
 

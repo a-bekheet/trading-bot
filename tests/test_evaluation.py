@@ -11,11 +11,71 @@ from trading_bot.training.evaluation import (
     cost_stressed_environment,
     evaluate_cost_stress,
     evaluate_policy,
+    paired_moving_block_bootstrap,
+    run_episode_trace,
 )
 from trading_bot.training.env import OptionsEnv
+from tests.test_training_env import three_snapshot_dataset
 
 
 class EvaluationTests(TestCase):
+    def test_episode_trace_retains_aligned_returns_without_changing_report(self):
+        trace = run_episode_trace(
+            OptionsEnv(three_snapshot_dataset(), slot_count=2),
+            first_feasible,
+            seed=9,
+        )
+
+        self.assertEqual(len(trace.timestamps), trace.report.steps)
+        self.assertEqual(len(trace.step_returns), trace.report.steps)
+        self.assertAlmostEqual(
+            np.prod(1 + np.asarray(trace.step_returns)) - 1,
+            trace.report.total_return,
+        )
+
+    def test_paired_block_bootstrap_is_deterministic_and_detects_lift(self):
+        baseline = np.sin(np.arange(64) / 4) * 0.002
+        candidate = baseline + 0.001
+
+        first = paired_moving_block_bootstrap(
+            candidate,
+            baseline,
+            samples=1_000,
+            seed=17,
+        )
+        second = paired_moving_block_bootstrap(
+            candidate,
+            baseline,
+            samples=1_000,
+            seed=17,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.status, "ok")
+        self.assertEqual(first.block_length, 8)
+        self.assertGreater(first.ci_lower, 0)
+        self.assertEqual(first.bootstrap_fraction_positive, 1.0)
+        self.assertTrue(first.supports_improvement)
+        self.assertAlmostEqual(
+            first.point_estimate,
+            float(np.sum(np.log1p(candidate) - np.log1p(baseline))),
+        )
+
+    def test_paired_block_bootstrap_refuses_false_precision(self):
+        comparison = paired_moving_block_bootstrap(
+            np.array([0.01, -0.01, 0.0]),
+            np.zeros(3),
+            samples=100,
+            min_observations=8,
+        )
+
+        self.assertEqual(comparison.status, "insufficient_history")
+        self.assertIsNone(comparison.ci_lower)
+        self.assertIsNone(comparison.bootstrap_fraction_positive)
+        self.assertFalse(comparison.supports_improvement)
+        with self.assertRaisesRegex(ValueError, "equal length"):
+            paired_moving_block_bootstrap([0.1], [0.1, 0.2])
+
     def test_no_op_evaluation_is_reproducible(self):
         rows = []
         for timestamp in ("2026-07-21T14:00:00Z", "2026-07-21T14:01:00Z"):

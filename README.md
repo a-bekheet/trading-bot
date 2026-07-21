@@ -310,6 +310,21 @@ first-feasible baselines, a buy-first-then-Delta-hedge comparator, and
 normal/doubled-cost reports. This improves the evaluation boundary; Yahoo
 snapshots and these simple baselines still do not establish alpha.
 
+Held-out agent and baseline paths are also compared with a paired circular
+moving-block bootstrap over cumulative log-return difference. Pairing uses the
+same arrival timestamps and preserves short-range serial dependence inside each
+resampled block. The default uses 2,000 samples, square-root block length, a 95%
+interval, and requires at least 20 test transitions. Shorter folds explicitly
+report `insufficient_history` with no confidence bounds. Configure the method
+with `--bootstrap-samples`, `--bootstrap-block-length`,
+`--bootstrap-confidence`, and `--bootstrap-min-observations`. These diagnostics
+are computed only after checkpoint selection and must not become a test-set
+hyperparameter loop.
+
+The NumPy implementation is vectorized; a local 1,000-observation/2,000-sample
+benchmark took about 7.5 ms median, keeping statistical QA outside policy
+latency.
+
 Underlying fills use the saved underlying price plus/minus configurable
 synthetic slippage (one basis point by default) and a per-share commission.
 This enables a reproducible Delta hedge but is not a substitute for historical

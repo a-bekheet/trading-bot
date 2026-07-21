@@ -18,21 +18,22 @@ from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.evaluation import (
     DEFAULT_COST_SCENARIOS,
     cost_stressed_environment,
+    paired_moving_block_bootstrap,
     run_episode,
+    run_episode_trace,
 )
 from trading_bot.training.recurrent import RecurrentConfig
 from trading_bot.training.sequence import observation_vector
 from trading_bot.training.splits import walk_forward_splits
 from trading_bot.training.trainer import (
     TrainingConfig,
-    evaluate_recurrent_policy,
     recurrent_policy,
     save_checkpoint,
     train_actor_critic,
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v5"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v6"
 
 
 @dataclass(frozen=True)
@@ -44,12 +45,28 @@ class WalkForwardConfig:
     step_size: int | None = None
     max_train_size: int | None = None
     test_seeds: tuple[int, ...] = (20_001,)
+    bootstrap_samples: int = 2_000
+    bootstrap_block_length: int | None = None
+    bootstrap_confidence: float = 0.95
+    bootstrap_min_observations: int = 20
+    bootstrap_seed: int = 70_001
 
     def __post_init__(self) -> None:
         if min(self.min_train_size, self.validation_size, self.test_size) < 2:
             raise ValueError("walk-forward partitions require at least two snapshots")
         if not self.test_seeds:
             raise ValueError("at least one held-out test seed is required")
+        if self.bootstrap_samples < 100:
+            raise ValueError("bootstrap_samples must be at least 100")
+        if (
+            self.bootstrap_block_length is not None
+            and self.bootstrap_block_length < 1
+        ):
+            raise ValueError("bootstrap_block_length must be positive")
+        if not 0 < self.bootstrap_confidence < 1:
+            raise ValueError("bootstrap_confidence must be between zero and one")
+        if self.bootstrap_min_observations < 2:
+            raise ValueError("bootstrap_min_observations must be at least two")
 
 
 @dataclass(frozen=True)
@@ -141,26 +158,68 @@ def run_walk_forward_training(
             selection_env=validation_env,
         )
 
-        test_reports = evaluate_recurrent_policy(
-            test_env,
-            model,
-            fold_training.sequence_length,
-            seeds=walk_forward_config.test_seeds,
-        )
-        baseline_reports = {
+        test_traces = [
+            run_episode_trace(
+                test_env,
+                recurrent_policy(model, fold_training.sequence_length),
+                seed,
+            )
+            for seed in walk_forward_config.test_seeds
+        ]
+        test_reports = [trace.report for trace in test_traces]
+        baseline_traces = {
             "no_op": [
-                run_episode(test_env, no_op, seed)
+                run_episode_trace(test_env, no_op, seed)
                 for seed in walk_forward_config.test_seeds
             ],
             "first_feasible": [
-                run_episode(test_env, first_feasible, seed)
+                run_episode_trace(test_env, first_feasible, seed)
                 for seed in walk_forward_config.test_seeds
             ],
             "buy_first_then_delta_hedge": [
-                run_episode(test_env, buy_first_then_delta_hedge(), seed)
+                run_episode_trace(test_env, buy_first_then_delta_hedge(), seed)
                 for seed in walk_forward_config.test_seeds
             ],
         }
+        baseline_reports = {
+            name: [trace.report for trace in traces]
+            for name, traces in baseline_traces.items()
+        }
+        statistical_comparisons = {}
+        for baseline_index, (name, traces) in enumerate(baseline_traces.items()):
+            comparisons = []
+            for seed_index, (candidate, baseline) in enumerate(
+                zip(test_traces, traces, strict=True)
+            ):
+                if candidate.timestamps != baseline.timestamps:
+                    raise ValueError("candidate and baseline test paths are not aligned")
+                comparison = paired_moving_block_bootstrap(
+                    candidate.step_returns,
+                    baseline.step_returns,
+                    samples=walk_forward_config.bootstrap_samples,
+                    block_length=walk_forward_config.bootstrap_block_length,
+                    confidence_level=walk_forward_config.bootstrap_confidence,
+                    min_observations=(
+                        walk_forward_config.bootstrap_min_observations
+                    ),
+                    seed=(
+                        walk_forward_config.bootstrap_seed
+                        + fold.fold * 10_000
+                        + baseline_index * 1_000
+                        + seed_index
+                    ),
+                )
+                comparisons.append({
+                    "test_seed": walk_forward_config.test_seeds[seed_index],
+                    "first_arrival_timestamp": (
+                        candidate.timestamps[0] if candidate.timestamps else None
+                    ),
+                    "last_arrival_timestamp": (
+                        candidate.timestamps[-1] if candidate.timestamps else None
+                    ),
+                    **comparison.to_dict(),
+                })
+            statistical_comparisons[name] = comparisons
         cost_stress = {}
         for scenario in DEFAULT_COST_SCENARIOS:
             cost_stress[scenario.name] = [
@@ -193,6 +252,7 @@ def run_walk_forward_training(
                 name: _reports_to_dict(reports)
                 for name, reports in baseline_reports.items()
             },
+            "statistical_comparisons": statistical_comparisons,
             "cost_stress": {
                 name: _reports_to_dict(reports)
                 for name, reports in cost_stress.items()
@@ -245,6 +305,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--embargo", type=int, default=8)
     parser.add_argument("--step-size", type=int)
     parser.add_argument("--max-train-size", type=int)
+    parser.add_argument("--bootstrap-samples", type=int, default=2_000)
+    parser.add_argument("--bootstrap-block-length", type=int)
+    parser.add_argument("--bootstrap-confidence", type=float, default=0.95)
+    parser.add_argument("--bootstrap-min-observations", type=int, default=20)
+    parser.add_argument("--bootstrap-seed", type=int, default=70_001)
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
     parser.add_argument("--hidden-size", type=int, default=128)
@@ -286,6 +351,11 @@ def main() -> None:
                 embargo=args.embargo,
                 step_size=args.step_size,
                 max_train_size=args.max_train_size,
+                bootstrap_samples=args.bootstrap_samples,
+                bootstrap_block_length=args.bootstrap_block_length,
+                bootstrap_confidence=args.bootstrap_confidence,
+                bootstrap_min_observations=args.bootstrap_min_observations,
+                bootstrap_seed=args.bootstrap_seed,
             ),
             ModelSpec(
                 kind=args.kind,

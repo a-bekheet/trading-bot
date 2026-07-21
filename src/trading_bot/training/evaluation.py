@@ -45,9 +45,44 @@ class EpisodeReport:
         return asdict(self)
 
 
-def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport:
+@dataclass(frozen=True)
+class EpisodeTrace:
+    """Episode metrics plus the aligned held-out return path."""
+
+    report: EpisodeReport
+    timestamps: tuple[str, ...]
+    step_returns: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class BootstrapComparison:
+    """Paired dependence-aware uncertainty for agent minus baseline returns."""
+
+    status: str
+    metric: str
+    observations: int
+    bootstrap_samples: int
+    block_length: int
+    confidence_level: float
+    point_estimate: float
+    ci_lower: float | None
+    ci_upper: float | None
+    bootstrap_fraction_positive: float | None
+    supports_improvement: bool
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def run_episode_trace(
+    env: OptionsEnv,
+    policy: Policy,
+    seed: int = 0,
+) -> EpisodeTrace:
+    """Run one policy and retain returns aligned to arrival timestamps."""
     observation, _ = env.reset(seed=seed)
     navs = [float(observation.portfolio[2])]
+    timestamps = []
     total_reward = fees = 0.0
     invalid_actions = executions = steps = 0
     trade_notional = 0.0
@@ -66,6 +101,7 @@ def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport
             np.abs(observation.portfolio[PORTFOLIO_GREEK_SLICE]),
         )
         navs.append(float(observation.portfolio[2]))
+        timestamps.append(observation.timestamp)
         steps += 1
         if terminated or truncated:
             break
@@ -87,7 +123,7 @@ def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport
         np.sqrt(np.square(np.minimum(step_returns, 0.0)).mean())
     ) if len(step_returns) else 0.0
     final_greeks = observation.portfolio[PORTFOLIO_GREEK_SLICE]
-    return EpisodeReport(
+    report = EpisodeReport(
         seed=seed,
         steps=steps,
         total_reward=total_reward,
@@ -112,6 +148,98 @@ def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport
         final_gamma=float(final_greeks[1]),
         final_theta=float(final_greeks[2]),
         final_vega=float(final_greeks[3]),
+    )
+    return EpisodeTrace(
+        report=report,
+        timestamps=tuple(timestamps),
+        step_returns=tuple(float(value) for value in step_returns),
+    )
+
+
+def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport:
+    return run_episode_trace(env, policy, seed).report
+
+
+def paired_moving_block_bootstrap(
+    candidate_returns,
+    baseline_returns,
+    *,
+    samples: int = 2_000,
+    block_length: int | None = None,
+    confidence_level: float = 0.95,
+    min_observations: int = 20,
+    seed: int = 70_001,
+) -> BootstrapComparison:
+    """Estimate paired cumulative-log-return lift with circular time blocks."""
+    candidate = np.asarray(candidate_returns, dtype=np.float64)
+    baseline = np.asarray(baseline_returns, dtype=np.float64)
+    if candidate.ndim != 1 or baseline.ndim != 1:
+        raise ValueError("paired bootstrap returns must be one-dimensional")
+    if candidate.shape != baseline.shape:
+        raise ValueError("paired bootstrap paths must have equal length")
+    if samples < 100:
+        raise ValueError("bootstrap samples must be at least 100")
+    if not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must be between zero and one")
+    if min_observations < 2:
+        raise ValueError("min_observations must be at least two")
+    if block_length is not None and block_length < 1:
+        raise ValueError("block_length must be positive when provided")
+    if (
+        not np.isfinite(candidate).all()
+        or not np.isfinite(baseline).all()
+        or np.any(candidate <= -1)
+        or np.any(baseline <= -1)
+    ):
+        raise ValueError("paired bootstrap returns must be finite and greater than -1")
+
+    observations = len(candidate)
+    log_difference = np.log1p(candidate) - np.log1p(baseline)
+    point_estimate = float(log_difference.sum())
+    if not observations:
+        effective_block = 0
+    elif block_length is not None:
+        effective_block = min(block_length, observations)
+    else:
+        effective_block = max(
+            1,
+            min(observations, int(round(np.sqrt(observations)))),
+        )
+    common = {
+        "metric": "cumulative_log_return_difference",
+        "observations": observations,
+        "bootstrap_samples": samples,
+        "block_length": effective_block,
+        "confidence_level": confidence_level,
+        "point_estimate": point_estimate,
+    }
+    if observations < min_observations:
+        return BootstrapComparison(
+            status="insufficient_history",
+            ci_lower=None,
+            ci_upper=None,
+            bootstrap_fraction_positive=None,
+            supports_improvement=False,
+            **common,
+        )
+
+    blocks = int(np.ceil(observations / effective_block))
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, observations, size=(samples, blocks))
+    offsets = np.arange(effective_block)
+    indices = (starts[..., None] + offsets) % observations
+    indices = indices.reshape(samples, -1)[:, :observations]
+    estimates = log_difference[indices].sum(axis=1)
+    tail = (1 - confidence_level) / 2
+    lower, upper = np.quantile(estimates, (tail, 1 - tail))
+    fraction_positive = float(np.mean(estimates > 0))
+    return BootstrapComparison(
+        status="ok",
+        ci_lower=float(lower),
+        ci_upper=float(upper),
+        bootstrap_fraction_positive=fraction_positive,
+        supports_improvement=bool(lower > 0),
+        **common,
     )
 
 

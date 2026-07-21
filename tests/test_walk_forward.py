@@ -95,6 +95,17 @@ class WalkForwardTrainingTests(TestCase):
         )
         self.assertEqual(set(fold["cost_stress"]), {"base", "double_costs"})
         self.assertEqual(
+            set(fold["statistical_comparisons"]),
+            {"no_op", "first_feasible", "buy_first_then_delta_hedge"},
+        )
+        no_op_comparison = fold["statistical_comparisons"]["no_op"][0]
+        self.assertEqual(no_op_comparison["status"], "insufficient_history")
+        self.assertEqual(no_op_comparison["observations"], 1)
+        self.assertIsNone(no_op_comparison["ci_lower"])
+        self.assertEqual(no_op_comparison["first_arrival_timestamp"], "6")
+        self.assertEqual(no_op_comparison["last_arrival_timestamp"], "6")
+        self.assertFalse(no_op_comparison["supports_improvement"])
+        self.assertEqual(
             checkpoint_manifest["selection"]["scope"],
             "validation_research_demo",
         )
