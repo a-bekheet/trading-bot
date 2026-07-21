@@ -128,6 +128,21 @@ Run the research-demo actor-critic trainer against collected snapshots:
 train-demo --symbol AAPL --kind hybrid --episodes 25 --sequence-length 8
 ```
 
+Add `--encoder graph` to run masked message passing over the option surface
+before temporal encoding:
+
+```bash
+train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
+```
+
+The graph connects each valid contract to neighbors using cross-sectionally
+standardized IV, delta, log-moneyness, and DTE, symmetrizes those relationships,
+adds self edges, and applies two message-passing layers. Invalid/padded slots
+cannot send or receive messages. This dense implementation is deliberate: with
+the default 32 slots it avoids a separate graph-framework dependency and its
+conversion overhead. Use the default `--encoder flat` when inference latency
+matters more than relational capacity.
+
 It writes a PyTorch checkpoint and a readable `.pt.json` provenance sidecar
 containing the environment fingerprint, model/training configuration, and
 episode metrics. The trainer uses action masks, independent per-contract action

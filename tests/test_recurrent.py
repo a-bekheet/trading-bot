@@ -25,3 +25,40 @@ class RecurrentTests(TestCase):
             self.assertTrue(torch.isneginf(logits[:, 1, 1:]).all())
             action, _, _ = model.sample_action(sequence, mask)
             self.assertTrue((action[:, 1] == 0).all())
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_graph_encoder_masks_padded_contracts(self):
+        # Layout: market(2), two contracts with three features, portfolio(3), valid(2).
+        config = RecurrentConfig(
+            13,
+            2,
+            3,
+            hidden_size=8,
+            encoder="graph",
+            contract_feature_count=3,
+            graph_hidden_size=4,
+        )
+        model = build_recurrent_actor_critic(config)
+        sequence = torch.zeros(2, 3, 13)
+        sequence[:, :, -2] = 1  # only the first contract is valid
+        changed_padding = sequence.clone()
+        changed_padding[:, :, 5:8] = 1_000_000
+        mask = torch.ones(2, 2, 3, dtype=torch.bool)
+
+        first_logits, first_value, _ = model(sequence, mask)
+        second_logits, second_value, _ = model(changed_padding, mask)
+
+        torch.testing.assert_close(first_logits, second_logits)
+        torch.testing.assert_close(first_value, second_value)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_graph_encoder_validates_observation_layout(self):
+        config = RecurrentConfig(
+            12,
+            2,
+            3,
+            encoder="graph",
+            contract_feature_count=3,
+        )
+        with self.assertRaisesRegex(ValueError, "input_size does not match"):
+            build_recurrent_actor_critic(config)

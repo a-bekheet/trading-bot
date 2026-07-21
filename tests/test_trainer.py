@@ -32,6 +32,9 @@ class TrainerTests(TestCase):
             action_count=7,
             hidden_size=8,
             kind="hybrid",
+            encoder="graph",
+            contract_feature_count=observation.contracts.shape[1],
+            graph_hidden_size=8,
         )
         training = TrainingConfig(episodes=2, sequence_length=2, seed=11)
 
@@ -49,6 +52,7 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["schema_version"], CHECKPOINT_SCHEMA_VERSION)
         self.assertEqual(sidecar["mode"], "research_demo")
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
+        self.assertEqual(sidecar["model"]["encoder"], "graph")
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
             env.manifest.fingerprint,

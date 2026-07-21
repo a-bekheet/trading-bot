@@ -26,8 +26,9 @@ does not place live trades.
   snapshot loader, fixed-slot environment, deterministic baselines, and
   evaluation reports. `features.py` computes causal features and `sequence.py`
   builds chronological windows. `recurrent.py` is an optional PyTorch GRU,
-  LSTM, or hybrid actor-critic. `trainer.py` owns research-demo optimization
-  and checkpoint provenance. Both stay outside ordinary collector imports.
+  LSTM, or hybrid actor-critic with flat or graph contract encoding. `trainer.py`
+  owns research-demo optimization and checkpoint provenance. Both stay outside
+  ordinary collector imports.
 - `tests/`: offline tests; market-data calls must be mocked here.
 - `data/`: generated append-only CSVs, one per ticker; intentionally git-ignored.
 
@@ -130,6 +131,11 @@ windows are chronological and unpadded. GRU/LSTM/hybrid code is optional
 the environment fingerprint, full model and training configuration, metrics,
 and the `research_demo` label.
 
+The graph encoder uses only valid option slots, symmetric nearest-neighbor edges,
+and self edges. Padded contracts must neither send nor receive messages. Keep the
+dense implementation while the slot count is small; require profiling evidence
+before adding a graph-framework dependency.
+
 ## Commands
 
 ```bash
@@ -142,7 +148,7 @@ collect-options --once
 collect-options
 streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
-train-demo --symbol AAPL --kind hybrid --episodes 25
+train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 ```
 
 The collector defaults to one cycle every 900 seconds with a one-second delay

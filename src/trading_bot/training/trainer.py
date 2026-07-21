@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from trading_bot.training.env import OptionsEnv
+from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_actor_critic
 from trading_bot.training.sequence import observation_vector
 
@@ -202,6 +202,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--symbol", default="AAPL")
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
+    parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=128)
@@ -228,6 +229,12 @@ def main() -> None:
         action_count=env.action_shape[1],
         hidden_size=args.hidden_size,
         kind=args.kind,
+        encoder=args.encoder,
+        contract_feature_count=observation.contracts.shape[1],
+        graph_relation_indices=tuple(
+            CONTRACT_FEATURES.index(name)
+            for name in ("impliedVolatility", "delta", "logMoneyness", "dteDays")
+        ),
     )
     training_config = TrainingConfig(
         episodes=args.episodes,
@@ -236,7 +243,9 @@ def main() -> None:
         max_steps=args.max_steps,
     )
     model, metrics = train_actor_critic(env, recurrent_config, training_config)
-    output = args.output or Path("data/models") / f"{env.dataset.symbol}-{args.kind}.pt"
+    output = args.output or Path("data/models") / (
+        f"{env.dataset.symbol}-{args.encoder}-{args.kind}.pt"
+    )
     save_checkpoint(output, model, env, recurrent_config, training_config, metrics)
     print(json.dumps({"checkpoint": str(output), "last_episode": metrics[-1]}, sort_keys=True))
 
