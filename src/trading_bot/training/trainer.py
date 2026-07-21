@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v9"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v10"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,8 @@ class TrainingConfig:
     max_steps: int | None = 128
     random_start: bool = True
     evaluation_interval: int = 5
+    selection_patience: int | None = 3
+    selection_min_delta: float = 0.0
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
@@ -59,6 +62,13 @@ class TrainingConfig:
             raise ValueError("random_start must be a boolean")
         if self.evaluation_interval < 1:
             raise ValueError("evaluation_interval must be positive")
+        if self.selection_patience is not None and self.selection_patience < 1:
+            raise ValueError("selection_patience must be positive when provided")
+        if (
+            not math.isfinite(self.selection_min_delta)
+            or self.selection_min_delta < 0
+        ):
+            raise ValueError("selection_min_delta must be finite and non-negative")
 
 
 def _torch():
@@ -278,6 +288,7 @@ def train_actor_critic(
     best_score = float("-inf")
     best_episode = 0
     best_state = None
+    evaluations_without_improvement = 0
 
     for episode in range(config.episodes):
         rollout_start, rollout_step_limit = _sample_rollout_bounds(
@@ -505,6 +516,8 @@ def train_actor_critic(
         )
         means = np.asarray(update_metrics, dtype=float).mean(axis=0)
         evaluation_reward = None
+        selection_improved = None
+        stop_for_selection_patience = False
         should_evaluate = (
             (episode + 1) % config.evaluation_interval == 0
             or episode == config.episodes - 1
@@ -517,13 +530,26 @@ def train_actor_critic(
                 seeds=(config.seed + 10_000 + episode,),
             )[0]
             evaluation_reward = float(report.total_reward)
-            if evaluation_reward > best_score:
+            if not math.isfinite(evaluation_reward):
+                raise ValueError("selection reward must be finite")
+            selection_improved = (
+                evaluation_reward > best_score + config.selection_min_delta
+            )
+            if selection_improved:
                 best_score = evaluation_reward
                 best_episode = episode
                 best_state = {
                     name: value.detach().cpu().clone()
                     for name, value in model.state_dict().items()
                 }
+                evaluations_without_improvement = 0
+            else:
+                evaluations_without_improvement += 1
+            stop_for_selection_patience = (
+                config.selection_patience is not None
+                and evaluations_without_improvement
+                >= config.selection_patience
+            )
         metrics.append(
             {
                 "episode": episode,
@@ -533,6 +559,15 @@ def train_actor_critic(
                 "total_reward": float(sum(rewards)),
                 "evaluation_total_reward": evaluation_reward,
                 "evaluation_scope": selection_scope,
+                "selection_improved": (
+                    int(selection_improved)
+                    if selection_improved is not None
+                    else None
+                ),
+                "selection_evaluations_without_improvement": (
+                    evaluations_without_improvement
+                ),
+                "early_stop_selection": int(stop_for_selection_patience),
                 "loss": float(means[0]),
                 "policy_loss": float(means[1]),
                 "value_loss": float(means[2]),
@@ -558,6 +593,8 @@ def train_actor_critic(
                 ),
             }
         )
+        if stop_for_selection_patience:
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -601,6 +638,15 @@ def checkpoint_manifest(
             ),
             "metric": "evaluation_total_reward",
             "episode": selected_metric["episode"],
+            "early_stopping": {
+                "enabled": training_config.selection_patience is not None,
+                "patience": training_config.selection_patience,
+                "min_delta": training_config.selection_min_delta,
+                "completed_episodes": len(metrics),
+                "stopped_early": bool(
+                    metrics[-1].get("early_stop_selection", 0)
+                ),
+            },
         },
         "environment": env.manifest.to_dict(),
         "environment_fingerprint": env.manifest.fingerprint,
@@ -686,6 +732,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-kl", type=float, default=0.03)
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument("--evaluation-interval", type=int, default=5)
+    parser.add_argument(
+        "--selection-patience",
+        type=int,
+        default=3,
+        help="evaluations without improvement before stopping; 0 disables",
+    )
+    parser.add_argument("--selection-min-delta", type=float, default=0.0)
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--max-abs-delta", type=float)
     parser.add_argument("--max-abs-gamma", type=float)
@@ -742,6 +795,10 @@ def main() -> None:
         target_kl=args.target_kl,
         entropy_coefficient=args.entropy_coefficient,
         evaluation_interval=args.evaluation_interval,
+        selection_patience=(
+            None if args.selection_patience == 0 else args.selection_patience
+        ),
+        selection_min_delta=args.selection_min_delta,
     )
     model, metrics = train_actor_critic(env, recurrent_config, training_config)
     output = args.output or Path("data/models") / (

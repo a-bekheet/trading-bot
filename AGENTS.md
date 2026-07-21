@@ -207,6 +207,11 @@ Training rollouts default to seeded, uniformly sampled windows of at most 128
 transitions inside the training dataset. Persist each start/end index in episode
 metrics. Random starts may never cross the supplied partition, affect validation
 or test evaluation, or replace the deterministic full-partition selection run.
+Selection patience counts evaluated checkpoints, not episodes, and may use only
+the configured in-sample or validation selection environment. Persist whether
+each run stopped early, its completed episode count, patience, and minimum
+improvement. `None` disables patience; test results may never reset it or resume
+training.
 `train-demo` model selection is deterministic but in-sample and must remain
 labeled `in_sample_research_demo`. When `selection_env` is supplied, selection
 must use only that validation environment and be labeled
@@ -258,6 +263,9 @@ after selection; it must never affect features, hyperparameters, early stopping,
 or checkpoint choice. Persist all candidate configs, validation scores,
 parameter counts, all three dataset fingerprints, and exact split indices. An
 insufficient dataset is a hard failure, not permission to shrink partitions.
+Candidate episode budgets may end early through the same validation-only
+selection patience, and the comparison artifact must expose completed episodes
+so compute differences are auditable.
 
 ## Commands
 

@@ -37,7 +37,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v8"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v9"
 
 
 @dataclass(frozen=True)
@@ -249,6 +249,8 @@ def run_walk_forward_training(
                     selected["evaluation_total_reward"]
                 ),
                 "selection_scope": selected["evaluation_scope"],
+                "episodes_completed": len(metrics),
+                "stopped_early": bool(metrics[-1]["early_stop_selection"]),
             })
 
         winning_run = min(
@@ -264,6 +266,8 @@ def run_walk_forward_training(
                 "model_id": run["model_id"],
                 "model": asdict(run["model_spec"]),
                 "parameter_count": run["parameter_count"],
+                "episodes_completed": run["episodes_completed"],
+                "stopped_early": run["stopped_early"],
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -490,6 +494,13 @@ def _parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument("--evaluation-interval", type=int, default=5)
+    parser.add_argument(
+        "--selection-patience",
+        type=int,
+        default=3,
+        help="evaluations without improvement before stopping; 0 disables",
+    )
+    parser.add_argument("--selection-min-delta", type=float, default=0.0)
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument("--max-quantity", type=int, default=3)
@@ -555,6 +566,12 @@ def main() -> None:
                 max_steps=args.max_steps,
                 random_start=args.random_start,
                 evaluation_interval=args.evaluation_interval,
+                selection_patience=(
+                    None
+                    if args.selection_patience == 0
+                    else args.selection_patience
+                ),
+                selection_min_delta=args.selection_min_delta,
                 entropy_coefficient=args.entropy_coefficient,
                 seed=args.seed,
             ),

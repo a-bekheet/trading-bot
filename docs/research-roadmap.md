@@ -144,6 +144,10 @@ the recurrent layer handles time. Next experiments should compare:
 The flat/graph and recurrent-family tournament plumbing is implemented. The
 next valid experiment needs sufficiently long point-in-time history and should
 match candidates on both parameter count and measured inference latency.
+Validation-patience stopping now avoids continuing stalled candidates through
+their entire requested budget and records completed episodes per architecture.
+This is a compute optimization, not evidence that shorter training improves
+returns; serious comparisons should also report equal-budget results.
 
 Do not add a graph framework while 32 dense slots remain faster and simpler.
 Do not train a VAE across a random split of surface days; that would leak future

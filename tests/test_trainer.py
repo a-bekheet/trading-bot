@@ -2,7 +2,9 @@ import json
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import TestCase, skipUnless
+from unittest.mock import patch
 
 import numpy as np
 
@@ -95,6 +97,16 @@ class TrainerTests(TestCase):
             },
         )
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
+        self.assertEqual(
+            sidecar["selection"]["early_stopping"],
+            {
+                "enabled": True,
+                "patience": 3,
+                "min_delta": 0.0,
+                "completed_episodes": 2,
+                "stopped_early": False,
+            },
+        )
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
         self.assertEqual(sidecar["model"]["encoder"], "graph")
         self.assertEqual(sidecar["model"]["portfolio_feature_count"], 8)
@@ -230,6 +242,50 @@ class TrainerTests(TestCase):
         )
 
         self.assertEqual(metrics[0]["evaluation_scope"], "validation_research_demo")
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_selection_patience_stops_stalled_training(self):
+        env = OptionsEnv(demo_dataset(), slot_count=2)
+        observation, _ = env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=8,
+        )
+        config = TrainingConfig(
+            episodes=10,
+            sequence_length=2,
+            ppo_epochs=1,
+            evaluation_interval=1,
+            selection_patience=2,
+        )
+
+        fixed_report = SimpleNamespace(total_reward=1.0)
+        with patch(
+            "trading_bot.training.trainer.evaluate_recurrent_policy",
+            return_value=[fixed_report],
+        ):
+            _, metrics = train_actor_critic(env, recurrent, config)
+
+        self.assertEqual(len(metrics), 3)
+        self.assertEqual(
+            [item["selection_improved"] for item in metrics],
+            [1, 0, 0],
+        )
+        self.assertEqual(
+            [item["selection_evaluations_without_improvement"] for item in metrics],
+            [0, 1, 2],
+        )
+        self.assertEqual(metrics[-1]["early_stop_selection"], 1)
+        self.assertEqual(metrics[0]["selected_checkpoint"], 1)
+
+    def test_rejects_invalid_selection_stopping_configuration(self):
+        with self.assertRaisesRegex(ValueError, "selection_patience"):
+            TrainingConfig(selection_patience=0)
+        with self.assertRaisesRegex(ValueError, "selection_min_delta"):
+            TrainingConfig(selection_min_delta=float("nan"))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_checkpoint_with_incompatible_feature_transform(self):

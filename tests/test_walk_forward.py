@@ -186,6 +186,8 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(len(summary["candidate_models"]), 3)
         self.assertEqual(len(candidate_results), 3)
         self.assertEqual(len(checkpoint_files), 1)
+        self.assertTrue(all(result["episodes_completed"] == 1 for result in candidate_results))
+        self.assertTrue(all(not result["stopped_early"] for result in candidate_results))
         self.assertEqual(
             selection["tie_break"],
             ["parameter_count", "model_id"],

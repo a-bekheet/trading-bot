@@ -198,7 +198,12 @@ benchmark, the bounded default processed 128 rather than 499 transitions and
 reduced an otherwise default one-episode train-and-selection run from about
 5.67 seconds to 3.49 seconds (1.63x). Validation selection defaults to every
 five episodes rather than every rollout; use `--evaluation-interval` to change
-that cadence. These are machine-specific throughput choices, not alpha results.
+that cadence. Training stops after three evaluated checkpoints fail to improve
+the selection reward, which avoids spending the full episode budget on stalled
+candidates. `--selection-patience 0` disables this behavior, while
+`--selection-min-delta` requires a meaningful reward increase before resetting
+patience. Each metric row and checkpoint manifest records the stopping state.
+These are machine-specific throughput choices, not alpha results.
 
 Add `--encoder graph` to run masked message passing over the option surface
 before temporal encoding:
@@ -310,8 +315,9 @@ highest validation reward wins, with fewer trainable parameters and then a
 stable model ID breaking ties. Only that winner is instantiated against the
 held-out test range and only its checkpoint is saved. The summary retains every
 candidate's configuration, parameter count, and validation score, but never a
-losing-candidate test result. Omit `--candidate` to preserve the single-model
-`--encoder`/`--kind` workflow.
+losing-candidate test result. It also records episodes completed and whether
+validation patience stopped each candidate before its requested budget. Omit
+`--candidate` to preserve the single-model `--encoder`/`--kind` workflow.
 
 Each fold trains only on its training range and touches the test range only
 after both architecture and checkpoint selection. It writes a safe checkpoint
