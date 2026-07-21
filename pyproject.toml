@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trading-bot"
-version = "0.6.0"
+version = "0.7.0"
 description = "A starting point for an options trading bot"
 requires-python = ">=3.11"
 dependencies = [
@@ -21,6 +21,7 @@ train-demo = "trading_bot.training.trainer:main"
 
 [project.optional-dependencies]
 ml = ["torch>=2.2"]
+dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

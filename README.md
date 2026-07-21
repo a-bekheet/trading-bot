@@ -134,6 +134,15 @@ put-call parity residual. Fixed policy slots are stratified across expiration
 and option type before taking deeper strikes. Chronological windows are
 available through `training.sequence`.
 
+Before entering a policy, production-layout observations use the versioned
+`dimensionless.v1` transform. Prices and strikes are divided by spot, contract
+Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
+portfolio values become ratios, DTE is in years, and heavy-tailed age/liquidity
+fields are compressed. Raw volume and
+open interest are omitted because their causal log features contain the useful
+ordering at a much better numerical scale. The transform is fitted on no data,
+so it cannot leak future distribution statistics into a training window.
+
 Optional recurrent actor-critic models support GRU, LSTM, and parallel hybrid
 GRU+LSTM encoders:
 
@@ -206,6 +215,11 @@ model, manifest = load_checkpoint(Path("data/models/AAPL-graph-hybrid.pt"))
 The ML extra is optional so collector startup latency and ordinary paper use do
 not import PyTorch.
 
+The evidence and sequencing behind future alpha research—including
+walk-forward validation, benchmark hedges, realized-volatility state, GNNs,
+and volatility-surface compression—are tracked in
+[`docs/research-roadmap.md`](docs/research-roadmap.md).
+
 ## Greek conventions
 
 - Model: Black-Scholes-Merton using Yahoo's implied volatility.
@@ -222,7 +236,7 @@ them differ from broker-provided Greeks.
 ## Test
 
 ```bash
-python -m unittest discover -s tests -v
+uv run --extra dev python -m pytest -q
 ```
 
 Yahoo Finance data is suitable for research and prototyping, not live order

@@ -67,7 +67,8 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
         self.assertEqual(sidecar["model"]["encoder"], "graph")
         self.assertEqual(sidecar["model"]["portfolio_feature_count"], 7)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v2")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v3")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v1")
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
             env.manifest.fingerprint,
@@ -91,6 +92,22 @@ class TrainerTests(TestCase):
         recurrent = RecurrentConfig(input_size=1, slot_count=2, action_count=7)
         with self.assertRaisesRegex(ValueError, "environment emits"):
             train_actor_critic(env, recurrent, TrainingConfig(episodes=1))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_rejects_checkpoint_with_incompatible_feature_transform(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "old.pt"
+            torch.save({
+                "state_dict": {},
+                "manifest": {
+                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                    "feature_vector_schema": "raw.v0",
+                    "model": {},
+                },
+            }, path)
+
+            with self.assertRaisesRegex(ValueError, "feature-vector schema"):
+                load_checkpoint(path)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_generalized_advantage_matches_terminal_return_vector(self):

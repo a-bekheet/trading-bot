@@ -13,7 +13,7 @@ from typing import Any
 class EnvManifest:
     """All configuration needed to reproduce an environment instance."""
 
-    schema_version: str = "research-demo.v2"
+    schema_version: str = "research-demo.v3"
     mode: str = "research_demo"
     data_source: str = "local-csv-yahoo-snapshots"
     data_hash: str = ""

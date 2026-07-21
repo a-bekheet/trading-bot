@@ -14,10 +14,11 @@ import numpy as np
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.evaluation import EpisodeReport, run_episode
 from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_actor_critic
+from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v2"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v3"
 
 
 @dataclass(frozen=True)
@@ -161,6 +162,8 @@ def train_actor_critic(
         )
     if (recurrent_config.slot_count, recurrent_config.action_count) != env.action_shape:
         raise ValueError("model action dimensions do not match the environment")
+    if recurrent_config.feature_vector_schema != FEATURE_VECTOR_SCHEMA_VERSION:
+        raise ValueError("model feature-vector schema does not match the trainer")
 
     model = build_recurrent_actor_critic(recurrent_config)
     # PPO likelihood ratios require the same network behavior during rollout
@@ -374,6 +377,7 @@ def checkpoint_manifest(
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "mode": "research_demo",
         "algorithm": "factorized_ppo",
+        "feature_vector_schema": FEATURE_VECTOR_SCHEMA_VERSION,
         "selection": {
             "scope": "in_sample_research_demo",
             "metric": "evaluation_total_reward",
@@ -414,7 +418,12 @@ def load_checkpoint(path: Path):
     manifest = checkpoint.get("manifest", {})
     if manifest.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("unsupported or missing checkpoint schema")
-    model = build_recurrent_actor_critic(RecurrentConfig(**manifest["model"]))
+    if manifest.get("feature_vector_schema") != FEATURE_VECTOR_SCHEMA_VERSION:
+        raise ValueError("checkpoint feature-vector schema is incompatible")
+    recurrent_config = RecurrentConfig(**manifest["model"])
+    if recurrent_config.feature_vector_schema != FEATURE_VECTOR_SCHEMA_VERSION:
+        raise ValueError("model feature-vector schema is incompatible")
+    model = build_recurrent_actor_critic(recurrent_config)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
     return model, manifest

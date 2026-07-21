@@ -18,7 +18,7 @@ from trading_bot.training.schemas import Action, Observation
 
 CONTRACT_FEATURES = (
     "strike", "lastPrice", "bid", "ask", "impliedVolatility", "delta", "gamma",
-    "theta", "vega", "volume", "openInterest", *ENGINEERED_FEATURES,
+    "theta", "vega", *ENGINEERED_FEATURES,
 )
 GREEK_NAMES = ("delta", "gamma", "theta", "vega")
 PORTFOLIO_FEATURES = (

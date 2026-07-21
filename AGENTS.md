@@ -152,6 +152,16 @@ windows are chronological and unpadded. GRU/LSTM/hybrid code is optional
 the environment fingerprint, full model and training configuration, metrics,
 and the `research_demo` label.
 
+`sequence.observation_vector` is the versioned policy boundary. Under
+`dimensionless.v1`, price-like fields are relative to spot, contract Gamma is
+the Delta change for a 10% spot move, portfolio and Greek exposures are relative
+to NAV/deployed capital, DTE is expressed in years, and heavy-tailed fields are
+compressed and clipped. Raw volume and open interest
+must not be reintroduced beside their log features without ablation evidence.
+Any transform change requires a new feature-vector schema, scale-invariance and
+finite-value tests, and a checkpoint-schema bump; old weights must never be
+silently loaded against a changed feature layout.
+
 The trainer uses factorized per-slot PPO ratios, GAE, policy/value clipping,
 minibatches, target-KL stopping, entropy regularization, and gradient clipping.
 Model selection is deterministic but currently in-sample and must remain labeled
@@ -169,7 +179,7 @@ before adding a graph-framework dependency.
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-python -m unittest discover -s tests -v
+uv run --extra dev python -m pytest -q
 python -c 'from pathlib import Path; from trading_bot.training import OptionsEnv; print(OptionsEnv.from_directory(Path("data"), "AAPL").manifest.fingerprint)'
 collect-options --once --expirations 3
 collect-options
@@ -207,12 +217,14 @@ and a Python fallback; use C++ only when required by an existing library.
 ## Known limitations and next decisions
 
 - The top-50 universe is a dated snapshot and must be refreshed deliberately.
-- Only the nearest listed expiration is collected.
+- Collection defaults to the nearest three listed expirations; this is still
+  sparse relative to a licensed full-surface historical feed.
 - `^IRX / 100` is a quoted 13-week bill-yield approximation, not a
   maturity-matched zero curve.
 - Dividend yield falls back to zero when Yahoo omits it.
 - CSV storage is appropriate for this stage; reassess Parquet or a database only
   when measured data volume or query needs justify it.
 - The paper ledger uses SQLite because account updates require transactions.
-- Define the broker, paper-trading environment, model target, and backtest rules
-  before adding execution or deep-learning workflows.
+- The current local AAPL sample is sufficient for integration smoke tests, not
+  statistical training claims. Follow `docs/research-roadmap.md` gates before
+  treating a model improvement as alpha.

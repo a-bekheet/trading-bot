@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
+
 
 @dataclass(frozen=True)
 class RecurrentConfig:
@@ -22,6 +24,7 @@ class RecurrentConfig:
     contract_feature_count: int | None = None
     market_feature_count: int = 2
     portfolio_feature_count: int = 3
+    feature_vector_schema: str = FEATURE_VECTOR_SCHEMA_VERSION
     graph_hidden_size: int = 32
     graph_layers: int = 2
     graph_neighbors: int = 3

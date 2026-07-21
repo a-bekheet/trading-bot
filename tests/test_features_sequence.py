@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 
 from trading_bot.training.features import ENGINEERED_FEATURES, engineer_snapshot
-from trading_bot.training.schemas import Observation
+from trading_bot.training.env import CONTRACT_FEATURES
+from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION, Observation
 from trading_bot.training.sequence import build_windows, observation_vector
 
 
@@ -81,3 +82,56 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(front["parityResidual"].nunique(), 1)
         self.assertTrue((engineered["extrinsicValuePct"] >= 0).all())
         self.assertTrue(np.isfinite(engineered[list(ENGINEERED_FEATURES)]).all().all())
+
+    def test_dimensionless_vector_is_bounded_and_price_scale_invariant(self):
+        def make_observation(scale: float) -> Observation:
+            contracts = np.zeros((1, len(CONTRACT_FEATURES)), dtype=float)
+            values = {
+                "strike": 100 * scale,
+                "lastPrice": 2 * scale,
+                "bid": 1.9 * scale,
+                "ask": 2.1 * scale,
+                "impliedVolatility": 0.2,
+                "delta": 0.5,
+                "gamma": 0.01 / scale,
+                "theta": -0.1 * scale,
+                "vega": 0.2 * scale,
+                "midPrice": 2 * scale,
+                "spread": 0.2 * scale,
+                "dteDays": 30,
+                "volumeLog": 5,
+                "openInterestLog": 6,
+                "quoteAgeSeconds": 60,
+            }
+            for name, value in values.items():
+                contracts[0, CONTRACT_FEATURES.index(name)] = value
+            return Observation(
+                "now",
+                np.array([100 * scale, 0.04]),
+                contracts,
+                np.array([
+                    80_000 * scale,
+                    20_000 * scale,
+                    100_000 * scale,
+                    50,
+                    1 / scale,
+                    -10 * scale,
+                    20 * scale,
+                ]),
+                np.ones(1, dtype=bool),
+                np.ones((1, 3), dtype=bool),
+                ("C1",),
+            )
+
+        first = observation_vector(make_observation(1.0))
+        second = observation_vector(make_observation(2.0))
+        contract_end = 2 + len(CONTRACT_FEATURES)
+
+        np.testing.assert_allclose(first[:contract_end], second[:contract_end])
+        np.testing.assert_allclose(first[contract_end:contract_end + 7], second[contract_end:contract_end + 7])
+        self.assertLessEqual(float(np.abs(first).max()), 10.0)
+        self.assertTrue(np.isfinite(first).all())
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v1")
+        self.assertNotIn("volume", CONTRACT_FEATURES)
+        self.assertNotIn("openInterest", CONTRACT_FEATURES)
+        self.assertIn("volumeLog", CONTRACT_FEATURES)
