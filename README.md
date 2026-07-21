@@ -107,7 +107,8 @@ Snapshot loading adds causal engineered features such as relative spread,
 log-moneyness, DTE, quote age, liquidity logs, underlying return, and IV change.
 Chronological windows are available through `training.sequence`.
 
-Optional recurrent actor-critic models support both GRU and LSTM units:
+Optional recurrent actor-critic models support GRU, LSTM, and parallel hybrid
+GRU+LSTM encoders:
 
 ```bash
 python -m pip install -e '.[ml]'
@@ -120,6 +121,19 @@ model = build_recurrent_actor_critic(
     RecurrentConfig(input_size=709, slot_count=32, action_count=7, kind="gru")
 )
 ```
+
+Run the research-demo actor-critic trainer against collected snapshots:
+
+```bash
+train-demo --symbol AAPL --kind hybrid --episodes 25 --sequence-length 8
+```
+
+It writes a PyTorch checkpoint and a readable `.pt.json` provenance sidecar
+containing the environment fingerprint, model/training configuration, and
+episode metrics. The trainer uses action masks, independent per-contract action
+distributions, discounted actor-critic returns, entropy regularization, and
+gradient clipping. Results remain integration evidence, not a backtest or an
+alpha claim.
 
 The ML extra is optional so collector startup latency and ordinary paper use do
 not import PyTorch.

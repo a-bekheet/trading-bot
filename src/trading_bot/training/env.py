@@ -102,8 +102,10 @@ class OptionsEnv:
         if orders.shape != (self.slot_count,):
             raise ValueError(f"action must have shape {(self.slot_count,)}")
 
-        current_observation, pre_info = self._observation()
-        pre_nav = self._nav(self._current_frame())
+        current_frame = self._current_frame()
+        current_slots = self._slots(current_frame)
+        current_observation, pre_info = self._observation(current_frame, current_slots)
+        pre_nav = self._nav(current_frame)
         invalid_actions = 0
         executions: list[dict[str, Any]] = []
         fees = 0.0
@@ -116,7 +118,7 @@ class OptionsEnv:
             if not current_observation.action_mask[slot, encoded]:
                 invalid_actions += 1
                 continue
-            contract = self._slots(self._current_frame())[slot]
+            contract = current_slots[slot]
             quantity = encoded if encoded <= self.max_quantity else encoded - self.max_quantity
             side = "buy" if encoded <= self.max_quantity else "sell"
             price = float(contract["ask"] if side == "buy" else contract["bid"])
@@ -166,9 +168,13 @@ class OptionsEnv:
         selected = pd.concat((held, remainder.head(max(0, self.slot_count - len(held)))))
         return [row for _, row in selected.head(self.slot_count).iterrows()]
 
-    def _observation(self) -> tuple[Observation, dict[str, Any]]:
-        frame = self._current_frame()
-        slots = self._slots(frame)
+    def _observation(
+        self,
+        frame: pd.DataFrame | None = None,
+        slots: list[pd.Series] | None = None,
+    ) -> tuple[Observation, dict[str, Any]]:
+        frame = self._current_frame() if frame is None else frame
+        slots = self._slots(frame) if slots is None else slots
         contracts = np.zeros((self.slot_count, len(CONTRACT_FEATURES)), dtype=np.float64)
         valid = np.zeros(self.slot_count, dtype=bool)
         ids: list[str | None] = [None] * self.slot_count

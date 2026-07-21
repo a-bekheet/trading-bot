@@ -14,14 +14,17 @@ def demo_dataset() -> SnapshotDataset:
         ("2026-07-21T14:00:00Z", 1.0, 1.2),
         ("2026-07-21T14:01:00Z", 1.5, 1.7),
     ):
-        rows.append(
-            {
+        for contract_symbol, strike in (
+            ("AAPL260821C00330000", 330.0),
+            ("AAPL260821C00335000", 335.0),
+        ):
+            rows.append({
                 "collectedAt": timestamp,
-                "contractSymbol": "AAPL260821C00330000",
+                "contractSymbol": contract_symbol,
                 "symbol": "AAPL",
                 "expiration": "2026-08-21",
                 "optionType": "call",
-                "strike": 330.0,
+                "strike": strike,
                 "bid": bid,
                 "ask": ask,
                 "lastPrice": bid,
@@ -35,8 +38,7 @@ def demo_dataset() -> SnapshotDataset:
                 "volume": 100,
                 "openInterest": 200,
                 "greekModel": "black-scholes-merton",
-            }
-        )
+            })
     frame = pd.DataFrame(rows)
     return SnapshotDataset(
         tuple(
@@ -88,3 +90,20 @@ class OptionsEnvTests(TestCase):
 
         self.assertEqual(info["invalid_action_count"], 1)
         self.assertGreaterEqual(env._cash, 0)
+
+    def test_step_ranks_contract_slots_only_once_per_snapshot(self):
+        env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=1_000)
+        env.reset()
+        calls = 0
+        original = env._slots
+
+        def counted_slots(frame):
+            nonlocal calls
+            calls += 1
+            return original(frame)
+
+        env._slots = counted_slots
+        env.step(np.array([1, 1]))
+
+        # One ranking for order execution and one for the next observation.
+        self.assertEqual(calls, 2)
