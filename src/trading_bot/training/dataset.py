@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_bot.training.features import engineer_snapshot
+
 
 REQUIRED_COLUMNS = {
     "collectedAt", "contractSymbol", "symbol", "expiration", "optionType",
@@ -44,10 +46,13 @@ class SnapshotDataset:
         frame = frame.copy()
         frame["collectedAt"] = pd.to_datetime(frame["collectedAt"], utc=True)
         frame = frame.sort_values(["collectedAt", "optionType", "expiration", "strike", "contractSymbol"])
-        snapshots = tuple(
-            Snapshot(timestamp=timestamp.isoformat(), frame=group.reset_index(drop=True))
-            for timestamp, group in frame.groupby("collectedAt", sort=True)
-        )
+        snapshots_list = []
+        previous = None
+        for timestamp, group in frame.groupby("collectedAt", sort=True):
+            engineered = engineer_snapshot(group.reset_index(drop=True), previous)
+            snapshots_list.append(Snapshot(timestamp=timestamp.isoformat(), frame=engineered))
+            previous = group
+        snapshots = tuple(snapshots_list)
         return cls(snapshots, symbol.upper())
 
     def __len__(self) -> int:

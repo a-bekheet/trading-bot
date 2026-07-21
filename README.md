@@ -103,6 +103,27 @@ marked `research_demo`; it is not a historical backtest or a claim of trading
 performance. A licensed point-in-time all-expiry dataset is required before a
 historical RL environment is enabled.
 
+Snapshot loading adds causal engineered features such as relative spread,
+log-moneyness, DTE, quote age, liquidity logs, underlying return, and IV change.
+Chronological windows are available through `training.sequence`.
+
+Optional recurrent actor-critic models support both GRU and LSTM units:
+
+```bash
+python -m pip install -e '.[ml]'
+```
+
+```python
+from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_actor_critic
+
+model = build_recurrent_actor_critic(
+    RecurrentConfig(input_size=709, slot_count=32, action_count=7, kind="gru")
+)
+```
+
+The ML extra is optional so collector startup latency and ordinary paper use do
+not import PyTorch.
+
 ## Greek conventions
 
 - Model: Black-Scholes-Merton using Yahoo's implied volatility.

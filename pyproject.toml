@@ -18,6 +18,9 @@ dependencies = [
 option-chain = "trading_bot.market_data.option_chain:main"
 collect-options = "trading_bot.market_data.collector:main"
 
+[project.optional-dependencies]
+ml = ["torch>=2.2"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

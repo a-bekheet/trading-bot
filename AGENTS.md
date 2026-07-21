@@ -24,7 +24,9 @@ does not place live trades.
 - `src/trading_bot/interface/`: the Streamlit data explorer and its data loader.
 - `src/trading_bot/training/`: versioned research-demo schemas, manifests,
   snapshot loader, fixed-slot environment, deterministic baselines, and
-  evaluation reports.
+  evaluation reports. `features.py` computes causal features and `sequence.py`
+  builds chronological windows. `recurrent.py` is an optional PyTorch GRU/LSTM
+  actor-critic.
 - `tests/`: offline tests; market-data calls must be mocked here.
 - `data/`: generated append-only CSVs, one per ticker; intentionally git-ignored.
 
@@ -119,6 +121,11 @@ The current environment is a deterministic accounting and API scaffold, not a
 historical simulator. Do not add a `historical` mode until the data manifest
 contains point-in-time all-expiry quotes, depth/quality fields, lifecycle data,
 and an explicit source/license.
+
+Engineered features must be causal: current rows may use current cross-sectional
+values and the immediately prior snapshot, but never future rows. Sequence
+windows are chronological and unpadded. GRU/LSTM code is optional (`.[ml]`) and
+must preserve a no-PyTorch collector path.
 
 ## Commands
 

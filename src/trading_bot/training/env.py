@@ -11,13 +11,14 @@ import numpy as np
 import pandas as pd
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
+from trading_bot.training.features import ENGINEERED_FEATURES
 from trading_bot.training.manifest import EnvManifest
 from trading_bot.training.schemas import Action, Observation
 
 
 CONTRACT_FEATURES = (
     "strike", "lastPrice", "bid", "ask", "impliedVolatility", "delta", "gamma",
-    "theta", "vega", "volume", "openInterest",
+    "theta", "vega", "volume", "openInterest", *ENGINEERED_FEATURES,
 )
 
 
