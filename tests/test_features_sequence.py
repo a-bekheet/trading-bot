@@ -1,10 +1,17 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 import numpy as np
 import pandas as pd
 
-from trading_bot.training.features import ENGINEERED_FEATURES, engineer_snapshot
-from trading_bot.training.env import CONTRACT_FEATURES
+from trading_bot.training.dataset import SnapshotDataset
+from trading_bot.training.features import (
+    ENGINEERED_FEATURES,
+    MARKET_ENGINEERED_FEATURES,
+    engineer_snapshot,
+)
+from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES, OptionsEnv
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION, Observation
 from trading_bot.training.sequence import build_windows, observation_vector
 
@@ -131,7 +138,53 @@ class FeatureSequenceTests(TestCase):
         np.testing.assert_allclose(first[contract_end:contract_end + 7], second[contract_end:contract_end + 7])
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v1")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v2")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
+
+    def test_realized_volatility_is_backward_only_with_explicit_coverage(self):
+        rows = []
+        for index in range(18):
+            rows.append({
+                "collectedAt": pd.Timestamp("2026-07-21T14:00:00Z")
+                + pd.Timedelta(minutes=15 * index),
+                "contractSymbol": "TEST-C",
+                "symbol": "TEST",
+                "expiration": "2026-09-18",
+                "optionType": "call",
+                "strike": 100,
+                "bid": 1.0,
+                "ask": 1.2,
+                "lastPrice": 1.1,
+                "impliedVolatility": 0.2,
+                "underlyingPrice": 100 * 1.001**index,
+                "riskFreeRate": 0.04,
+                "greekModel": "black-scholes-merton",
+            })
+        rows[-1]["underlyingPrice"] = 1_000  # future shock
+
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            pd.DataFrame(rows).to_csv(data_dir / "FULL.csv", index=False)
+            pd.DataFrame(rows[:-1]).to_csv(data_dir / "PREFIX.csv", index=False)
+            full = SnapshotDataset.from_directory(data_dir, "FULL")
+            prefix = SnapshotDataset.from_directory(data_dir, "PREFIX")
+
+        for index in range(len(prefix)):
+            for name in MARKET_ENGINEERED_FEATURES:
+                self.assertAlmostEqual(
+                    full.snapshots[index].frame.iloc[0][name],
+                    prefix.snapshots[index].frame.iloc[0][name],
+                )
+        self.assertEqual(full.snapshots[0].frame.iloc[0]["realizedVol4Coverage"], 0)
+        self.assertEqual(full.snapshots[4].frame.iloc[0]["realizedVol4Coverage"], 1)
+        self.assertEqual(full.snapshots[16].frame.iloc[0]["realizedVol16Coverage"], 1)
+        self.assertGreater(full.snapshots[16].frame.iloc[0]["realizedVol16"], 0)
+
+        env = OptionsEnv(full, slot_count=1)
+        observation, info = env.reset(options={"start_index": 16})
+        self.assertEqual(observation.market.size, len(MARKET_FEATURES))
+        self.assertEqual(info["market_features"], MARKET_FEATURES)
+        self.assertNotIn("underlyingReturn", CONTRACT_FEATURES)
+        self.assertTrue(np.isfinite(observation_vector(observation)).all())

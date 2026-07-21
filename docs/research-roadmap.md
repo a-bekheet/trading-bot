@@ -29,7 +29,7 @@ Every candidate must eventually pass:
 | --- | --- | --- |
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Add causal realized-volatility horizons and a formal walk-forward runner. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, enforce realistic limits, compare against simple investments, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v1` and Greek budgets implement the state/risk lesson; bootstrap intervals and cost stress are the next evaluation gate. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, enforce realistic limits, compare against simple investments, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v2` and Greek budgets implement the state/risk lesson; bootstrap intervals remain an evaluation gate. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
 
@@ -37,17 +37,27 @@ This is not an exclusive reading list. Profiling, microstructure knowledge,
 negative experimental results, and newly published work should change the
 priorities when they provide stronger evidence.
 
+## Implemented research foundations
+
+As of 2026-07-22, the repository has backward-only 4/16-snapshot realized
+volatility with coverage masks, embargoed expanding/rolling fold generation,
+normal versus doubled-cost execution scenarios, and episode-level return,
+drawdown, risk, turnover, cost, and Greek-exposure diagnostics. These are
+evaluation tools, not evidence that the small local AAPL sample observed during
+implementation has enough history for a valid walk-forward result.
+
 ## Prioritized implementation sequence
 
 ### 1. Make evaluation credible
 
 - Store sufficient timestamped, point-in-time option and underlying history.
-- Implement embargoed chronological splits and rolling walk-forward folds.
-- Add annualized realized-volatility features over several backward-only
-  horizons, with explicit missing-history masks.
+- Use the implemented embargoed chronological folds in a full training runner.
+- Retain the implemented backward-only realized-volatility horizons and
+  explicit history-coverage masks.
 - Report NAV return, downside deviation, Sharpe/Sortino, maximum drawdown,
   turnover, fees, invalid actions, and all four Greek exposure paths.
-- Add block-bootstrap intervals and normal/doubled spread-and-fee scenarios.
+- Add block-bootstrap intervals; normal/doubled spread-and-fee scenarios are
+  already executable.
 
 ### 2. Strengthen baselines
 
@@ -58,8 +68,9 @@ priorities when they provide stronger evidence.
 
 ### 3. Improve the state without inflating latency
 
-- Keep the 26-field `dimensionless.v1` contract state as the minimum model.
-- Add backward-only realized volatility and volatility-regime features.
+- Keep the 25-field `dimensionless.v2` contract state as the minimum model.
+- Extend the implemented realized-volatility state only through ablation-tested
+  regime features.
 - Include explicit missingness/quote-quality masks instead of substituting
   plausible-looking market values.
 - Measure feature value with walk-forward permutation and removal ablations.

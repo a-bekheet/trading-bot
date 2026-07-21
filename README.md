@@ -128,14 +128,17 @@ env = OptionsEnv.from_directory(
 ```
 
 Snapshot loading adds causal engineered features such as relative spread,
-forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs,
-underlying return, IV change/skew, ATM term slope, put-call IV spread, and
-put-call parity residual. Fixed policy slots are stratified across expiration
-and option type before taking deeper strikes. Chronological windows are
-available through `training.sequence`.
+forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs, IV
+change/skew, ATM term slope, put-call IV spread, and put-call parity residual.
+Underlying return and annualized realized volatility over 4- and 16-snapshot
+windows live once in the market vector rather than being repeated for every
+contract. Each volatility estimate has an explicit history-coverage feature.
+Fixed policy slots are stratified across expiration and option type before
+taking deeper strikes. Chronological windows are available through
+`training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v1` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v2` transform. Prices and strikes are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 portfolio values become ratios, DTE is in years, and heavy-tailed age/liquidity
 fields are compressed. Raw volume and
@@ -214,6 +217,31 @@ model, manifest = load_checkpoint(Path("data/models/AAPL-graph-hybrid.pt"))
 
 The ML extra is optional so collector startup latency and ordinary paper use do
 not import PyTorch.
+
+Evaluation reports include return, drawdown, step volatility/downside
+deviation, Sharpe/Sortino diagnostics, turnover, fees, invalid actions, fills,
+and peak absolute Greek exposures. Cost stress uses the same policy and quotes
+while widening executable spreads and commissions:
+
+```python
+from trading_bot.training import evaluate_cost_stress, walk_forward_splits
+from trading_bot.training.baselines import no_op
+
+cost_reports = evaluate_cost_stress(env, no_op, seeds=(7, 8, 9))
+folds = walk_forward_splits(
+    len(env.dataset),
+    min_train_size=500,
+    validation_size=100,
+    test_size=100,
+    embargo=8,
+)
+```
+
+Walk-forward folds are strictly chronological, support expanding or bounded
+rolling training windows, and place an explicit embargo between train,
+validation, and test partitions. The current small Yahoo sample will return no
+folds for production-sized thresholds, which is preferable to silently
+pretending that it supports out-of-sample evidence.
 
 The evidence and sequencing behind future alpha research—including
 walk-forward validation, benchmark hedges, realized-volatility state, GNNs,

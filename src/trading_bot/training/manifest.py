@@ -8,12 +8,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from trading_bot.training.schemas import SCHEMA_VERSION
+
 
 @dataclass(frozen=True)
 class EnvManifest:
     """All configuration needed to reproduce an environment instance."""
 
-    schema_version: str = "research-demo.v3"
+    schema_version: str = SCHEMA_VERSION
     mode: str = "research_demo"
     data_source: str = "local-csv-yahoo-snapshots"
     data_hash: str = ""
@@ -22,6 +24,7 @@ class EnvManifest:
     max_quantity: int = 3
     starting_cash: float = 100_000.0
     commission_per_contract: float = 0.65
+    spread_multiplier: float = 1.0
     invalid_action_penalty: float = 0.001
     max_abs_delta: float | None = None
     max_abs_gamma: float | None = None
@@ -33,7 +36,15 @@ class EnvManifest:
     @classmethod
     def for_directory(cls, data_dir: Path, **kwargs: Any) -> "EnvManifest":
         digest = hashlib.sha256()
-        for path in sorted(data_dir.glob("*.csv")):
+        symbol = str(kwargs.get("symbol", "")).upper()
+        paths = (
+            [data_dir / f"{symbol}.csv"]
+            if symbol
+            else sorted(data_dir.glob("*.csv"))
+        )
+        for path in paths:
+            if not path.is_file():
+                continue
             digest.update(path.name.encode())
             digest.update(path.read_bytes())
         return cls(data_hash=digest.hexdigest(), **kwargs)

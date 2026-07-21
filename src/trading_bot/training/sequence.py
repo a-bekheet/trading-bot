@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from trading_bot.training.env import CONTRACT_FEATURES
+from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES
+from trading_bot.training.features import REALIZED_VOL_WINDOWS
 from trading_bot.training.schemas import (
     FEATURE_VECTOR_SCHEMA_VERSION,
     Observation,
@@ -45,6 +46,20 @@ def _dimensionless_components(
         # retaining the absolute dollar price only makes policies ticker-scale
         # dependent. Keep a unit reference for valid positive spot values.
         market[0] = 1.0 if market[0] > 0 else 0.0
+    if len(market) == len(MARKET_FEATURES):
+        market_indices = {
+            name: index for index, name in enumerate(MARKET_FEATURES)
+        }
+        return_index = market_indices["underlyingReturn"]
+        market[return_index] = (
+            np.sign(market[return_index])
+            * np.log1p(abs(market[return_index]) * 100.0)
+        )
+        for window in REALIZED_VOL_WINDOWS:
+            volatility_index = market_indices[f"realizedVol{window}"]
+            market[volatility_index] = np.log1p(
+                max(market[volatility_index], 0.0)
+            )
     if len(portfolio) == 7:
         nav = float(portfolio[2])
         nav_scale = max(abs(nav), 1.0)

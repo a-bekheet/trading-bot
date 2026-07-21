@@ -67,8 +67,10 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
         self.assertEqual(sidecar["model"]["encoder"], "graph")
         self.assertEqual(sidecar["model"]["portfolio_feature_count"], 7)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v3")
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v1")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v4")
+        self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
+        self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v2")
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
             env.manifest.fingerprint,

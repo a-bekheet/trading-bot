@@ -136,6 +136,9 @@ small and stable:
   interest as deterministic tie-breakers.
 - `step()` must execute against the exact cached slots and mask returned by the
   preceding observation; only the next state may rerank the surface.
+- An episode with `N` snapshots has exactly `N-1` tradable transitions and
+  truncates on arrival at the last snapshot; never permit an unmarkable extra
+  fill at the terminal timestamp.
 - Multi-order actions revalidate Greek budgets sequentially. If market drift
   puts a portfolio over a limit, actions that reduce the absolute exposure must
   remain permitted even when they do not immediately return below the limit.
@@ -152,8 +155,13 @@ windows are chronological and unpadded. GRU/LSTM/hybrid code is optional
 the environment fingerprint, full model and training configuration, metrics,
 and the `research_demo` label.
 
+An environment manifest hashes only its selected ticker CSV. Do not broaden the
+fingerprint to unrelated ticker files: doing so adds startup I/O and invalidates
+otherwise reproducible experiments whenever the collector updates another
+symbol.
+
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v1`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v2`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, DTE is expressed in years, and heavy-tailed fields are
 compressed and clipped. Raw volume and open interest
@@ -161,6 +169,12 @@ must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
 finite-value tests, and a checkpoint-schema bump; old weights must never be
 silently loaded against a changed feature layout.
+
+Underlying return and 4/16-snapshot realized-volatility estimates are market
+features, not contract features; never duplicate global state across every
+slot. Realized volatility uses only timestamped prices at or before the current
+snapshot, annualizes by actual elapsed time, and carries a coverage fraction so
+zero history cannot masquerade as zero volatility.
 
 The trainer uses factorized per-slot PPO ratios, GAE, policy/value clipping,
 minibatches, target-KL stopping, entropy regularization, and gradient clipping.
@@ -172,6 +186,14 @@ The graph encoder uses only valid option slots, symmetric nearest-neighbor edges
 and self edges. Padded contracts must neither send nor receive messages. Keep the
 dense implementation while the slot count is small; require profiling evidence
 before adding a graph-framework dependency.
+
+Evaluation changes must preserve chronological order. `walk_forward_splits`
+uses half-open train/validation/test ranges with explicit embargoes and may
+return no folds when history is insufficient. Never relax requested sizes to
+manufacture a result. `evaluate_cost_stress` must run identical policy logic
+under each scenario; default stress doubles both executable spread and
+commission. Episode reports retain return, drawdown, volatility/downside,
+turnover, costs, execution quality, and peak Greek exposure diagnostics.
 
 ## Commands
 

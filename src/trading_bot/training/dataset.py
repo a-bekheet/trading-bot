@@ -48,8 +48,15 @@ class SnapshotDataset:
         frame = frame.sort_values(["collectedAt", "optionType", "expiration", "strike", "contractSymbol"])
         snapshots_list = []
         previous = None
+        spot_history: list[tuple[pd.Timestamp, float]] = []
         for timestamp, group in frame.groupby("collectedAt", sort=True):
-            engineered = engineer_snapshot(group.reset_index(drop=True), previous)
+            spot = pd.to_numeric(group["underlyingPrice"], errors="coerce").iloc[0]
+            spot_history.append((timestamp, float(spot)))
+            engineered = engineer_snapshot(
+                group.reset_index(drop=True),
+                previous,
+                spot_history=spot_history,
+            )
             snapshots_list.append(Snapshot(timestamp=timestamp.isoformat(), frame=engineered))
             previous = group
         snapshots = tuple(snapshots_list)
@@ -57,3 +64,9 @@ class SnapshotDataset:
 
     def __len__(self) -> int:
         return len(self.snapshots)
+
+    def subset(self, start: int, stop: int) -> "SnapshotDataset":
+        """Return a chronological view while preserving precomputed past state."""
+        if not 0 <= start < stop <= len(self.snapshots):
+            raise ValueError("subset bounds are outside the dataset")
+        return SnapshotDataset(self.snapshots[start:stop], self.symbol)

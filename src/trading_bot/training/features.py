@@ -2,16 +2,71 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
 
 
+REALIZED_VOL_WINDOWS = (4, 16)
+MARKET_ENGINEERED_FEATURES = (
+    "underlyingReturn",
+    "realizedVol4",
+    "realizedVol4Coverage",
+    "realizedVol16",
+    "realizedVol16Coverage",
+)
 ENGINEERED_FEATURES = (
     "midPrice", "spread", "spreadPct", "logMoneyness", "dteDays",
-    "volumeLog", "openInterestLog", "quoteAgeSeconds", "underlyingReturn",
-    "ivChange", "forwardLogMoneyness", "extrinsicValuePct", "atmIv",
-    "ivSkew", "atmTermSlope", "putCallIvSpread", "parityResidual",
+    "volumeLog", "openInterestLog", "quoteAgeSeconds", "ivChange",
+    "forwardLogMoneyness", "extrinsicValuePct", "atmIv", "ivSkew",
+    "atmTermSlope", "putCallIvSpread", "parityResidual",
+    *MARKET_ENGINEERED_FEATURES,
 )
+
+
+def realized_volatility_features(
+    spot_history: Sequence[tuple[pd.Timestamp, float]],
+) -> dict[str, float]:
+    """Annualized backward-only realized volatility and history coverage."""
+    result = {
+        f"realizedVol{window}": 0.0
+        for window in REALIZED_VOL_WINDOWS
+    }
+    result.update({
+        f"realizedVol{window}Coverage": 0.0
+        for window in REALIZED_VOL_WINDOWS
+    })
+    if len(spot_history) < 2:
+        return result
+
+    recent = spot_history[-(max(REALIZED_VOL_WINDOWS) + 1):]
+    timestamps = pd.to_datetime([item[0] for item in recent], utc=True)
+    spots = np.asarray([item[1] for item in recent], dtype=np.float64)
+    elapsed_seconds = np.diff(timestamps.view("int64")) / 1e9
+    valid = (
+        np.isfinite(spots[:-1])
+        & np.isfinite(spots[1:])
+        & (spots[:-1] > 0)
+        & (spots[1:] > 0)
+        & (elapsed_seconds > 0)
+    )
+    log_returns = np.zeros(len(elapsed_seconds), dtype=np.float64)
+    log_returns[valid] = np.log(spots[1:][valid] / spots[:-1][valid])
+    seconds_per_year = 365.25 * 24 * 60 * 60
+    for window in REALIZED_VOL_WINDOWS:
+        window_valid = valid[-window:]
+        count = int(window_valid.sum())
+        result[f"realizedVol{window}Coverage"] = count / window
+        if not count:
+            continue
+        returns = log_returns[-window:][window_valid]
+        years = elapsed_seconds[-window:][window_valid].sum() / seconds_per_year
+        if years > 0:
+            result[f"realizedVol{window}"] = float(
+                np.sqrt(np.square(returns).sum() / years)
+            )
+    return result
 
 
 def _surface_features(result: pd.DataFrame) -> None:
@@ -116,7 +171,12 @@ def _surface_features(result: pd.DataFrame) -> None:
     ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
-def engineer_snapshot(frame: pd.DataFrame, previous: pd.DataFrame | None = None) -> pd.DataFrame:
+def engineer_snapshot(
+    frame: pd.DataFrame,
+    previous: pd.DataFrame | None = None,
+    *,
+    spot_history: Sequence[tuple[pd.Timestamp, float]] = (),
+) -> pd.DataFrame:
     """Add only current or prior-snapshot features; never reads future rows."""
     result = frame.copy()
     bid = pd.to_numeric(result["bid"], errors="coerce").fillna(0.0)
@@ -149,6 +209,8 @@ def engineer_snapshot(frame: pd.DataFrame, previous: pd.DataFrame | None = None)
             pd.to_numeric(result["impliedVolatility"], errors="coerce")
             - pd.to_numeric(result["contractSymbol"].map(prior_iv), errors="coerce")
         ).fillna(0.0)
+    for name, value in realized_volatility_features(spot_history).items():
+        result[name] = value
     _surface_features(result)
     result[list(ENGINEERED_FEATURES)] = result[list(ENGINEERED_FEATURES)].replace(
         [np.inf, -np.inf], np.nan

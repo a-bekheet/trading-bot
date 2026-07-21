@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -11,15 +11,22 @@ import numpy as np
 import pandas as pd
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
-from trading_bot.training.features import ENGINEERED_FEATURES
+from trading_bot.training.features import (
+    ENGINEERED_FEATURES,
+    MARKET_ENGINEERED_FEATURES,
+)
 from trading_bot.training.manifest import EnvManifest
 from trading_bot.training.schemas import Action, Observation
 
 
+CONTRACT_ENGINEERED_FEATURES = tuple(
+    name for name in ENGINEERED_FEATURES if name not in MARKET_ENGINEERED_FEATURES
+)
 CONTRACT_FEATURES = (
     "strike", "lastPrice", "bid", "ask", "impliedVolatility", "delta", "gamma",
-    "theta", "vega", *ENGINEERED_FEATURES,
+    "theta", "vega", *CONTRACT_ENGINEERED_FEATURES,
 )
+MARKET_FEATURES = ("underlyingPrice", "riskFreeRate", *MARKET_ENGINEERED_FEATURES)
 GREEK_NAMES = ("delta", "gamma", "theta", "vega")
 PORTFOLIO_FEATURES = (
     "cash", "investedCost", "netAssetValue", *GREEK_NAMES,
@@ -49,6 +56,7 @@ class OptionsEnv:
         max_quantity: int = 3,
         starting_cash: float = 100_000.0,
         commission_per_contract: float = 0.65,
+        spread_multiplier: float = 1.0,
         invalid_action_penalty: float = 0.001,
         max_abs_delta: float | None = None,
         max_abs_gamma: float | None = None,
@@ -57,6 +65,8 @@ class OptionsEnv:
     ):
         if slot_count < 1 or max_quantity < 1:
             raise ValueError("slot_count and max_quantity must be positive")
+        if commission_per_contract < 0 or spread_multiplier < 0:
+            raise ValueError("execution costs cannot be negative")
         limits = {
             "delta": max_abs_delta,
             "gamma": max_abs_gamma,
@@ -65,24 +75,33 @@ class OptionsEnv:
         }
         if any(limit is not None and limit <= 0 for limit in limits.values()):
             raise ValueError("Greek risk limits must be positive when provided")
+        if manifest is not None and manifest.schema_version != EnvManifest().schema_version:
+            raise ValueError("environment manifest schema is incompatible")
         self.dataset = dataset
         self.slot_count = slot_count
         self.max_quantity = max_quantity
         self.starting_cash = starting_cash
         self.commission_per_contract = commission_per_contract
+        self.spread_multiplier = spread_multiplier
         self.invalid_action_penalty = invalid_action_penalty
         self.risk_limits = limits
-        self.manifest = manifest or EnvManifest(
-            symbol=dataset.symbol,
-            slot_count=slot_count,
-            max_quantity=max_quantity,
-            starting_cash=starting_cash,
-            commission_per_contract=commission_per_contract,
-            invalid_action_penalty=invalid_action_penalty,
-            max_abs_delta=max_abs_delta,
-            max_abs_gamma=max_abs_gamma,
-            max_abs_theta=max_abs_theta,
-            max_abs_vega=max_abs_vega,
+        manifest_values = {
+            "symbol": dataset.symbol,
+            "slot_count": slot_count,
+            "max_quantity": max_quantity,
+            "starting_cash": starting_cash,
+            "commission_per_contract": commission_per_contract,
+            "spread_multiplier": spread_multiplier,
+            "invalid_action_penalty": invalid_action_penalty,
+            "max_abs_delta": max_abs_delta,
+            "max_abs_gamma": max_abs_gamma,
+            "max_abs_theta": max_abs_theta,
+            "max_abs_vega": max_abs_vega,
+        }
+        self.manifest = (
+            replace(manifest, **manifest_values)
+            if manifest is not None
+            else EnvManifest(**manifest_values)
         )
         self._rng = np.random.default_rng()
         self._index = 0
@@ -102,7 +121,8 @@ class OptionsEnv:
                 key: kwargs[key]
                 for key in (
                     "slot_count", "max_quantity", "starting_cash",
-                    "commission_per_contract", "invalid_action_penalty",
+                    "commission_per_contract", "spread_multiplier",
+                    "invalid_action_penalty",
                     "max_abs_delta", "max_abs_gamma", "max_abs_theta",
                     "max_abs_vega",
                 )
@@ -135,6 +155,33 @@ class OptionsEnv:
         orders = np.asarray(action.orders, dtype=int)
         if orders.shape != (self.slot_count,):
             raise ValueError(f"action must have shape {(self.slot_count,)}")
+
+        if self._index >= len(self.dataset) - 1:
+            frame = self._current_frame()
+            if self._cached_index == self._index and self._cached_observation is not None:
+                observation = self._cached_observation
+                info = self._cached_info.copy()
+            else:
+                slots = self._slots(frame)
+                observation, info = self._observation(frame, slots)
+                self._cache_state(observation, info, slots)
+            return observation, 0.0, False, True, {
+                **info,
+                "pnl": 0.0,
+                "fees": 0.0,
+                "trade_notional": 0.0,
+                "invalid_action_count": 0,
+                "executions": [],
+                "greek_exposures": {
+                    name: float(observation.portfolio[3 + index])
+                    for index, name in enumerate(GREEK_NAMES)
+                },
+                "reward_components": {
+                    "gross_pnl_return": 0.0,
+                    "fees": 0.0,
+                    "invalid_action": 0.0,
+                },
+            }
 
         current_frame = self._current_frame()
         if self._cached_index == self._index and self._cached_observation is not None:
@@ -169,7 +216,7 @@ class OptionsEnv:
             if not self._risk_allowed(running_exposures, greek_change):
                 invalid_actions += 1
                 continue
-            price = float(contract["ask"] if side == "buy" else contract["bid"])
+            price = self._execution_price(contract, side)
             fee = quantity * self.commission_per_contract
             try:
                 self._fill(side, contract, quantity, price, fee)
@@ -184,9 +231,9 @@ class OptionsEnv:
             executions.append({"side": side, "contract_symbol": contract["contractSymbol"], "quantity": quantity, "price": price, "fee": fee})
 
         next_index = self._index + 1
-        truncated = next_index >= len(self.dataset)
-        if not truncated:
+        if next_index < len(self.dataset):
             self._index = next_index
+        truncated = self._index >= len(self.dataset) - 1
         next_frame = self._current_frame()
         next_slots = self._slots(next_frame)
         next_observation, next_info = self._observation(next_frame, next_slots)
@@ -304,8 +351,8 @@ class OptionsEnv:
                 continue
             action_mask[index, 0] = True
             held = self._positions.get(ids[index] or "", Position(0, 0)).quantity
-            ask = float(contract["ask"])
-            bid = float(contract["bid"])
+            ask = self._execution_price(contract, "buy")
+            bid = self._execution_price(contract, "sell")
             contract_greeks = self._contract_greeks(contract)
             for quantity in range(1, self.max_quantity + 1):
                 fee = quantity * self.commission_per_contract
@@ -319,9 +366,11 @@ class OptionsEnv:
                     and bid > 0
                     and self._risk_allowed(exposures, -greek_change)
                 )
-        spot = float(frame["underlyingPrice"].iloc[0])
-        rate = float(frame["riskFreeRate"].iloc[0])
-        market = np.array([spot, rate], dtype=np.float64)
+        first = frame.iloc[0]
+        market = np.array(
+            [float(first.get(name, 0.0) or 0.0) for name in MARKET_FEATURES],
+            dtype=np.float64,
+        )
         invested = sum(position.quantity * position.average_price * 100 for position in self._positions.values())
         portfolio = np.concatenate(
             (np.array([self._cash, invested, nav], dtype=np.float64), exposures)
@@ -338,8 +387,25 @@ class OptionsEnv:
             "index": self._index,
             "data_source": self.manifest.data_source,
             "portfolio_features": PORTFOLIO_FEATURES,
+            "market_features": MARKET_FEATURES,
             "risk_limits": self.risk_limits.copy(),
         }
+
+    def _execution_price(self, contract: pd.Series, side: str) -> float:
+        """Return a deterministic fill with configurable spread stress."""
+        bid = float(contract["bid"])
+        ask = float(contract["ask"])
+        if side not in {"buy", "sell"}:
+            raise ValueError("side must be 'buy' or 'sell'")
+        if self.spread_multiplier == 1.0:
+            return ask if side == "buy" else bid
+        midpoint = (bid + ask) / 2
+        half_spread = max(ask - bid, 0.0) / 2
+        if side == "buy":
+            return midpoint + self.spread_multiplier * half_spread
+        if side == "sell":
+            return max(midpoint - self.spread_multiplier * half_spread, 0.0)
+        raise AssertionError("unreachable side")
 
     @staticmethod
     def _contract_greeks(contract: pd.Series) -> np.ndarray:

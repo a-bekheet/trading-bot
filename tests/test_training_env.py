@@ -75,15 +75,13 @@ class OptionsEnvTests(TestCase):
         self.assertEqual(info["executions"][0]["price"], 1.2)
         self.assertEqual(info["invalid_action_count"], 0)
         self.assertFalse(terminated)
-        self.assertFalse(truncated)
+        self.assertTrue(truncated)
         self.assertGreater(reward, 0)
         self.assertAlmostEqual(sum(info["reward_components"].values()), reward)
         self.assertEqual(next_observation.portfolio.shape, (7,))
         self.assertAlmostEqual(next_observation.portfolio[3], 50.0)
         self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
 
-        _, _, _, final_truncated, _ = env.step(np.zeros(2, dtype=int))
-        self.assertTrue(final_truncated)
 
     def test_mask_rejects_aggregate_cash_violation(self):
         env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=130)
@@ -120,6 +118,34 @@ class OptionsEnvTests(TestCase):
     def test_rejects_nonpositive_greek_limit(self):
         with self.assertRaisesRegex(ValueError, "Greek risk limits"):
             OptionsEnv(demo_dataset(), max_abs_vega=0)
+
+    def test_spread_stress_changes_fill_without_changing_market_quotes(self):
+        env = OptionsEnv(
+            demo_dataset(),
+            slot_count=2,
+            starting_cash=1_000,
+            spread_multiplier=2.0,
+        )
+        observation, _ = env.reset()
+
+        _, _, _, _, info = env.step(np.array([1, 0]))
+
+        self.assertAlmostEqual(info["executions"][0]["price"], 1.3)
+        self.assertAlmostEqual(
+            observation.contracts[0, 2],
+            1.0,
+        )
+
+    def test_rejects_negative_execution_costs(self):
+        with self.assertRaisesRegex(ValueError, "execution costs"):
+            OptionsEnv(demo_dataset(), spread_multiplier=-1)
+
+    def test_rejects_stale_environment_manifest(self):
+        with self.assertRaisesRegex(ValueError, "manifest schema"):
+            OptionsEnv(
+                demo_dataset(),
+                manifest=EnvManifest(schema_version="research-demo.v3"),
+            )
 
     def test_risk_reducing_sell_remains_allowed_after_greek_drift(self):
         source = demo_dataset()
@@ -194,3 +220,17 @@ class OptionsEnvTests(TestCase):
             },
         )
         self.assertTrue(all(row["strike"] == 100 for row in selected))
+
+    def test_single_snapshot_truncates_without_unmarkable_fill(self):
+        source = demo_dataset()
+        dataset = SnapshotDataset((source.snapshots[0],), source.symbol)
+        env = OptionsEnv(dataset, slot_count=2, starting_cash=1_000)
+        before, _ = env.reset()
+
+        after, reward, terminated, truncated, info = env.step(np.array([1, 0]))
+
+        self.assertTrue(truncated)
+        self.assertFalse(terminated)
+        self.assertEqual(reward, 0)
+        self.assertEqual(info["executions"], [])
+        np.testing.assert_array_equal(before.portfolio, after.portfolio)
