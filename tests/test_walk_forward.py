@@ -189,7 +189,7 @@ class WalkForwardTrainingTests(TestCase):
             expected = min(
                 candidate_results,
                 key=lambda result: (
-                    -result["selection"]["validation_total_reward"],
+                    -result["selection"]["validation_selection_score"],
                     result["parameter_count"],
                     result["active_input_count"],
                     result["optimizer_updates"],
@@ -213,6 +213,16 @@ class WalkForwardTrainingTests(TestCase):
                 "optimizer_updates",
                 "model_id",
             ],
+        )
+        self.assertEqual(selection["criterion"], "validation_selection_score")
+        self.assertEqual(
+            selection["score_definition"],
+            {
+                "reward": "validation_total_reward",
+                "drawdown_penalty": 0.0,
+                "downside_penalty": 0.0,
+                "turnover_penalty": 0.0,
+            },
         )
         self.assertEqual(selection["selected_model_id"], expected["model_id"])
         self.assertEqual(fold["selection"]["model_id"], expected["model_id"])
@@ -261,6 +271,11 @@ class WalkForwardTrainingTests(TestCase):
             ablated["validation_reward_lift_vs_full"],
             ablated["selection"]["validation_total_reward"]
             - full["selection"]["validation_total_reward"],
+        )
+        self.assertAlmostEqual(
+            ablated["validation_score_lift_vs_full"],
+            ablated["selection"]["validation_selection_score"]
+            - full["selection"]["validation_selection_score"],
         )
         self.assertEqual(
             ablated["active_input_count"] + ablated["masked_input_count"],

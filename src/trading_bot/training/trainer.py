@@ -18,7 +18,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v13"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v14"
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,9 @@ class TrainingConfig:
     selection_patience: int | None = 3
     selection_min_delta: float = 0.0
     algorithm: str = "ppo"
+    selection_drawdown_penalty: float = 0.0
+    selection_downside_penalty: float = 0.0
+    selection_turnover_penalty: float = 0.0
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
@@ -72,6 +75,16 @@ class TrainingConfig:
             raise ValueError("selection_min_delta must be finite and non-negative")
         if self.algorithm not in {"ppo", "reinforce"}:
             raise ValueError("algorithm must be ppo or reinforce")
+        selection_penalties = (
+            self.selection_drawdown_penalty,
+            self.selection_downside_penalty,
+            self.selection_turnover_penalty,
+        )
+        if any(
+            not math.isfinite(value) or value < 0
+            for value in selection_penalties
+        ):
+            raise ValueError("selection risk penalties must be finite and non-negative")
 
 
 def _torch():
@@ -183,6 +196,30 @@ def evaluate_recurrent_policy(
     ]
     model.train(was_training)
     return reports
+
+
+def selection_score(
+    report: EpisodeReport,
+    config: TrainingConfig,
+) -> float:
+    """Return the declared validation objective from dimensionless metrics."""
+    values = (
+        float(report.total_reward),
+        float(report.max_drawdown),
+        float(report.downside_deviation),
+        float(report.turnover),
+    )
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("selection report metrics must be finite")
+    reward, drawdown, downside, turnover = values
+    if min(drawdown, downside, turnover) < 0:
+        raise ValueError("selection risk metrics must be non-negative")
+    return float(
+        reward
+        - config.selection_drawdown_penalty * drawdown
+        - config.selection_downside_penalty * downside
+        - config.selection_turnover_penalty * turnover
+    )
 
 
 def _generalized_advantages(
@@ -565,6 +602,10 @@ def train_actor_critic(
         )
         means = np.asarray(update_metrics, dtype=float).mean(axis=0)
         evaluation_reward = None
+        evaluation_selection_score = None
+        evaluation_max_drawdown = None
+        evaluation_downside_deviation = None
+        evaluation_turnover = None
         selection_improved = None
         stop_for_selection_patience = False
         should_evaluate = (
@@ -579,13 +620,16 @@ def train_actor_critic(
                 seeds=(config.seed + 10_000 + episode,),
             )[0]
             evaluation_reward = float(report.total_reward)
-            if not math.isfinite(evaluation_reward):
-                raise ValueError("selection reward must be finite")
+            evaluation_max_drawdown = float(report.max_drawdown)
+            evaluation_downside_deviation = float(report.downside_deviation)
+            evaluation_turnover = float(report.turnover)
+            evaluation_selection_score = selection_score(report, config)
             selection_improved = (
-                evaluation_reward > best_score + config.selection_min_delta
+                evaluation_selection_score
+                > best_score + config.selection_min_delta
             )
             if selection_improved:
-                best_score = evaluation_reward
+                best_score = evaluation_selection_score
                 best_episode = episode
                 best_state = {
                     name: value.detach().cpu().clone()
@@ -607,6 +651,12 @@ def train_actor_critic(
                 "rollout_end_index": rollout_start + steps,
                 "total_reward": float(sum(rewards)),
                 "evaluation_total_reward": evaluation_reward,
+                "evaluation_selection_score": evaluation_selection_score,
+                "evaluation_max_drawdown": evaluation_max_drawdown,
+                "evaluation_downside_deviation": (
+                    evaluation_downside_deviation
+                ),
+                "evaluation_turnover": evaluation_turnover,
                 "evaluation_scope": selection_scope,
                 "selection_improved": (
                     int(selection_improved)
@@ -698,8 +748,21 @@ def checkpoint_manifest(
                 "evaluation_scope",
                 "in_sample_research_demo",
             ),
-            "metric": "evaluation_total_reward",
+            "metric": "evaluation_selection_score",
             "episode": selected_metric["episode"],
+            "score": selected_metric["evaluation_selection_score"],
+            "score_definition": {
+                "reward": "evaluation_total_reward",
+                "drawdown_penalty": (
+                    training_config.selection_drawdown_penalty
+                ),
+                "downside_penalty": (
+                    training_config.selection_downside_penalty
+                ),
+                "turnover_penalty": (
+                    training_config.selection_turnover_penalty
+                ),
+            },
             "early_stopping": {
                 "enabled": training_config.selection_patience is not None,
                 "patience": training_config.selection_patience,
@@ -802,6 +865,9 @@ def _parser() -> argparse.ArgumentParser:
         help="evaluations without improvement before stopping; 0 disables",
     )
     parser.add_argument("--selection-min-delta", type=float, default=0.0)
+    parser.add_argument("--selection-drawdown-penalty", type=float, default=0.0)
+    parser.add_argument("--selection-downside-penalty", type=float, default=0.0)
+    parser.add_argument("--selection-turnover-penalty", type=float, default=0.0)
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--max-abs-delta", type=float)
     parser.add_argument("--max-abs-gamma", type=float)
@@ -862,6 +928,9 @@ def main() -> None:
             None if args.selection_patience == 0 else args.selection_patience
         ),
         selection_min_delta=args.selection_min_delta,
+        selection_drawdown_penalty=args.selection_drawdown_penalty,
+        selection_downside_penalty=args.selection_downside_penalty,
+        selection_turnover_penalty=args.selection_turnover_penalty,
         algorithm=args.algorithm,
     )
     model, metrics = train_actor_critic(env, recurrent_config, training_config)

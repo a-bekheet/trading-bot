@@ -78,6 +78,13 @@ discounted returns and shares the validation-only tournament boundary with
 PPO, allowing algorithmic lift to be tested without exposing every learner to
 the held-out range.
 
+Selection can now use a declared validation-only reward-minus-risk score with
+separate maximum-drawdown, downside-deviation, and turnover coefficients. The
+score controls early stopping, checkpoint restoration, algorithms,
+architectures, and feature ablations consistently while retaining every raw
+component. Coefficients remain zero by default and must be fixed without test
+feedback.
+
 The market state now includes front-expiry ATM IV and its difference from
 backward-only 4/16-snapshot realized volatility, each paired with the existing
 history coverage. PPO training samples seeded bounded windows across the

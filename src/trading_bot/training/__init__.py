@@ -32,6 +32,7 @@ from trading_bot.training.trainer import (
     TrainingConfig,
     evaluate_recurrent_policy,
     load_checkpoint,
+    selection_score,
     train_actor_critic,
 )
 from trading_bot.training.walk_forward import (
@@ -52,5 +53,6 @@ __all__ = [
     "feature_ablation_indices", "first_feasible",
     "long_volatility_delta_hedge", "no_op",
     "paired_moving_block_bootstrap", "run_episode", "run_episode_trace",
-    "run_walk_forward_training", "train_actor_critic", "walk_forward_splits",
+    "run_walk_forward_training", "selection_score", "train_actor_critic",
+    "walk_forward_splits",
 ]

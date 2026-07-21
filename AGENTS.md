@@ -225,6 +225,11 @@ the configured in-sample or validation selection environment. Persist whether
 each run stopped early, its completed episode count, patience, and minimum
 improvement. `None` disables patience; test results may never reset it or resume
 training.
+The declared selection score is total reward minus non-negative configured
+coefficients times maximum drawdown, downside deviation, and turnover. Use this
+one score consistently for best-episode restoration, patience, architecture,
+algorithm, and feature-ablation ranking. Persist raw reward, every component,
+and all coefficients. Defaults are zero; never tune coefficients from test.
 `train-demo` model selection is deterministic but in-sample and must remain
 labeled `in_sample_research_demo`. When `selection_env` is supplied, selection
 must use only that validation environment and be labeled
@@ -268,9 +273,9 @@ exactly `K` contract nodes. Keep `RecurrentConfig.slot_count` equal to
 `run_walk_forward_training` is the executable research boundary. For every
 fold, train only on `train`, choose and restore weights only from `validation`,
 then evaluate `test`. Architecture tournaments must give PPO and REINFORCE
-candidates the same fold and seed, rank validation reward only, and break exact
-ties by parameter count, active input count, optimizer updates, then stable
-model ID. Instantiate the test environment
+candidates the same fold and seed, rank the declared validation selection score
+only, and break exact ties by parameter count, active input count, optimizer
+updates, then stable model ID. Instantiate the test environment
 only after the winner is fixed, save only the winning checkpoint, and never
 attach test metrics to losing candidates. The test range may populate reports
 and provenance only after selection; it must never affect features,
@@ -287,7 +292,8 @@ Feature-removal candidates must use the named, non-overlapping groups in
 the versioned transform and persist exact flattened indices in
 `RecurrentConfig`; external preprocessing would make restored checkpoints
 ambiguous. CLI ablations retain a matched full-feature candidate, report
-validation reward lift versus it, and obey the same one-winner test boundary.
+validation score and raw-reward lift versus it, and obey the same one-winner
+test boundary.
 
 ## Commands
 

@@ -26,6 +26,7 @@ from trading_bot.training.trainer import (
     evaluate_recurrent_policy,
     load_checkpoint,
     save_checkpoint,
+    selection_score,
     train_actor_critic,
 )
 from tests.test_training_env import demo_dataset, three_snapshot_dataset
@@ -65,6 +66,7 @@ class TrainerTests(TestCase):
         self.assertTrue(all(0 <= item["clip_fraction"] <= 1 for item in metrics))
         self.assertTrue(all(math.isfinite(item["approx_kl"]) for item in metrics))
         self.assertTrue(all(math.isfinite(item["evaluation_total_reward"]) for item in metrics))
+        self.assertTrue(all(math.isfinite(item["evaluation_selection_score"]) for item in metrics))
         self.assertTrue(all(0 <= item["requested_action_rate"] <= 1 for item in metrics))
         self.assertTrue(all(
             math.isclose(
@@ -99,6 +101,16 @@ class TrainerTests(TestCase):
             },
         )
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
+        self.assertEqual(sidecar["selection"]["metric"], "evaluation_selection_score")
+        self.assertEqual(
+            sidecar["selection"]["score_definition"],
+            {
+                "reward": "evaluation_total_reward",
+                "drawdown_penalty": 0.0,
+                "downside_penalty": 0.0,
+                "turnover_penalty": 0.0,
+            },
+        )
         self.assertEqual(
             sidecar["selection"]["early_stopping"],
             {
@@ -266,7 +278,12 @@ class TrainerTests(TestCase):
             selection_patience=2,
         )
 
-        fixed_report = SimpleNamespace(total_reward=1.0)
+        fixed_report = SimpleNamespace(
+            total_reward=1.0,
+            max_drawdown=0.0,
+            downside_deviation=0.0,
+            turnover=0.0,
+        )
         with patch(
             "trading_bot.training.trainer.evaluate_recurrent_policy",
             return_value=[fixed_report],
@@ -290,6 +307,72 @@ class TrainerTests(TestCase):
             TrainingConfig(selection_patience=0)
         with self.assertRaisesRegex(ValueError, "selection_min_delta"):
             TrainingConfig(selection_min_delta=float("nan"))
+        with self.assertRaisesRegex(ValueError, "risk penalties"):
+            TrainingConfig(selection_drawdown_penalty=-1)
+
+    def test_selection_score_combines_declared_validation_risks(self):
+        report = SimpleNamespace(
+            total_reward=0.02,
+            max_drawdown=0.01,
+            downside_deviation=0.002,
+            turnover=0.5,
+        )
+        config = TrainingConfig(
+            selection_drawdown_penalty=1.0,
+            selection_downside_penalty=2.0,
+            selection_turnover_penalty=0.1,
+        )
+
+        score = selection_score(report, config)
+
+        self.assertAlmostEqual(score, -0.044)
+        report.max_drawdown = -0.01
+        with self.assertRaisesRegex(ValueError, "risk metrics"):
+            selection_score(report, config)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_risk_score_can_select_safer_lower_reward_checkpoint(self):
+        env = OptionsEnv(demo_dataset(), slot_count=2)
+        observation, _ = env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=8,
+        )
+        risky = SimpleNamespace(
+            total_reward=1.0,
+            max_drawdown=0.9,
+            downside_deviation=0.0,
+            turnover=0.0,
+        )
+        safer = SimpleNamespace(
+            total_reward=0.5,
+            max_drawdown=0.0,
+            downside_deviation=0.0,
+            turnover=0.0,
+        )
+        with patch(
+            "trading_bot.training.trainer.evaluate_recurrent_policy",
+            side_effect=([risky], [safer]),
+        ):
+            _, metrics = train_actor_critic(
+                env,
+                recurrent,
+                TrainingConfig(
+                    episodes=2,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    evaluation_interval=1,
+                    selection_patience=None,
+                    selection_drawdown_penalty=1.0,
+                ),
+            )
+
+        self.assertAlmostEqual(metrics[0]["evaluation_selection_score"], 0.1)
+        self.assertAlmostEqual(metrics[1]["evaluation_selection_score"], 0.5)
+        self.assertEqual(metrics[1]["selected_checkpoint"], 1)
 
     def test_rejects_unknown_training_algorithm(self):
         with self.assertRaisesRegex(ValueError, "algorithm"):

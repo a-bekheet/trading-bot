@@ -210,6 +210,23 @@ on-policy optimizer pass through contiguous recurrent chunks. PPO remains the
 default and retains clipped multi-epoch updates. Metrics distinguish PPO,
 REINFORCE, and total optimizer updates so their compute is auditable.
 
+Checkpoint and architecture selection can penalize validation-path risk:
+
+```bash
+train-walk-forward \
+  --symbol AAPL \
+  --selection-drawdown-penalty 1.0 \
+  --selection-downside-penalty 1.0 \
+  --selection-turnover-penalty 0.01
+```
+
+The declared score is validation reward minus each coefficient times maximum
+drawdown, downside deviation, or turnover. All quantities are dimensionless.
+Zero remains the default for every coefficient, preserving raw-reward behavior
+until an experiment declares its risk tradeoff. The same score controls
+checkpoint restoration, patience, ablation lift, and tournament ranking; raw
+reward and every component remain in the artifact. Test metrics never enter it.
+
 Training episodes default to reproducible random windows of at most 128
 transitions inside the supplied training partition. This exposes PPO to more
 market regimes and bounds update cost without touching validation or test data.
@@ -352,7 +369,8 @@ architecture while retaining each full-feature candidate. Available groups are
 `derived_contract_surface`. Masking happens inside the checkpointed model after
 the versioned transform, so training, restored inference, and graph/flat models
 use the same ablation. Artifacts report each ablated candidate's validation
-reward lift versus its full-feature counterpart plus active/masked input counts.
+score and raw-reward lift versus its full-feature counterpart plus active and
+masked input counts.
 Only the validation winner reaches test, preventing feature research from
 becoming repeated holdout peeking.
 

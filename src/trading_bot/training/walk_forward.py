@@ -41,7 +41,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v12"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v13"
 
 
 @dataclass(frozen=True)
@@ -192,9 +192,9 @@ def _normalize_model_specs(
 
 def _selected_metric(metrics: list[dict[str, Any]]) -> dict[str, Any]:
     selected = next(item for item in metrics if item["selected_checkpoint"])
-    score = selected["evaluation_total_reward"]
+    score = selected["evaluation_selection_score"]
     if score is None or not math.isfinite(float(score)):
-        raise ValueError("candidate validation reward must be finite")
+        raise ValueError("candidate validation selection score must be finite")
     return selected
 
 
@@ -273,6 +273,18 @@ def run_walk_forward_training(
                 "validation_total_reward": float(
                     selected["evaluation_total_reward"]
                 ),
+                "validation_selection_score": float(
+                    selected["evaluation_selection_score"]
+                ),
+                "validation_max_drawdown": float(
+                    selected["evaluation_max_drawdown"]
+                ),
+                "validation_downside_deviation": float(
+                    selected["evaluation_downside_deviation"]
+                ),
+                "validation_turnover": float(
+                    selected["evaluation_turnover"]
+                ),
                 "selection_scope": selected["evaluation_scope"],
                 "episodes_completed": len(metrics),
                 "stopped_early": bool(metrics[-1]["early_stop_selection"]),
@@ -288,7 +300,7 @@ def run_walk_forward_training(
         winning_run = min(
             candidate_runs,
             key=lambda run: (
-                -run["validation_total_reward"],
+                -run["validation_selection_score"],
                 run["parameter_count"],
                 run["active_input_count"],
                 run["optimizer_updates"],
@@ -306,25 +318,42 @@ def run_walk_forward_training(
                 "stopped_early": run["stopped_early"],
                 "optimizer_updates": run["optimizer_updates"],
                 "validation_reward_lift_vs_full": None,
+                "validation_score_lift_vs_full": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
                     "validation_total_reward": run[
                         "validation_total_reward"
                     ],
+                    "validation_selection_score": run[
+                        "validation_selection_score"
+                    ],
+                    "max_drawdown": run["validation_max_drawdown"],
+                    "downside_deviation": run[
+                        "validation_downside_deviation"
+                    ],
+                    "turnover": run["validation_turnover"],
                 },
             }
             for run in candidate_runs
         ]
         validation_scores = {
+            run["model_id"]: run["validation_selection_score"]
+            for run in candidate_runs
+        }
+        validation_rewards = {
             run["model_id"]: run["validation_total_reward"]
             for run in candidate_runs
         }
         for result, run in zip(candidate_results, candidate_runs, strict=True):
             full_score = validation_scores.get(run["full_model_id"])
             if run["model_spec"].disabled_feature_groups and full_score is not None:
+                result["validation_score_lift_vs_full"] = (
+                    run["validation_selection_score"] - full_score
+                )
                 result["validation_reward_lift_vs_full"] = (
-                    run["validation_total_reward"] - full_score
+                    run["validation_total_reward"]
+                    - validation_rewards[run["full_model_id"]]
                 )
         model = winning_run["model"]
         metrics = winning_run["metrics"]
@@ -432,11 +461,31 @@ def run_walk_forward_training(
                 "scope": selected["evaluation_scope"],
                 "episode": selected["episode"],
                 "validation_total_reward": selected["evaluation_total_reward"],
+                "validation_selection_score": selected[
+                    "evaluation_selection_score"
+                ],
+                "max_drawdown": selected["evaluation_max_drawdown"],
+                "downside_deviation": selected[
+                    "evaluation_downside_deviation"
+                ],
+                "turnover": selected["evaluation_turnover"],
                 "model_id": winning_run["model_id"],
             },
             "model_selection": {
-                "criterion": "validation_total_reward",
+                "criterion": "validation_selection_score",
                 "direction": "maximize",
+                "score_definition": {
+                    "reward": "validation_total_reward",
+                    "drawdown_penalty": (
+                        selected_training.selection_drawdown_penalty
+                    ),
+                    "downside_penalty": (
+                        selected_training.selection_downside_penalty
+                    ),
+                    "turnover_penalty": (
+                        selected_training.selection_turnover_penalty
+                    ),
+                },
                 "tie_break": [
                     "parameter_count",
                     "active_input_count",
@@ -565,6 +614,9 @@ def _parser() -> argparse.ArgumentParser:
         help="evaluations without improvement before stopping; 0 disables",
     )
     parser.add_argument("--selection-min-delta", type=float, default=0.0)
+    parser.add_argument("--selection-drawdown-penalty", type=float, default=0.0)
+    parser.add_argument("--selection-downside-penalty", type=float, default=0.0)
+    parser.add_argument("--selection-turnover-penalty", type=float, default=0.0)
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument("--max-quantity", type=int, default=3)
@@ -646,6 +698,11 @@ def main() -> None:
                     else args.selection_patience
                 ),
                 selection_min_delta=args.selection_min_delta,
+                selection_drawdown_penalty=(
+                    args.selection_drawdown_penalty
+                ),
+                selection_downside_penalty=args.selection_downside_penalty,
+                selection_turnover_penalty=args.selection_turnover_penalty,
                 entropy_coefficient=args.entropy_coefficient,
                 algorithm=args.algorithm,
                 seed=args.seed,
