@@ -27,8 +27,9 @@ does not place live trades.
   evaluation reports. `features.py` computes causal features and `sequence.py`
   builds chronological windows. `recurrent.py` is an optional PyTorch GRU,
   LSTM, or hybrid actor-critic with flat or graph contract encoding. `trainer.py`
-  owns research-demo optimization and checkpoint provenance. Both stay outside
-  ordinary collector imports.
+  owns factorized PPO/GAE optimization, deterministic evaluation, safe
+  checkpoint restoration, and provenance. Both stay outside ordinary collector
+  imports.
 - `tests/`: offline tests; market-data calls must be mocked here.
 - `data/`: generated append-only CSVs, one per ticker; intentionally git-ignored.
 
@@ -124,10 +125,15 @@ small and stable:
   negative even when individual pre-step actions were affordable.
 - `info` retains executions, invalid-action count, P&L, fees, trade notional,
   and reward components.
+- `reward_components` must sum to the returned scalar reward. Gross P&L includes
+  spread/mark effects, while commission and invalid-action penalties are
+  separate components.
 - A missing contract is never silently transferred to another slot.
 - Non-held slots are surface-stratified: one near-ATM contract from each
   expiration/type group is selected before deeper strikes, with spread and open
   interest as deterministic tie-breakers.
+- `step()` must execute against the exact cached slots and mask returned by the
+  preceding observation; only the next state may rerank the surface.
 
 The current environment is a deterministic accounting and API scaffold, not a
 historical simulator. Do not add a `historical` mode until the data manifest
@@ -140,6 +146,12 @@ windows are chronological and unpadded. GRU/LSTM/hybrid code is optional
 (`.[ml]`) and must preserve a no-PyTorch collector path. Checkpoints must retain
 the environment fingerprint, full model and training configuration, metrics,
 and the `research_demo` label.
+
+The trainer uses factorized per-slot PPO ratios, GAE, policy/value clipping,
+minibatches, target-KL stopping, entropy regularization, and gradient clipping.
+Model selection is deterministic but currently in-sample and must remain labeled
+`in_sample_research_demo`. Checkpoints must load with PyTorch `weights_only=True`;
+never weaken this to unrestricted pickle loading.
 
 The graph encoder uses only valid option slots, symmetric nearest-neighbor edges,
 and self edges. Padded contracts must neither send nor receive messages. Keep the

@@ -132,7 +132,7 @@ model = build_recurrent_actor_critic(
 )
 ```
 
-Run the research-demo actor-critic trainer against collected snapshots:
+Run the research-demo PPO trainer against collected snapshots:
 
 ```bash
 train-demo --symbol AAPL --kind hybrid --episodes 25 --sequence-length 8
@@ -153,12 +153,24 @@ the default 32 slots it avoids a separate graph-framework dependency and its
 conversion overhead. Use the default `--encoder flat` when inference latency
 matters more than relational capacity.
 
-It writes a PyTorch checkpoint and a readable `.pt.json` provenance sidecar
-containing the environment fingerprint, model/training configuration, and
-episode metrics. The trainer uses action masks, independent per-contract action
-distributions, discounted actor-critic returns, entropy regularization, and
-gradient clipping. Results remain integration evidence, not a backtest or an
-alpha claim.
+It writes a safely loadable PyTorch checkpoint and a readable `.pt.json`
+provenance sidecar containing the environment fingerprint, model/training
+configuration, selection decision, and episode metrics. The trainer uses
+factorized per-contract PPO ratios, generalized advantage estimation, clipped
+policy and value updates, shuffled minibatches, target-KL early stopping,
+entropy regularization, and gradient clipping. It evaluates deterministic
+actions after each rollout and restores the best checkpoint. Selection is
+explicitly labeled `in_sample_research_demo`; it is integration evidence, not a
+backtest or an alpha claim.
+
+Restore weights without enabling arbitrary pickle execution:
+
+```python
+from pathlib import Path
+from trading_bot.training import load_checkpoint
+
+model, manifest = load_checkpoint(Path("data/models/AAPL-graph-hybrid.pt"))
+```
 
 The ML extra is optional so collector startup latency and ordinary paper use do
 not import PyTorch.

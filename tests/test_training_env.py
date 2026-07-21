@@ -77,6 +77,7 @@ class OptionsEnvTests(TestCase):
         self.assertFalse(terminated)
         self.assertFalse(truncated)
         self.assertGreater(reward, 0)
+        self.assertAlmostEqual(sum(info["reward_components"].values()), reward)
 
         _, _, _, final_truncated, _ = env.step(np.zeros(2, dtype=int))
         self.assertTrue(final_truncated)
@@ -105,8 +106,8 @@ class OptionsEnvTests(TestCase):
         env._slots = counted_slots
         env.step(np.array([1, 1]))
 
-        # One ranking for order execution and one for the next observation.
-        self.assertEqual(calls, 2)
+        # The current policy-visible slots are cached; only the next state ranks.
+        self.assertEqual(calls, 1)
 
     def test_slots_cover_expirations_and_option_types_before_surface_depth(self):
         rows = []

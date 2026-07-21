@@ -66,6 +66,10 @@ class OptionsEnv:
         self._index = 0
         self._cash = starting_cash
         self._positions: dict[str, Position] = {}
+        self._cached_index = -1
+        self._cached_observation: Observation | None = None
+        self._cached_info: dict[str, Any] = {}
+        self._cached_slots: list[pd.Series] = []
 
     @classmethod
     def from_directory(cls, data_dir: Path, symbol: str, **kwargs: Any) -> "OptionsEnv":
@@ -92,7 +96,10 @@ class OptionsEnv:
         if not 0 <= start < len(self.dataset):
             raise ValueError("start_index is outside the dataset")
         self._index = start
-        observation, info = self._observation()
+        frame = self._current_frame()
+        slots = self._slots(frame)
+        observation, info = self._observation(frame, slots)
+        self._cache_state(observation, info, slots)
         info.update({"seed": seed, "manifest_fingerprint": self.manifest.fingerprint})
         return observation, info
 
@@ -103,8 +110,15 @@ class OptionsEnv:
             raise ValueError(f"action must have shape {(self.slot_count,)}")
 
         current_frame = self._current_frame()
-        current_slots = self._slots(current_frame)
-        current_observation, pre_info = self._observation(current_frame, current_slots)
+        if self._cached_index == self._index and self._cached_observation is not None:
+            current_slots = self._cached_slots
+            current_observation = self._cached_observation
+            pre_info = self._cached_info.copy()
+        else:
+            current_slots = self._slots(current_frame)
+            current_observation, pre_info = self._observation(
+                current_frame, current_slots
+            )
         pre_nav = self._nav(current_frame)
         invalid_actions = 0
         executions: list[dict[str, Any]] = []
@@ -138,12 +152,20 @@ class OptionsEnv:
         truncated = next_index >= len(self.dataset)
         if not truncated:
             self._index = next_index
-        next_observation, next_info = self._observation()
-        post_nav = self._nav(self._current_frame())
+        next_frame = self._current_frame()
+        next_slots = self._slots(next_frame)
+        next_observation, next_info = self._observation(next_frame, next_slots)
+        self._cache_state(next_observation, next_info, next_slots)
+        post_nav = self._nav(next_frame)
         pnl = post_nav - pre_nav
-        reward = pnl / pre_nav if pre_nav > 0 else -1.0
-        if invalid_actions:
-            reward -= invalid_actions * self.invalid_action_penalty
+        if pre_nav > 0:
+            gross_pnl_return = (pnl + fees) / pre_nav
+            fee_return = -fees / pre_nav
+        else:
+            gross_pnl_return = -1.0
+            fee_return = 0.0
+        invalid_return = -invalid_actions * self.invalid_action_penalty
+        reward = gross_pnl_return + fee_return + invalid_return
         terminated = post_nav <= 0
         info = {
             **pre_info,
@@ -153,9 +175,25 @@ class OptionsEnv:
             "trade_notional": sum(item["price"] * item["quantity"] * 100 for item in executions),
             "invalid_action_count": invalid_actions,
             "executions": executions,
-            "reward_components": {"pnl_return": pnl / pre_nav if pre_nav > 0 else -1.0, "fees": -fees / pre_nav if pre_nav > 0 else -1.0, "invalid_action": -invalid_actions * self.invalid_action_penalty},
+            "reward_components": {
+                "gross_pnl_return": gross_pnl_return,
+                "fees": fee_return,
+                "invalid_action": invalid_return,
+            },
         }
         return next_observation, float(reward), terminated, truncated, info
+
+    def _cache_state(
+        self,
+        observation: Observation,
+        info: dict[str, Any],
+        slots: list[pd.Series],
+    ) -> None:
+        """Cache exactly the slot state returned to the policy."""
+        self._cached_index = self._index
+        self._cached_observation = observation
+        self._cached_info = info.copy()
+        self._cached_slots = slots
 
     def _current_frame(self) -> pd.DataFrame:
         return self.dataset.snapshots[self._index].frame
