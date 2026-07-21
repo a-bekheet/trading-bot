@@ -118,9 +118,11 @@ small and stable:
 - `step(action)` returns `(Observation, reward, terminated, truncated, info)`.
 - `Observation.contracts` has fixed shape `(K, features)` and carries
   `contract_ids`, `valid_mask`, and `action_mask`.
+- `Observation.portfolio` contains cash, invested cost, NAV, and portfolio
+  Delta/Gamma/Theta/Vega in contract-multiplier-adjusted units.
 - Action `0` means hold; `1..Q` means buy `Q` buckets; `Q+1..2Q` means sell.
 - Masks are generated from the pre-step state and include quote validity,
-  fee-adjusted affordability, and held quantity.
+  fee-adjusted affordability, held quantity, and optional absolute Greek limits.
 - Multiple orders in one action are revalidated sequentially so cash cannot go
   negative even when individual pre-step actions were affordable.
 - `info` retains executions, invalid-action count, P&L, fees, trade notional,
@@ -134,6 +136,9 @@ small and stable:
   interest as deterministic tie-breakers.
 - `step()` must execute against the exact cached slots and mask returned by the
   preceding observation; only the next state may rerank the surface.
+- Multi-order actions revalidate Greek budgets sequentially. If market drift
+  puts a portfolio over a limit, actions that reduce the absolute exposure must
+  remain permitted even when they do not immediately return below the limit.
 
 The current environment is a deterministic accounting and API scaffold, not a
 historical simulator. Do not add a `historical` mode until the data manifest

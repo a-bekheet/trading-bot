@@ -105,10 +105,27 @@ observation, reward, terminated, truncated, info = env.step(
 ```
 
 It uses fixed padded contract slots, validity/action masks, bid/ask paper fills,
-cash constraints, deterministic seeds, and decomposed rewards. Its manifest is
-marked `research_demo`; it is not a historical backtest or a claim of trading
+cash constraints, portfolio Greek exposures, optional Greek risk budgets,
+deterministic seeds, and decomposed rewards. Its manifest is marked
+`research_demo`; it is not a historical backtest or a claim of trading
 performance. A licensed point-in-time all-expiry dataset is required before a
 historical RL environment is enabled.
+
+The portfolio state includes cash, invested cost, NAV, Delta, Gamma, Theta, and
+Vega. Exposure units are share-equivalent Delta, Delta change per $1 Gamma,
+dollars per calendar day Theta, and dollars per one-percentage-point IV Vega.
+Limits are optional; risk-reducing trades remain available after Greek drift:
+
+```python
+env = OptionsEnv.from_directory(
+    Path("data"),
+    "AAPL",
+    max_abs_delta=500,
+    max_abs_gamma=100,
+    max_abs_theta=250,
+    max_abs_vega=500,
+)
+```
 
 Snapshot loading adds causal engineered features such as relative spread,
 forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs,
@@ -126,9 +143,17 @@ python -m pip install -e '.[ml]'
 
 ```python
 from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_actor_critic
+from trading_bot.training.sequence import observation_vector
 
 model = build_recurrent_actor_critic(
-    RecurrentConfig(input_size=709, slot_count=32, action_count=7, kind="gru")
+    RecurrentConfig(
+        input_size=observation_vector(observation).size,
+        slot_count=env.action_shape[0],
+        action_count=env.action_shape[1],
+        kind="gru",
+        market_feature_count=observation.market.size,
+        portfolio_feature_count=observation.portfolio.size,
+    )
 )
 ```
 
@@ -143,6 +168,12 @@ before temporal encoding:
 
 ```bash
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
+```
+
+Training can enforce the same portfolio budgets:
+
+```bash
+train-demo --symbol AAPL --max-abs-delta 500 --max-abs-vega 500
 ```
 
 The graph connects each valid contract to neighbors using cross-sectionally

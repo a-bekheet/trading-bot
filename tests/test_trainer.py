@@ -37,6 +37,8 @@ class TrainerTests(TestCase):
             kind="hybrid",
             encoder="graph",
             contract_feature_count=observation.contracts.shape[1],
+            market_feature_count=observation.market.size,
+            portfolio_feature_count=observation.portfolio.size,
             graph_hidden_size=8,
         )
         training = TrainingConfig(episodes=2, sequence_length=2, seed=11)
@@ -64,6 +66,8 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
         self.assertEqual(sidecar["model"]["encoder"], "graph")
+        self.assertEqual(sidecar["model"]["portfolio_feature_count"], 7)
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v2")
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
             env.manifest.fingerprint,

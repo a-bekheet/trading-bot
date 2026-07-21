@@ -78,6 +78,9 @@ class OptionsEnvTests(TestCase):
         self.assertFalse(truncated)
         self.assertGreater(reward, 0)
         self.assertAlmostEqual(sum(info["reward_components"].values()), reward)
+        self.assertEqual(next_observation.portfolio.shape, (7,))
+        self.assertAlmostEqual(next_observation.portfolio[3], 50.0)
+        self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
 
         _, _, _, final_truncated, _ = env.step(np.zeros(2, dtype=int))
         self.assertTrue(final_truncated)
@@ -91,6 +94,54 @@ class OptionsEnvTests(TestCase):
 
         self.assertEqual(info["invalid_action_count"], 1)
         self.assertGreaterEqual(env._cash, 0)
+
+    def test_greek_limit_masks_and_revalidates_aggregate_orders(self):
+        env = OptionsEnv(
+            demo_dataset(),
+            slot_count=2,
+            starting_cash=1_000,
+            max_quantity=2,
+            max_abs_delta=60,
+        )
+        observation, reset_info = env.reset()
+
+        self.assertTrue(observation.action_mask[0, 1])
+        self.assertFalse(observation.action_mask[0, 2])
+        self.assertEqual(reset_info["risk_limits"]["delta"], 60)
+        self.assertEqual(reset_info["portfolio_features"][-4:], (
+            "delta", "gamma", "theta", "vega",
+        ))
+        _, _, _, _, info = env.step(np.array([1, 1]))
+
+        self.assertEqual(info["invalid_action_count"], 1)
+        self.assertEqual(len(info["executions"]), 1)
+        self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
+
+    def test_rejects_nonpositive_greek_limit(self):
+        with self.assertRaisesRegex(ValueError, "Greek risk limits"):
+            OptionsEnv(demo_dataset(), max_abs_vega=0)
+
+    def test_risk_reducing_sell_remains_allowed_after_greek_drift(self):
+        source = demo_dataset()
+        later = source.snapshots[1].frame.copy()
+        later["delta"] = 2.0
+        dataset = SnapshotDataset(
+            (source.snapshots[0], Snapshot(source.snapshots[1].timestamp, later)),
+            source.symbol,
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=2,
+            max_quantity=1,
+            starting_cash=1_000,
+            max_abs_delta=60,
+        )
+        env.reset()
+
+        observation, _, _, _, _ = env.step(np.array([1, 0]))
+
+        self.assertAlmostEqual(observation.portfolio[3], 200.0)
+        self.assertTrue(observation.action_mask[0, 2])
 
     def test_step_ranks_contract_slots_only_once_per_snapshot(self):
         env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=1_000)

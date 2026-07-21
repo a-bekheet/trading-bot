@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 
-SCHEMA_VERSION = "research-demo.v1"
+SCHEMA_VERSION = "research-demo.v2"
 
 
 @dataclass(frozen=True)

@@ -17,7 +17,7 @@ from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_acto
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v1"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v2"
 
 
 @dataclass(frozen=True)
@@ -438,6 +438,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-ratio", type=float, default=0.2)
     parser.add_argument("--target-kl", type=float, default=0.03)
+    parser.add_argument("--max-abs-delta", type=float)
+    parser.add_argument("--max-abs-gamma", type=float)
+    parser.add_argument("--max-abs-theta", type=float)
+    parser.add_argument("--max-abs-vega", type=float)
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -449,6 +453,10 @@ def main() -> None:
         args.symbol,
         slot_count=args.slot_count,
         max_quantity=args.max_quantity,
+        max_abs_delta=args.max_abs_delta,
+        max_abs_gamma=args.max_abs_gamma,
+        max_abs_theta=args.max_abs_theta,
+        max_abs_vega=args.max_abs_vega,
     )
     observation, _ = env.reset(seed=args.seed)
     recurrent_config = RecurrentConfig(
@@ -459,6 +467,8 @@ def main() -> None:
         kind=args.kind,
         encoder=args.encoder,
         contract_feature_count=observation.contracts.shape[1],
+        market_feature_count=observation.market.size,
+        portfolio_feature_count=observation.portfolio.size,
         graph_relation_indices=tuple(
             CONTRACT_FEATURES.index(name)
             for name in ("impliedVolatility", "delta", "logMoneyness", "dteDays")

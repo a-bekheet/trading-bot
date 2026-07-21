@@ -20,12 +20,17 @@ CONTRACT_FEATURES = (
     "strike", "lastPrice", "bid", "ask", "impliedVolatility", "delta", "gamma",
     "theta", "vega", "volume", "openInterest", *ENGINEERED_FEATURES,
 )
+GREEK_NAMES = ("delta", "gamma", "theta", "vega")
+PORTFOLIO_FEATURES = (
+    "cash", "investedCost", "netAssetValue", *GREEK_NAMES,
+)
 
 
 @dataclass
 class Position:
     quantity: int
     average_price: float
+    greeks: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
 
 class OptionsEnv:
@@ -45,15 +50,28 @@ class OptionsEnv:
         starting_cash: float = 100_000.0,
         commission_per_contract: float = 0.65,
         invalid_action_penalty: float = 0.001,
+        max_abs_delta: float | None = None,
+        max_abs_gamma: float | None = None,
+        max_abs_theta: float | None = None,
+        max_abs_vega: float | None = None,
     ):
         if slot_count < 1 or max_quantity < 1:
             raise ValueError("slot_count and max_quantity must be positive")
+        limits = {
+            "delta": max_abs_delta,
+            "gamma": max_abs_gamma,
+            "theta": max_abs_theta,
+            "vega": max_abs_vega,
+        }
+        if any(limit is not None and limit <= 0 for limit in limits.values()):
+            raise ValueError("Greek risk limits must be positive when provided")
         self.dataset = dataset
         self.slot_count = slot_count
         self.max_quantity = max_quantity
         self.starting_cash = starting_cash
         self.commission_per_contract = commission_per_contract
         self.invalid_action_penalty = invalid_action_penalty
+        self.risk_limits = limits
         self.manifest = manifest or EnvManifest(
             symbol=dataset.symbol,
             slot_count=slot_count,
@@ -61,6 +79,10 @@ class OptionsEnv:
             starting_cash=starting_cash,
             commission_per_contract=commission_per_contract,
             invalid_action_penalty=invalid_action_penalty,
+            max_abs_delta=max_abs_delta,
+            max_abs_gamma=max_abs_gamma,
+            max_abs_theta=max_abs_theta,
+            max_abs_vega=max_abs_vega,
         )
         self._rng = np.random.default_rng()
         self._index = 0
@@ -78,7 +100,12 @@ class OptionsEnv:
         if manifest is None:
             manifest = EnvManifest.for_directory(data_dir, symbol=dataset.symbol, **{
                 key: kwargs[key]
-                for key in ("slot_count", "max_quantity", "starting_cash", "commission_per_contract", "invalid_action_penalty")
+                for key in (
+                    "slot_count", "max_quantity", "starting_cash",
+                    "commission_per_contract", "invalid_action_penalty",
+                    "max_abs_delta", "max_abs_gamma", "max_abs_theta",
+                    "max_abs_vega",
+                )
                 if key in kwargs
             })
         return cls(dataset, manifest=manifest, **kwargs)
@@ -119,7 +146,8 @@ class OptionsEnv:
             current_observation, pre_info = self._observation(
                 current_frame, current_slots
             )
-        pre_nav = self._nav(current_frame)
+        pre_nav = float(current_observation.portfolio[2])
+        running_exposures = current_observation.portfolio[3:].copy()
         invalid_actions = 0
         executions: list[dict[str, Any]] = []
         fees = 0.0
@@ -135,6 +163,12 @@ class OptionsEnv:
             contract = current_slots[slot]
             quantity = encoded if encoded <= self.max_quantity else encoded - self.max_quantity
             side = "buy" if encoded <= self.max_quantity else "sell"
+            greek_change = self._contract_greeks(contract) * quantity * 100
+            if side == "sell":
+                greek_change = -greek_change
+            if not self._risk_allowed(running_exposures, greek_change):
+                invalid_actions += 1
+                continue
             price = float(contract["ask"] if side == "buy" else contract["bid"])
             fee = quantity * self.commission_per_contract
             try:
@@ -146,6 +180,7 @@ class OptionsEnv:
                 invalid_actions += 1
                 continue
             fees += fee
+            running_exposures += greek_change
             executions.append({"side": side, "contract_symbol": contract["contractSymbol"], "quantity": quantity, "price": price, "fee": fee})
 
         next_index = self._index + 1
@@ -156,7 +191,7 @@ class OptionsEnv:
         next_slots = self._slots(next_frame)
         next_observation, next_info = self._observation(next_frame, next_slots)
         self._cache_state(next_observation, next_info, next_slots)
-        post_nav = self._nav(next_frame)
+        post_nav = float(next_observation.portfolio[2])
         pnl = post_nav - pre_nav
         if pre_nav > 0:
             gross_pnl_return = (pnl + fees) / pre_nav
@@ -175,6 +210,10 @@ class OptionsEnv:
             "trade_notional": sum(item["price"] * item["quantity"] * 100 for item in executions),
             "invalid_action_count": invalid_actions,
             "executions": executions,
+            "greek_exposures": {
+                name: float(next_observation.portfolio[3 + index])
+                for index, name in enumerate(GREEK_NAMES)
+            },
             "reward_components": {
                 "gross_pnl_return": gross_pnl_return,
                 "fees": fee_return,
@@ -258,6 +297,7 @@ class OptionsEnv:
             valid[index] = self._quote_valid(contract)
             for feature_index, name in enumerate(CONTRACT_FEATURES):
                 contracts[index, feature_index] = float(contract.get(name, 0) or 0)
+        nav, exposures = self._portfolio_metrics(frame)
         action_mask = np.zeros(self.action_shape, dtype=bool)
         for index, contract in enumerate(slots):
             if not valid[index]:
@@ -266,16 +306,62 @@ class OptionsEnv:
             held = self._positions.get(ids[index] or "", Position(0, 0)).quantity
             ask = float(contract["ask"])
             bid = float(contract["bid"])
+            contract_greeks = self._contract_greeks(contract)
             for quantity in range(1, self.max_quantity + 1):
                 fee = quantity * self.commission_per_contract
-                action_mask[index, quantity] = self._cash >= ask * quantity * 100 + fee
-                action_mask[index, self.max_quantity + quantity] = held >= quantity and bid > 0
+                greek_change = contract_greeks * quantity * 100
+                action_mask[index, quantity] = (
+                    self._cash >= ask * quantity * 100 + fee
+                    and self._risk_allowed(exposures, greek_change)
+                )
+                action_mask[index, self.max_quantity + quantity] = (
+                    held >= quantity
+                    and bid > 0
+                    and self._risk_allowed(exposures, -greek_change)
+                )
         spot = float(frame["underlyingPrice"].iloc[0])
         rate = float(frame["riskFreeRate"].iloc[0])
         market = np.array([spot, rate], dtype=np.float64)
         invested = sum(position.quantity * position.average_price * 100 for position in self._positions.values())
-        portfolio = np.array([self._cash, invested, self._cash + self._nav(frame) - self._cash], dtype=np.float64)
-        return Observation(self.dataset.snapshots[self._index].timestamp, market, contracts, portfolio, valid, action_mask, tuple(ids)), {"index": self._index, "data_source": self.manifest.data_source}
+        portfolio = np.concatenate(
+            (np.array([self._cash, invested, nav], dtype=np.float64), exposures)
+        )
+        return Observation(
+            self.dataset.snapshots[self._index].timestamp,
+            market,
+            contracts,
+            portfolio,
+            valid,
+            action_mask,
+            tuple(ids),
+        ), {
+            "index": self._index,
+            "data_source": self.manifest.data_source,
+            "portfolio_features": PORTFOLIO_FEATURES,
+            "risk_limits": self.risk_limits.copy(),
+        }
+
+    @staticmethod
+    def _contract_greeks(contract: pd.Series) -> np.ndarray:
+        values = pd.to_numeric(
+            pd.Series([contract.get(name, 0.0) for name in GREEK_NAMES]),
+            errors="coerce",
+        ).fillna(0.0).to_numpy(dtype=np.float64, copy=True)
+        values[~np.isfinite(values)] = 0.0
+        return values
+
+    def _risk_allowed(self, current: np.ndarray, change: np.ndarray) -> bool:
+        projected = current + change
+        for index, name in enumerate(GREEK_NAMES):
+            limit = self.risk_limits[name]
+            if limit is None:
+                continue
+            if (
+                abs(projected[index]) > limit
+                and abs(projected[index]) > abs(current[index]) + 1e-12
+            ):
+                return False
+        return True
 
     @staticmethod
     def _quote_valid(contract: pd.Series) -> bool:
@@ -286,6 +372,7 @@ class OptionsEnv:
 
     def _fill(self, side: str, contract: pd.Series, quantity: int, price: float, fee: float) -> None:
         symbol = str(contract["contractSymbol"])
+        greeks = tuple(float(value) for value in self._contract_greeks(contract))
         notional = price * quantity * 100 + (fee if side == "buy" else -fee)
         if side == "buy":
             if self._cash < notional:
@@ -296,26 +383,34 @@ class OptionsEnv:
                 total = position.quantity + quantity
                 position.average_price = (position.quantity * position.average_price + quantity * price) / total
                 position.quantity = total
+                position.greeks = greeks
             else:
-                self._positions[symbol] = Position(quantity, price)
+                self._positions[symbol] = Position(quantity, price, greeks)
         else:
             if symbol not in self._positions or self._positions[symbol].quantity < quantity:
                 raise ValueError("insufficient position")
             self._cash += notional
             position = self._positions[symbol]
+            position.greeks = greeks
             position.quantity -= quantity
             if position.quantity == 0:
                 del self._positions[symbol]
 
-    def _nav(self, frame: pd.DataFrame) -> float:
+    def _portfolio_metrics(self, frame: pd.DataFrame) -> tuple[float, np.ndarray]:
         quotes = frame.drop_duplicates("contractSymbol").set_index("contractSymbol")
         value = 0.0
+        exposures = np.zeros(len(GREEK_NAMES), dtype=np.float64)
         for symbol, position in self._positions.items():
             if symbol not in quotes.index:
                 value += position.quantity * position.average_price * 100
+                exposures += np.asarray(position.greeks) * position.quantity * 100
                 continue
             quote = quotes.loc[symbol]
             bid, ask = float(quote["bid"]), float(quote["ask"])
             mark = (bid + ask) / 2 if bid > 0 and ask > 0 else float(quote["lastPrice"])
             value += position.quantity * mark * 100
-        return self._cash + value
+            exposures += self._contract_greeks(quote) * position.quantity * 100
+        return self._cash + value, exposures
+
+    def _nav(self, frame: pd.DataFrame) -> float:
+        return self._portfolio_metrics(frame)[0]

@@ -13,7 +13,7 @@ from typing import Any
 class EnvManifest:
     """All configuration needed to reproduce an environment instance."""
 
-    schema_version: str = "research-demo.v1"
+    schema_version: str = "research-demo.v2"
     mode: str = "research_demo"
     data_source: str = "local-csv-yahoo-snapshots"
     data_hash: str = ""
@@ -23,6 +23,10 @@ class EnvManifest:
     starting_cash: float = 100_000.0
     commission_per_contract: float = 0.65
     invalid_action_penalty: float = 0.001
+    max_abs_delta: float | None = None
+    max_abs_gamma: float | None = None
+    max_abs_theta: float | None = None
+    max_abs_vega: float | None = None
     seed: int | None = None
     options: dict[str, Any] = field(default_factory=dict)
 

@@ -20,6 +20,8 @@ class RecurrentConfig:
     dropout: float = 0.0
     encoder: str = "flat"
     contract_feature_count: int | None = None
+    market_feature_count: int = 2
+    portfolio_feature_count: int = 3
     graph_hidden_size: int = 32
     graph_layers: int = 2
     graph_neighbors: int = 3
@@ -28,6 +30,8 @@ class RecurrentConfig:
     def __post_init__(self) -> None:
         if min(self.input_size, self.slot_count, self.action_count, self.hidden_size) < 1:
             raise ValueError("model dimensions must be positive")
+        if self.market_feature_count < 1 or self.portfolio_feature_count < 1:
+            raise ValueError("market and portfolio feature counts must be positive")
         if self.layers < 1 or self.graph_layers < 1 or self.graph_hidden_size < 1:
             raise ValueError("layer counts and graph_hidden_size must be positive")
         if self.graph_neighbors < 0:
@@ -56,12 +60,20 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
 
     temporal_input_size = config.input_size
     if config.encoder == "graph":
-        expected = 5 + config.slot_count * (config.contract_feature_count + 1)
+        expected = (
+            config.market_feature_count
+            + config.portfolio_feature_count
+            + config.slot_count * (config.contract_feature_count + 1)
+        )
         if expected != config.input_size:
             raise ValueError(
                 "input_size does not match market, contract, portfolio, and mask dimensions"
             )
-        temporal_input_size = 5 + config.slot_count * (config.graph_hidden_size + 1)
+        temporal_input_size = (
+            config.market_feature_count
+            + config.portfolio_feature_count
+            + config.slot_count * (config.graph_hidden_size + 1)
+        )
 
     def make_recurrent(kind: str):
         recurrent = nn.GRU if kind == "gru" else nn.LSTM
@@ -107,13 +119,14 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         def _graph_encode(self, sequence):
             batch, steps, _ = sequence.shape
             flattened = sequence.reshape(batch * steps, config.input_size)
-            contract_start = 2
+            contract_start = config.market_feature_count
             contract_end = contract_start + config.slot_count * config.contract_feature_count
             contracts = flattened[:, contract_start:contract_end].view(
                 batch * steps, config.slot_count, config.contract_feature_count
             )
-            portfolio = flattened[:, contract_end:contract_end + 3]
-            valid = flattened[:, contract_end + 3:].bool()
+            portfolio_end = contract_end + config.portfolio_feature_count
+            portfolio = flattened[:, contract_end:portfolio_end]
+            valid = flattened[:, portfolio_end:].bool()
             hidden = self.contract_norm(contracts)
 
             pair_valid = valid.unsqueeze(1) & valid.unsqueeze(2)
@@ -161,7 +174,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
 
             temporal = torch.cat(
                 (
-                    flattened[:, :2],
+                    flattened[:, :config.market_feature_count],
                     hidden.flatten(start_dim=1),
                     portfolio,
                     valid.to(hidden.dtype),
