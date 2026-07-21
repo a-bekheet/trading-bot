@@ -40,3 +40,44 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(windows[0].features.shape, (2, observation_vector(observations[0]).size))
         self.assertEqual(windows[0].features[0, 0], 0)
         self.assertEqual(windows[1].features[0, 0], 1)
+
+    def test_surface_features_link_strikes_sides_and_expirations(self):
+        rows = []
+        for expiration, years, call_iv, put_iv in (
+            ("2026-08-21", 0.1, 0.20, 0.22),
+            ("2026-11-20", 0.35, 0.25, 0.27),
+        ):
+            for option_type, volatility, mid in (
+                ("call", call_iv, 5.5),
+                ("put", put_iv, 4.8),
+            ):
+                rows.append({
+                    "collectedAt": "2026-07-21T14:00:00Z",
+                    "contractSymbol": f"{expiration}-{option_type}",
+                    "expiration": expiration,
+                    "optionType": option_type,
+                    "bid": mid - 0.1,
+                    "ask": mid + 0.1,
+                    "lastPrice": mid,
+                    "strike": 100,
+                    "underlyingPrice": 101,
+                    "riskFreeRate": 0.04,
+                    "dividendYield": 0.01,
+                    "timeToExpiryYears": years,
+                    "impliedVolatility": volatility,
+                    "volume": 10,
+                    "openInterest": 20,
+                    "lastTradeDate": "2026-07-21T13:59:00Z",
+                })
+
+        engineered = engineer_snapshot(pd.DataFrame(rows))
+        front = engineered[engineered["expiration"].eq("2026-08-21")]
+        back = engineered[engineered["expiration"].eq("2026-11-20")]
+
+        self.assertTrue((back["atmTermSlope"] > 0).all())
+        self.assertTrue((front["atmTermSlope"] == 0).all())
+        self.assertTrue(np.allclose(engineered["ivSkew"], 0))
+        self.assertTrue(np.allclose(engineered["putCallIvSpread"], -0.02))
+        self.assertEqual(front["parityResidual"].nunique(), 1)
+        self.assertTrue((engineered["extrinsicValuePct"] >= 0).all())
+        self.assertTrue(np.isfinite(engineered[list(ENGINEERED_FEATURES)]).all().all())

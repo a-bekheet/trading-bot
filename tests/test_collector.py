@@ -16,16 +16,35 @@ class CollectorTests(TestCase):
         self.assertEqual(len(TOP_50_TICKERS), 50)
         self.assertEqual(len(set(TOP_50_TICKERS)), 50)
 
-    @patch("trading_bot.market_data.collector.fetch_option_chain")
+    @patch("trading_bot.market_data.collector.fetch_option_chains")
     def test_appends_greek_enriched_rows_and_migrates_old_csv(self, fetch):
         fetch.return_value = (
-            "2026-08-21",
-            SimpleNamespace(
-                calls=pd.DataFrame(
-                    [{"contractSymbol": "AAPL-C", "strike": 200, "impliedVolatility": 0.2}]
+            (
+                (
+                    "2026-08-21",
+                    SimpleNamespace(
+                        calls=pd.DataFrame([{
+                            "contractSymbol": "AAPL-C1", "strike": 200,
+                            "impliedVolatility": 0.2,
+                        }]),
+                        puts=pd.DataFrame([{
+                            "contractSymbol": "AAPL-P1", "strike": 200,
+                            "impliedVolatility": 0.2,
+                        }]),
+                    ),
                 ),
-                puts=pd.DataFrame(
-                    [{"contractSymbol": "AAPL-P", "strike": 200, "impliedVolatility": 0.2}]
+                (
+                    "2026-09-18",
+                    SimpleNamespace(
+                        calls=pd.DataFrame([{
+                            "contractSymbol": "AAPL-C2", "strike": 200,
+                            "impliedVolatility": 0.25,
+                        }]),
+                        puts=pd.DataFrame([{
+                            "contractSymbol": "AAPL-P2", "strike": 200,
+                            "impliedVolatility": 0.25,
+                        }]),
+                    ),
                 ),
             ),
             200.0,
@@ -44,8 +63,13 @@ class CollectorTests(TestCase):
             )
             saved = pd.read_csv(path)
 
-        self.assertEqual(row_count, 2)
+        fetch.assert_called_once_with("AAPL", 3)
+        self.assertEqual(row_count, 4)
         self.assertEqual(tuple(saved.columns), collector.CSV_COLUMNS)
-        self.assertEqual(len(saved), 3)
+        self.assertEqual(len(saved), 5)
         self.assertEqual(set(saved.iloc[1:]["optionType"]), {"call", "put"})
+        self.assertEqual(
+            set(saved.iloc[1:]["expiration"]),
+            {"2026-08-21", "2026-09-18"},
+        )
         self.assertTrue(saved.iloc[1:][["delta", "gamma", "theta", "vega"]].notna().all().all())

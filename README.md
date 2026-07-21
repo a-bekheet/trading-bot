@@ -29,8 +29,14 @@ collect-options
 ```
 
 Each ticker has an append-only file under `data/`, such as `data/AAPL.csv`.
-Every row records the collection time, nearest expiration, option type, market
-fields, model inputs, and Delta, Gamma, Theta, and Vega.
+Every row records the collection time, expiration, option type, market fields,
+model inputs, and Delta, Gamma, Theta, and Vega. Collection defaults to the
+nearest three expirations. Use `--expirations 1` for the lowest-latency mode or
+`--expirations 0` to collect every listed expiration:
+
+```bash
+collect-options --once --expirations 1
+```
 
 ## Explore data
 
@@ -71,7 +77,8 @@ src/trading_bot/
 ├── analytics/       # Greeks now; portfolio statistics later
 ├── execution/       # Paper broker, ledger, and portfolio valuation
 ├── interface/       # User-facing data explorer
-└── market_data/     # Option retrieval, rates, universe, and collection
+├── market_data/     # Option retrieval, rates, universe, and collection
+└── training/        # Features, environment, recurrent/GNN models, and trainer
 tests/               # Deterministic unit tests
 data/                # Generated per-ticker CSVs (git-ignored)
 ```
@@ -104,8 +111,11 @@ performance. A licensed point-in-time all-expiry dataset is required before a
 historical RL environment is enabled.
 
 Snapshot loading adds causal engineered features such as relative spread,
-log-moneyness, DTE, quote age, liquidity logs, underlying return, and IV change.
-Chronological windows are available through `training.sequence`.
+forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs,
+underlying return, IV change/skew, ATM term slope, put-call IV spread, and
+put-call parity residual. Fixed policy slots are stratified across expiration
+and option type before taking deeper strikes. Chronological windows are
+available through `training.sequence`.
 
 Optional recurrent actor-critic models support GRU, LSTM, and parallel hybrid
 GRU+LSTM encoders:

@@ -46,9 +46,11 @@ Create those packages only when implementing their first real behavior.
    is dated 2026-07-21 and sourced from CompaniesMarketCap's U.S. ranking.
 2. `market_data.rates` fetches `^IRX` once per cycle as a short-term risk-free
    proxy.
-3. `market_data.option_chain` retrieves the nearest expiration, calls, puts,
-   underlying price, and dividend yield. Yahoo's option payload reports dividend
-   yield in percentage units, so the adapter divides it by 100.
+3. `market_data.option_chain` retrieves a configurable number of expirations,
+   calls, puts, underlying price, and dividend yield. Collection defaults to
+   three expirations; one is the low-latency mode and zero in the CLI means all.
+   Yahoo's option payload reports dividend yield in percentage units, so the
+   adapter divides it by 100.
 4. `analytics.greeks` calculates Black-Scholes-Merton Greeks.
 5. `market_data.collector` appends the enriched rows to `data/<TICKER>.csv`.
 6. `interface.app` displays the latest saved snapshot; it never fetches markets.
@@ -72,6 +74,11 @@ append. Important model/input columns are:
 - `underlyingPrice`, `riskFreeRate`, `riskFreeRateSource`, `dividendYield`
 - `timeToExpiryYears`, `impliedVolatility`, `greekModel`
 - `delta`, `gamma`, `theta`, `vega`
+
+Training-time surface features include forward log-moneyness, extrinsic value,
+ATM IV/skew, ATM term slope, put-call IV spread, and parity residual. They are
+derived within a single captured timestamp and are not persisted into the raw
+CSV contract.
 
 Greek conventions:
 
@@ -118,6 +125,9 @@ small and stable:
 - `info` retains executions, invalid-action count, P&L, fees, trade notional,
   and reward components.
 - A missing contract is never silently transferred to another slot.
+- Non-held slots are surface-stratified: one near-ATM contract from each
+  expiration/type group is selected before deeper strikes, with spread and open
+  interest as deterministic tie-breakers.
 
 The current environment is a deterministic accounting and API scaffold, not a
 historical simulator. Do not add a `historical` mode until the data manifest
@@ -144,15 +154,16 @@ source .venv/bin/activate
 python -m pip install -e .
 python -m unittest discover -s tests -v
 python -c 'from pathlib import Path; from trading_bot.training import OptionsEnv; print(OptionsEnv.from_directory(Path("data"), "AAPL").manifest.fingerprint)'
-collect-options --once
+collect-options --once --expirations 3
 collect-options
 streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 ```
 
-The collector defaults to one cycle every 900 seconds with a one-second delay
-between tickers.
+The collector defaults to three expirations per ticker, one cycle every 900
+seconds, and a one-second delay between tickers. Use `--expirations 1` when
+remote request latency matters more than term-structure coverage.
 
 ## Verification expectations
 

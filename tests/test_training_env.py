@@ -107,3 +107,38 @@ class OptionsEnvTests(TestCase):
 
         # One ranking for order execution and one for the next observation.
         self.assertEqual(calls, 2)
+
+    def test_slots_cover_expirations_and_option_types_before_surface_depth(self):
+        rows = []
+        for expiration in ("2026-08-21", "2026-09-18"):
+            for option_type in ("call", "put"):
+                for strike in (95, 100, 105):
+                    rows.append({
+                        "contractSymbol": f"{expiration}-{option_type}-{strike}",
+                        "expiration": expiration,
+                        "optionType": option_type,
+                        "strike": strike,
+                        "underlyingPrice": 100,
+                        "logMoneyness": np.log(100 / strike),
+                        "spreadPct": 0.02,
+                        "openInterest": 100,
+                    })
+        frame = pd.DataFrame(rows)
+        dataset = SnapshotDataset(
+            (Snapshot("2026-07-21T14:00:00+00:00", frame),),
+            "AAPL",
+        )
+        env = OptionsEnv(dataset, slot_count=4)
+
+        selected = env._slots(frame)
+
+        self.assertEqual(
+            {(row["expiration"], row["optionType"]) for row in selected},
+            {
+                ("2026-08-21", "call"),
+                ("2026-08-21", "put"),
+                ("2026-09-18", "call"),
+                ("2026-09-18", "put"),
+            },
+        )
+        self.assertTrue(all(row["strike"] == 100 for row in selected))

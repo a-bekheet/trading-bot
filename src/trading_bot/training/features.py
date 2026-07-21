@@ -9,8 +9,111 @@ import pandas as pd
 ENGINEERED_FEATURES = (
     "midPrice", "spread", "spreadPct", "logMoneyness", "dteDays",
     "volumeLog", "openInterestLog", "quoteAgeSeconds", "underlyingReturn",
-    "ivChange",
+    "ivChange", "forwardLogMoneyness", "extrinsicValuePct", "atmIv",
+    "ivSkew", "atmTermSlope", "putCallIvSpread", "parityResidual",
 )
+
+
+def _surface_features(result: pd.DataFrame) -> None:
+    """Add causal cross-sectional option-surface features in place."""
+    neutral = (
+        "forwardLogMoneyness", "extrinsicValuePct", "atmIv", "ivSkew",
+        "atmTermSlope", "putCallIvSpread", "parityResidual",
+    )
+    if "optionType" not in result or "expiration" not in result:
+        for name in neutral:
+            result[name] = 0.0
+        return
+
+    option_type = result["optionType"].astype(str).str.lower()
+    expiration = result["expiration"].astype(str)
+    strike = pd.to_numeric(result["strike"], errors="coerce").fillna(0.0)
+    spot = pd.to_numeric(result["underlyingPrice"], errors="coerce").fillna(0.0)
+    iv = pd.to_numeric(result["impliedVolatility"], errors="coerce").fillna(0.0)
+    years = pd.to_numeric(
+        result.get("timeToExpiryYears", result["dteDays"] / 365),
+        errors="coerce",
+    ).clip(lower=0).fillna(0.0)
+    rate = pd.to_numeric(result.get("riskFreeRate", 0.0), errors="coerce")
+    dividend = pd.to_numeric(result.get("dividendYield", 0.0), errors="coerce")
+    if not isinstance(rate, pd.Series):
+        rate = pd.Series(float(rate), index=result.index)
+    if not isinstance(dividend, pd.Series):
+        dividend = pd.Series(float(dividend), index=result.index)
+    rate = rate.fillna(0.0)
+    dividend = dividend.fillna(0.0)
+
+    result["forwardLogMoneyness"] = (
+        result["logMoneyness"] + (rate - dividend) * years
+    )
+    intrinsic = np.select(
+        (option_type.eq("call"), option_type.eq("put")),
+        ((spot - strike).clip(lower=0), (strike - spot).clip(lower=0)),
+        default=0.0,
+    )
+    result["extrinsicValuePct"] = (
+        (result["midPrice"] - intrinsic).clip(lower=0)
+        / spot.replace(0, np.nan)
+    ).fillna(0.0)
+
+    grouping = [expiration, option_type]
+    distance = result["forwardLogMoneyness"].abs()
+    atm_indices = distance.groupby(grouping).idxmin()
+    atm_rows = pd.DataFrame(
+        {
+            "expiration": expiration.loc[atm_indices].to_numpy(),
+            "optionType": option_type.loc[atm_indices].to_numpy(),
+            "atmIv": iv.loc[atm_indices].to_numpy(),
+            "atmYears": years.loc[atm_indices].to_numpy(),
+        }
+    )
+    atm_lookup = atm_rows.set_index(["expiration", "optionType"])["atmIv"]
+    row_keys = pd.MultiIndex.from_arrays((expiration, option_type))
+    result["atmIv"] = atm_lookup.reindex(row_keys).to_numpy()
+    result["ivSkew"] = iv - result["atmIv"]
+
+    front = atm_rows.sort_values("atmYears").groupby("optionType", sort=False).first()
+    front_iv = option_type.map(front["atmIv"])
+    front_years = option_type.map(front["atmYears"])
+    term_distance = np.sqrt(years) - np.sqrt(front_years)
+    result["atmTermSlope"] = (
+        (result["atmIv"] - front_iv) / term_distance.replace(0, np.nan)
+    ).fillna(0.0)
+
+    surface = pd.DataFrame(
+        {
+            "expiration": expiration,
+            "strike": strike,
+            "optionType": option_type,
+            "iv": iv,
+            "mid": result["midPrice"],
+        }
+    )
+    pairs = surface.pivot_table(
+        index=["expiration", "strike"],
+        columns="optionType",
+        values=["iv", "mid"],
+        aggfunc="mean",
+    )
+    pair_keys = pd.MultiIndex.from_arrays((expiration, strike))
+
+    def paired_value(value: str, side: str) -> np.ndarray:
+        key = (value, side)
+        if key not in pairs:
+            return np.full(len(result), np.nan)
+        return pairs[key].reindex(pair_keys).to_numpy()
+
+    call_iv = paired_value("iv", "call")
+    put_iv = paired_value("iv", "put")
+    call_mid = paired_value("mid", "call")
+    put_mid = paired_value("mid", "put")
+    result["putCallIvSpread"] = np.nan_to_num(call_iv - put_iv)
+    discounted_spot = spot * np.exp(-dividend * years)
+    discounted_strike = strike * np.exp(-rate * years)
+    parity = call_mid - put_mid - (discounted_spot - discounted_strike)
+    result["parityResidual"] = (
+        pd.Series(parity, index=result.index) / spot.replace(0, np.nan)
+    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def engineer_snapshot(frame: pd.DataFrame, previous: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -46,4 +149,8 @@ def engineer_snapshot(frame: pd.DataFrame, previous: pd.DataFrame | None = None)
             pd.to_numeric(result["impliedVolatility"], errors="coerce")
             - pd.to_numeric(result["contractSymbol"].map(prior_iv), errors="coerce")
         ).fillna(0.0)
+    _surface_features(result)
+    result[list(ENGINEERED_FEATURES)] = result[list(ENGINEERED_FEATURES)].replace(
+        [np.inf, -np.inf], np.nan
+    ).fillna(0.0)
     return result

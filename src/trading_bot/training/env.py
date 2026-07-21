@@ -161,10 +161,47 @@ class OptionsEnv:
         return self.dataset.snapshots[self._index].frame
 
     def _slots(self, frame: pd.DataFrame) -> list[pd.Series]:
-        ranked = frame.sort_values(["optionType", "expiration", "strike", "contractSymbol"])
+        ranked = frame.copy()
+        if "logMoneyness" in ranked:
+            ranked["_moneynessDistance"] = pd.to_numeric(
+                ranked["logMoneyness"], errors="coerce"
+            ).abs().fillna(float("inf"))
+        else:
+            spot = pd.to_numeric(ranked["underlyingPrice"], errors="coerce")
+            strike = pd.to_numeric(ranked["strike"], errors="coerce")
+            ranked["_moneynessDistance"] = np.log(spot / strike).abs().replace(
+                [np.inf, -np.inf], np.nan
+            ).fillna(float("inf"))
+        spread = (
+            ranked["spreadPct"]
+            if "spreadPct" in ranked
+            else pd.Series(float("inf"), index=ranked.index)
+        )
+        open_interest = (
+            ranked["openInterest"]
+            if "openInterest" in ranked
+            else pd.Series(0.0, index=ranked.index)
+        )
+        ranked["_spreadRank"] = pd.to_numeric(
+            spread, errors="coerce"
+        ).fillna(float("inf"))
+        ranked["_openInterestRank"] = -pd.to_numeric(
+            open_interest, errors="coerce"
+        ).fillna(0.0)
+        ordering = [
+            "expiration", "optionType", "_moneynessDistance", "_spreadRank",
+            "_openInterestRank", "strike", "contractSymbol",
+        ]
+        ranked = ranked.sort_values(ordering)
         held_ids = set(self._positions)
         held = ranked[ranked["contractSymbol"].isin(held_ids)]
-        remainder = ranked[~ranked["contractSymbol"].isin(held_ids)]
+        remainder = ranked[~ranked["contractSymbol"].isin(held_ids)].copy()
+        remainder["_surfaceDepth"] = remainder.groupby(
+            ["expiration", "optionType"], sort=False
+        ).cumcount()
+        remainder = remainder.sort_values(
+            ["_surfaceDepth", "expiration", "optionType", *ordering[2:]]
+        )
         selected = pd.concat((held, remainder.head(max(0, self.slot_count - len(held)))))
         return [row for _, row in selected.head(self.slot_count).iterrows()]
 

@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot.analytics.greeks import black_scholes_greeks, years_to_expiration
-from trading_bot.market_data.option_chain import fetch_option_chain
+from trading_bot.market_data.option_chain import fetch_option_chains
 from trading_bot.market_data.rates import RISK_FREE_RATE_SOURCE, fetch_risk_free_rate
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
@@ -70,28 +70,38 @@ def save_snapshot(
     output_dir: Path,
     risk_free_rate: float,
     collected_at: datetime | None = None,
+    expiration_count: int | None = 3,
 ) -> tuple[Path, int]:
-    """Append one ticker's nearest-expiration chain to its CSV file."""
-    expiration, chain, spot, dividend_yield = fetch_option_chain(symbol)
+    """Append one ticker's selected option surface to its CSV file."""
+    chains, spot, dividend_yield = fetch_option_chains(symbol, expiration_count)
     captured = collected_at or datetime.now(timezone.utc)
-    years = years_to_expiration(expiration, captured)
-
-    calls = _add_greeks(chain.calls, "call", spot, years, risk_free_rate, dividend_yield)
-    puts = _add_greeks(chain.puts, "put", spot, years, risk_free_rate, dividend_yield)
-    metadata = {
-        "collectedAt": captured.isoformat(),
-        "symbol": symbol,
-        "expiration": expiration,
-        "underlyingPrice": spot,
-        "riskFreeRate": risk_free_rate,
-        "riskFreeRateSource": RISK_FREE_RATE_SOURCE,
-        "dividendYield": dividend_yield,
-        "timeToExpiryYears": years,
-        "greekModel": "black-scholes-merton",
-    }
-    calls = calls.assign(optionType="call", **metadata)
-    puts = puts.assign(optionType="put", **metadata)
-    snapshot = pd.concat((calls, puts), ignore_index=True).reindex(columns=CSV_COLUMNS)
+    frames = []
+    for expiration, chain in chains:
+        years = years_to_expiration(expiration, captured)
+        calls = _add_greeks(
+            chain.calls, "call", spot, years, risk_free_rate, dividend_yield
+        )
+        puts = _add_greeks(
+            chain.puts, "put", spot, years, risk_free_rate, dividend_yield
+        )
+        metadata = {
+            "collectedAt": captured.isoformat(),
+            "symbol": symbol,
+            "expiration": expiration,
+            "underlyingPrice": spot,
+            "riskFreeRate": risk_free_rate,
+            "riskFreeRateSource": RISK_FREE_RATE_SOURCE,
+            "dividendYield": dividend_yield,
+            "timeToExpiryYears": years,
+            "greekModel": "black-scholes-merton",
+        }
+        frames.extend(
+            (
+                calls.assign(optionType="call", **metadata),
+                puts.assign(optionType="put", **metadata),
+            )
+        )
+    snapshot = pd.concat(frames, ignore_index=True).reindex(columns=CSV_COLUMNS)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{symbol}.csv"
@@ -100,7 +110,11 @@ def save_snapshot(
     return path, len(snapshot)
 
 
-def collect_all(output_dir: Path, ticker_delay: float = 1.0) -> tuple[int, int]:
+def collect_all(
+    output_dir: Path,
+    ticker_delay: float = 1.0,
+    expiration_count: int | None = 3,
+) -> tuple[int, int]:
     """Collect every ticker, continuing when an individual ticker fails."""
     try:
         risk_free_rate = fetch_risk_free_rate()
@@ -113,7 +127,12 @@ def collect_all(output_dir: Path, ticker_delay: float = 1.0) -> tuple[int, int]:
     failures = 0
     for index, symbol in enumerate(TOP_50_TICKERS):
         try:
-            path, row_count = save_snapshot(symbol, output_dir, risk_free_rate)
+            path, row_count = save_snapshot(
+                symbol,
+                output_dir,
+                risk_free_rate,
+                expiration_count=expiration_count,
+            )
             logging.info("%s: appended %d rows to %s", symbol, row_count, path)
             successes += 1
         except Exception as error:
@@ -129,14 +148,26 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, default=Path("data"))
     parser.add_argument("--interval", type=int, default=900)
     parser.add_argument("--ticker-delay", type=float, default=1.0)
+    parser.add_argument(
+        "--expirations",
+        type=int,
+        default=3,
+        help="expirations per ticker; 0 selects all (default: 3)",
+    )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    if args.interval < 1 or args.ticker_delay < 0:
-        parser.error("--interval must be positive and --ticker-delay cannot be negative")
+    if args.interval < 1 or args.ticker_delay < 0 or args.expirations < 0:
+        parser.error(
+            "--interval must be positive; delays and expiration count cannot be negative"
+        )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     while True:
-        successes, failures = collect_all(args.output_dir, args.ticker_delay)
+        successes, failures = collect_all(
+            args.output_dir,
+            args.ticker_delay,
+            expiration_count=args.expirations or None,
+        )
         logging.info("cycle complete: %d succeeded, %d failed", successes, failures)
         if args.once:
             return 1 if failures else 0
