@@ -296,6 +296,14 @@ not participate in capacity resolution. Persist the requested spec, resolved
 recurrent config, exact parameter count, and budget headroom, and verify the
 trained model matches that count before selection.
 
+Benchmark each candidate's streaming batch-one inference on a training-range
+observation after training. Record median, p95, and mean latency together with
+device, PyTorch version, thread count, warm-up iterations, and measured
+iterations. Restore the model's prior train/eval mode afterward. Timing is
+machine-specific diagnostic evidence and must not silently enter validation
+ranking, tie-breaking, or held-out selection; any future latency constraint
+must be declared before the experiment.
+
 Feature-removal candidates must use the named, non-overlapping groups in
 `sequence.FEATURE_ABLATION_GROUPS`. Apply masks inside the recurrent model after
 the versioned transform and persist exact flattened indices in

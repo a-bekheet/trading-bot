@@ -15,7 +15,10 @@ except ImportError:
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
 from trading_bot.training.env import OptionsEnv
-from trading_bot.training.recurrent import RecurrentConfig
+from trading_bot.training.recurrent import (
+    RecurrentConfig,
+    build_recurrent_actor_critic,
+)
 from trading_bot.training.sequence import observation_vector
 from trading_bot.training.trainer import (
     CHECKPOINT_SCHEMA_VERSION,
@@ -23,6 +26,7 @@ from trading_bot.training.trainer import (
     _discounted_returns,
     _generalized_advantages,
     _sample_rollout_bounds,
+    benchmark_recurrent_inference,
     evaluate_recurrent_policy,
     load_checkpoint,
     save_checkpoint,
@@ -33,6 +37,55 @@ from tests.test_training_env import demo_dataset, three_snapshot_dataset
 
 
 class TrainerTests(TestCase):
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_benchmarks_streaming_policy_inference_without_changing_mode(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=1)
+        observation, _ = env.reset(seed=3)
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            input_size=observation_vector(observation).shape[0],
+            slot_count=1,
+            action_slot_count=env.action_shape[0],
+            action_count=env.action_shape[1],
+            hidden_size=4,
+        ))
+        model.train()
+
+        report = benchmark_recurrent_inference(
+            model,
+            observation,
+            2,
+            warmup_iterations=1,
+            measured_iterations=5,
+        )
+
+        self.assertTrue(model.training)
+        self.assertEqual(
+            report["schema_version"],
+            "research-demo.inference-latency.v1",
+        )
+        self.assertEqual(report["measured_iterations"], 5)
+        self.assertGreater(report["median_microseconds"], 0)
+        self.assertGreaterEqual(
+            report["p95_microseconds"],
+            report["median_microseconds"],
+        )
+        self.assertGreater(report["torch_threads"], 0)
+
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            benchmark_recurrent_inference(
+                model,
+                observation,
+                2,
+                warmup_iterations=-1,
+            )
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            benchmark_recurrent_inference(
+                model,
+                observation,
+                2,
+                measured_iterations=0,
+            )
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_train_and_save_auditable_checkpoint(self):
         env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=1_000)

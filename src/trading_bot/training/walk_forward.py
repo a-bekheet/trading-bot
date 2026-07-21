@@ -38,13 +38,14 @@ from trading_bot.training.sequence import (
 from trading_bot.training.splits import walk_forward_splits
 from trading_bot.training.trainer import (
     TrainingConfig,
+    benchmark_recurrent_inference,
     recurrent_policy,
     save_checkpoint,
     train_actor_critic,
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v14"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v15"
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,8 @@ class WalkForwardConfig:
     long_volatility_min_coverage: float = 0.75
     long_volatility_min_edge: float = 0.02
     long_volatility_quantity: int = 1
+    latency_warmup_iterations: int = 10
+    latency_measured_iterations: int = 100
 
     def __post_init__(self) -> None:
         if min(self.min_train_size, self.validation_size, self.test_size) < 2:
@@ -82,6 +85,10 @@ class WalkForwardConfig:
             raise ValueError("bootstrap_confidence must be between zero and one")
         if self.bootstrap_min_observations < 2:
             raise ValueError("bootstrap_min_observations must be at least two")
+        if self.latency_warmup_iterations < 0:
+            raise ValueError("latency_warmup_iterations cannot be negative")
+        if self.latency_measured_iterations < 1:
+            raise ValueError("latency_measured_iterations must be positive")
         LongVolatilityConfig(
             realized_window=self.long_volatility_window,
             min_coverage=self.long_volatility_min_coverage,
@@ -284,6 +291,7 @@ def run_walk_forward_training(
             training_config,
             seed=training_config.seed + fold.fold,
         )
+        benchmark_observation, _ = train_env.reset(seed=fold_training.seed)
         candidate_runs = []
         for candidate in model_specs:
             resolved = resolved_configs.get(candidate.identifier)
@@ -309,6 +317,17 @@ def run_walk_forward_training(
                     "trained model parameter count does not match its "
                     "resolved configuration"
                 )
+            inference_latency = benchmark_recurrent_inference(
+                model,
+                benchmark_observation,
+                candidate_training.sequence_length,
+                warmup_iterations=(
+                    walk_forward_config.latency_warmup_iterations
+                ),
+                measured_iterations=(
+                    walk_forward_config.latency_measured_iterations
+                ),
+            )
             selected = _selected_metric(metrics)
             candidate_runs.append({
                 "model_id": candidate.identifier,
@@ -318,6 +337,7 @@ def run_walk_forward_training(
                 "metrics": metrics,
                 "training_config": candidate_training,
                 "parameter_count": resolved_parameter_count,
+                "inference_latency": inference_latency,
                 "masked_input_count": len(
                     recurrent_config.masked_input_indices
                 ),
@@ -369,6 +389,7 @@ def run_walk_forward_training(
                 "model": asdict(run["model_spec"]),
                 "resolved_model": asdict(run["recurrent_config"]),
                 "parameter_count": run["parameter_count"],
+                "inference_latency": run["inference_latency"],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
                     - run["parameter_count"]
@@ -638,6 +659,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--long-volatility-min-edge", type=float, default=0.02)
     parser.add_argument("--long-volatility-quantity", type=int, default=1)
+    parser.add_argument("--latency-warmup-iterations", type=int, default=10)
+    parser.add_argument("--latency-measured-iterations", type=int, default=100)
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
@@ -753,6 +776,8 @@ def main() -> None:
                 long_volatility_min_coverage=args.long_volatility_min_coverage,
                 long_volatility_min_edge=args.long_volatility_min_edge,
                 long_volatility_quantity=args.long_volatility_quantity,
+                latency_warmup_iterations=args.latency_warmup_iterations,
+                latency_measured_iterations=args.latency_measured_iterations,
             ),
             model_specs,
             TrainingConfig(

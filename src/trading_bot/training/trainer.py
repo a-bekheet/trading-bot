@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -179,6 +180,61 @@ def recurrent_policy(model, sequence_length: int):
         return action.squeeze(0).cpu().numpy()
 
     return policy
+
+
+def benchmark_recurrent_inference(
+    model,
+    observation,
+    sequence_length: int,
+    *,
+    warmup_iterations: int = 10,
+    measured_iterations: int = 100,
+) -> dict[str, Any]:
+    """Measure streaming batch-one policy latency on one training observation."""
+    if warmup_iterations < 0:
+        raise ValueError("warmup_iterations cannot be negative")
+    if measured_iterations < 1:
+        raise ValueError("measured_iterations must be positive")
+    torch = _torch()
+    device = next(model.parameters()).device
+    was_training = model.training
+    model.eval()
+    policy = recurrent_policy(model, sequence_length)
+
+    def synchronize() -> None:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    try:
+        for _ in range(warmup_iterations):
+            policy(observation)
+        synchronize()
+        durations = []
+        for _ in range(measured_iterations):
+            started = time.perf_counter_ns()
+            policy(observation)
+            synchronize()
+            durations.append((time.perf_counter_ns() - started) / 1_000.0)
+    finally:
+        model.train(was_training)
+
+    ordered = sorted(durations)
+    p95_index = math.ceil(0.95 * len(ordered)) - 1
+    return {
+        "schema_version": "research-demo.inference-latency.v1",
+        "scope": "streaming_batch_1_training_observation",
+        "device": str(device),
+        "torch_version": str(torch.__version__),
+        "torch_threads": torch.get_num_threads(),
+        "warmup_iterations": warmup_iterations,
+        "measured_iterations": measured_iterations,
+        "median_microseconds": (
+            ordered[(len(ordered) - 1) // 2]
+            + ordered[len(ordered) // 2]
+        ) / 2.0,
+        "p95_microseconds": ordered[p95_index],
+        "mean_microseconds": sum(ordered) / len(ordered),
+    }
 
 
 def evaluate_recurrent_policy(

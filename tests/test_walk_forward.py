@@ -66,6 +66,8 @@ class WalkForwardTrainingTests(TestCase):
                     validation_size=2,
                     test_size=2,
                     test_seeds=(31,),
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=3,
                 ),
                 ModelSpec(
                     kind="hybrid",
@@ -105,6 +107,18 @@ class WalkForwardTrainingTests(TestCase):
         )
         self.assertEqual(candidate["model"]["hidden_size"], 8)
         self.assertEqual(candidate["resolved_model"]["hidden_size"], 8)
+        self.assertEqual(
+            candidate["inference_latency"]["scope"],
+            "streaming_batch_1_training_observation",
+        )
+        self.assertEqual(
+            candidate["inference_latency"]["measured_iterations"],
+            3,
+        )
+        self.assertGreater(
+            candidate["inference_latency"]["median_microseconds"],
+            0,
+        )
         self.assertEqual(
             set(fold["baselines"]),
             {
@@ -184,6 +198,8 @@ class WalkForwardTrainingTests(TestCase):
                     validation_size=2,
                     test_size=2,
                     test_seeds=(41,),
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=3,
                 ),
                 candidates,
                 TrainingConfig(
@@ -418,6 +434,22 @@ class WalkForwardTrainingTests(TestCase):
             ModelSpec(algorithm="q_learning")
         with self.assertRaisesRegex(ValueError, "parameter_budget"):
             ModelSpec(parameter_budget=0)
+
+    def test_rejects_invalid_latency_benchmark_lengths(self):
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            WalkForwardConfig(
+                2,
+                2,
+                2,
+                latency_warmup_iterations=-1,
+            )
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            WalkForwardConfig(
+                2,
+                2,
+                2,
+                latency_measured_iterations=0,
+            )
 
     def test_rejects_insufficient_history(self):
         with TemporaryDirectory() as directory:

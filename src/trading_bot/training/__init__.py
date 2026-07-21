@@ -30,6 +30,7 @@ from trading_bot.training.sequence import (
 from trading_bot.training.splits import WalkForwardSplit, walk_forward_splits
 from trading_bot.training.trainer import (
     TrainingConfig,
+    benchmark_recurrent_inference,
     evaluate_recurrent_policy,
     load_checkpoint,
     selection_score,
@@ -48,6 +49,7 @@ __all__ = [
     "LongVolatilityConfig", "Observation",
     "ModelSpec", "OptionsEnv", "TrainingConfig", "Transition",
     "WalkForwardConfig", "WalkForwardSplit",
+    "benchmark_recurrent_inference",
     "buy_first_then_delta_hedge", "cost_stressed_environment",
     "delta_neutral", "evaluate_cost_stress", "evaluate_policy",
     "evaluate_recurrent_policy", "load_checkpoint",
