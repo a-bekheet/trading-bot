@@ -56,6 +56,14 @@ uses a real bounded underlying-share action with explicit synthetic costs. It
 remains a research approximation until historical underlying bid/ask, borrow,
 margin, dividend, and funding data are available.
 
+The runner can now compare flat/graph GRU, LSTM, and hybrid candidates within
+each fold. All candidates share the fold and seed, architecture selection uses
+validation reward with a deterministic simplicity tie-break, and only the
+winner reaches held-out evaluation. This supports disciplined recurrent/GNN
+ablation without turning the test partition into a model-selection leaderboard.
+The candidate count and search space must still be declared up front; repeatedly
+expanding them after seeing test results would invalidate the holdout.
+
 Recurrent PPO now carries causal hidden state during rollouts and inference,
 then trains on contiguous truncated-backpropagation chunks initialized from
 the old policy state. This removes fictitious zero-padded history and avoids
@@ -132,6 +140,10 @@ the recurrent layer handles time. Next experiments should compare:
 - Per-ticker training versus a shared graph policy with ticker/regime context.
 - Raw normalized surface features versus causal PCA, then a compact VAE or
   neural-process surface latent only after the data volume supports it.
+
+The flat/graph and recurrent-family tournament plumbing is implemented. The
+next valid experiment needs sufficiently long point-in-time history and should
+match candidates on both parameter count and measured inference latency.
 
 Do not add a graph framework while 32 dense slots remain faster and simpler.
 Do not train a VAE across a random split of surface days; that would leak future

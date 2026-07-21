@@ -133,6 +133,97 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(len(set(fingerprints.values())), 3)
         self.assertEqual(written_summary["folds"][0]["test"], fold["test"])
 
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_tournament_selects_one_candidate_before_held_out_evaluation(self):
+        candidates = (
+            ModelSpec(kind="gru", encoder="flat", hidden_size=8),
+            ModelSpec(kind="lstm", encoder="flat", hidden_size=8),
+            ModelSpec(
+                kind="hybrid",
+                encoder="graph",
+                hidden_size=8,
+                graph_hidden_size=4,
+                graph_layers=1,
+                graph_neighbors=1,
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            summary = run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    min_train_size=3,
+                    validation_size=2,
+                    test_size=2,
+                    test_seeds=(41,),
+                ),
+                candidates,
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                    seed=23,
+                ),
+                output_dir,
+                env_kwargs={"slot_count": 1, "starting_cash": 1_000},
+            )
+            fold = summary["folds"][0]
+            selection = fold["model_selection"]
+            candidate_results = selection["candidates"]
+            expected = min(
+                candidate_results,
+                key=lambda result: (
+                    -result["selection"]["validation_total_reward"],
+                    result["parameter_count"],
+                    result["model_id"],
+                ),
+            )
+            checkpoint_files = list(output_dir.glob("*.pt"))
+            _, manifest = load_checkpoint(checkpoint_files[0])
+
+        self.assertIsNone(summary["model"])
+        self.assertEqual(len(summary["candidate_models"]), 3)
+        self.assertEqual(len(candidate_results), 3)
+        self.assertEqual(len(checkpoint_files), 1)
+        self.assertEqual(
+            selection["tie_break"],
+            ["parameter_count", "model_id"],
+        )
+        self.assertEqual(selection["selected_model_id"], expected["model_id"])
+        self.assertEqual(fold["selection"]["model_id"], expected["model_id"])
+        self.assertEqual(
+            manifest["provenance"]["model_selection"]["selected_model_id"],
+            expected["model_id"],
+        )
+        self.assertEqual(manifest["model"]["kind"], expected["model"]["kind"])
+        self.assertEqual(
+            manifest["model"]["encoder"],
+            expected["model"]["encoder"],
+        )
+        self.assertTrue(all("test" not in result for result in candidate_results))
+
+    def test_model_candidates_have_stable_unique_identifiers(self):
+        first = ModelSpec(kind="gru", encoder="flat", hidden_size=8)
+        same = ModelSpec(kind="gru", encoder="flat", hidden_size=8)
+        different = ModelSpec(kind="lstm", encoder="flat", hidden_size=8)
+
+        self.assertEqual(first.identifier, same.identifier)
+        self.assertNotEqual(first.identifier, different.identifier)
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "unique"):
+                run_walk_forward_training(
+                    walk_forward_dataset(),
+                    WalkForwardConfig(3, 2, 2),
+                    (first, same),
+                    TrainingConfig(episodes=1),
+                    Path(directory),
+                )
+
+    def test_rejects_invalid_model_candidate(self):
+        with self.assertRaisesRegex(ValueError, "kind"):
+            ModelSpec(kind="transformer")
+
     def test_rejects_insufficient_history(self):
         with TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "too short"):

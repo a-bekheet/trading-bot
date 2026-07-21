@@ -249,11 +249,15 @@ exactly `K` contract nodes. Keep `RecurrentConfig.slot_count` equal to
 
 `run_walk_forward_training` is the executable research boundary. For every
 fold, train only on `train`, choose and restore weights only from `validation`,
-then evaluate `test`. The test range may populate reports and provenance only
+then evaluate `test`. Architecture tournaments must give candidates the same
+fold and seed, rank validation reward only, and break exact ties by parameter
+count then stable model ID. Instantiate the test environment only after the
+winner is fixed, save only the winning checkpoint, and never attach test metrics
+to losing candidates. The test range may populate reports and provenance only
 after selection; it must never affect features, hyperparameters, early stopping,
-or checkpoint choice. Persist all three dataset fingerprints and exact split
-indices. An insufficient dataset is a hard failure, not permission to shrink
-partitions.
+or checkpoint choice. Persist all candidate configs, validation scores,
+parameter counts, all three dataset fingerprints, and exact split indices. An
+insufficient dataset is a hard failure, not permission to shrink partitions.
 
 ## Commands
 
@@ -268,7 +272,7 @@ collect-options
 streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
-train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8
+train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph:hybrid
 ```
 
 The collector defaults to three expirations per ticker, one cycle every 900

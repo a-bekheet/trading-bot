@@ -298,13 +298,24 @@ train-walk-forward \
   --validation-size 100 \
   --test-size 100 \
   --embargo 8 \
-  --encoder graph \
-  --kind hybrid
+  --candidate flat:gru \
+  --candidate flat:lstm \
+  --candidate graph:hybrid
 ```
 
-Each fold trains only on its training range, selects and restores weights using
-validation reward, and touches the test range only afterward. It writes a safe
-checkpoint per fold plus a JSON summary with exact split boundaries, distinct
+Repeat `--candidate ENCODER:KIND` to run a leak-safe architecture tournament.
+Every GRU, LSTM, hybrid, flat, or graph candidate receives the same fold and
+training seed. Each candidate restores its best validation checkpoint; the
+highest validation reward wins, with fewer trainable parameters and then a
+stable model ID breaking ties. Only that winner is instantiated against the
+held-out test range and only its checkpoint is saved. The summary retains every
+candidate's configuration, parameter count, and validation score, but never a
+losing-candidate test result. Omit `--candidate` to preserve the single-model
+`--encoder`/`--kind` workflow.
+
+Each fold trains only on its training range and touches the test range only
+after both architecture and checkpoint selection. It writes a safe checkpoint
+per fold plus a JSON summary with exact split boundaries, distinct
 train/validation/test fingerprints, held-out recurrent results, no-op and
 first-feasible baselines, a buy-first-then-Delta-hedge comparator, and
 normal/doubled-cost reports. A feature-aware long-volatility comparator waits

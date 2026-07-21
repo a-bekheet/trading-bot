@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
@@ -35,7 +37,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v7"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v8"
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,35 @@ class ModelSpec:
     graph_neighbors: int = 3
     initial_hold_bias: float = 5.0
 
+    def __post_init__(self) -> None:
+        if self.kind not in {"gru", "lstm", "hybrid"}:
+            raise ValueError("model kind must be gru, lstm, or hybrid")
+        if self.encoder not in {"flat", "graph"}:
+            raise ValueError("model encoder must be flat or graph")
+        if min(
+            self.hidden_size,
+            self.layers,
+            self.graph_hidden_size,
+            self.graph_layers,
+            self.graph_neighbors,
+        ) < 1:
+            raise ValueError(
+                "model sizes, layers, and graph neighbors must be positive"
+            )
+        if not 0 <= self.dropout < 1:
+            raise ValueError("model dropout must be in [0, 1)")
+
+    @property
+    def identifier(self) -> str:
+        """Return a stable identifier for artifact joins."""
+        canonical = json.dumps(
+            asdict(self),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest = hashlib.sha256(canonical).hexdigest()[:10]
+        return f"{self.encoder}-{self.kind}-{digest}"
+
     def build(self, env: OptionsEnv) -> RecurrentConfig:
         observation, _ = env.reset(seed=0)
         return RecurrentConfig(
@@ -128,16 +159,43 @@ def _reports_to_dict(reports) -> list[dict[str, Any]]:
     return [report.to_dict() for report in reports]
 
 
+def _normalize_model_specs(
+    model_spec: ModelSpec | Sequence[ModelSpec],
+) -> tuple[ModelSpec, ...]:
+    specs = (
+        (model_spec,)
+        if isinstance(model_spec, ModelSpec)
+        else tuple(model_spec)
+    )
+    if not specs:
+        raise ValueError("at least one model candidate is required")
+    if not all(isinstance(spec, ModelSpec) for spec in specs):
+        raise TypeError("model candidates must be ModelSpec instances")
+    identifiers = [spec.identifier for spec in specs]
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("model candidates must be unique")
+    return specs
+
+
+def _selected_metric(metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    selected = next(item for item in metrics if item["selected_checkpoint"])
+    score = selected["evaluation_total_reward"]
+    if score is None or not math.isfinite(float(score)):
+        raise ValueError("candidate validation reward must be finite")
+    return selected
+
+
 def run_walk_forward_training(
     dataset: SnapshotDataset,
     walk_forward_config: WalkForwardConfig,
-    model_spec: ModelSpec,
+    model_spec: ModelSpec | Sequence[ModelSpec],
     training_config: TrainingConfig,
     output_dir: Path,
     *,
     env_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Train on each fold, select on validation, then evaluate untouched test."""
+    """Select architectures on validation, then evaluate only the winner on test."""
+    model_specs = _normalize_model_specs(model_spec)
     folds = walk_forward_splits(
         len(dataset),
         min_train_size=walk_forward_config.min_train_size,
@@ -163,18 +221,68 @@ def run_walk_forward_training(
         train_data, validation_data, test_data = fold.apply(dataset)
         train_env = OptionsEnv(train_data, **environment_options)
         validation_env = OptionsEnv(validation_data, **environment_options)
-        test_env = OptionsEnv(test_data, **environment_options)
-        recurrent_config = model_spec.build(train_env)
         fold_training = replace(
             training_config,
             seed=training_config.seed + fold.fold,
         )
-        model, metrics = train_actor_critic(
-            train_env,
-            recurrent_config,
-            fold_training,
-            selection_env=validation_env,
+        candidate_runs = []
+        for candidate in model_specs:
+            recurrent_config = candidate.build(train_env)
+            model, metrics = train_actor_critic(
+                train_env,
+                recurrent_config,
+                fold_training,
+                selection_env=validation_env,
+            )
+            selected = _selected_metric(metrics)
+            candidate_runs.append({
+                "model_id": candidate.identifier,
+                "model_spec": candidate,
+                "recurrent_config": recurrent_config,
+                "model": model,
+                "metrics": metrics,
+                "parameter_count": sum(
+                    parameter.numel() for parameter in model.parameters()
+                ),
+                "selected_episode": selected["episode"],
+                "validation_total_reward": float(
+                    selected["evaluation_total_reward"]
+                ),
+                "selection_scope": selected["evaluation_scope"],
+            })
+
+        winning_run = min(
+            candidate_runs,
+            key=lambda run: (
+                -run["validation_total_reward"],
+                run["parameter_count"],
+                run["model_id"],
+            ),
         )
+        candidate_results = [
+            {
+                "model_id": run["model_id"],
+                "model": asdict(run["model_spec"]),
+                "parameter_count": run["parameter_count"],
+                "selection": {
+                    "scope": run["selection_scope"],
+                    "episode": run["selected_episode"],
+                    "validation_total_reward": run[
+                        "validation_total_reward"
+                    ],
+                },
+            }
+            for run in candidate_runs
+        ]
+        model = winning_run["model"]
+        metrics = winning_run["metrics"]
+        recurrent_config = winning_run["recurrent_config"]
+        selected = _selected_metric(metrics)
+        candidate_runs.clear()
+
+        # Do not instantiate or evaluate the held-out range until validation
+        # has fixed both the architecture and its restored checkpoint.
+        test_env = OptionsEnv(test_data, **environment_options)
 
         test_traces = [
             run_episode_trace(
@@ -218,7 +326,9 @@ def run_walk_forward_training(
                 zip(test_traces, traces, strict=True)
             ):
                 if candidate.timestamps != baseline.timestamps:
-                    raise ValueError("candidate and baseline test paths are not aligned")
+                    raise ValueError(
+                        "candidate and baseline test paths are not aligned"
+                    )
                 comparison = paired_moving_block_bootstrap(
                     candidate.step_returns,
                     baseline.step_returns,
@@ -257,9 +367,6 @@ def run_walk_forward_training(
                 for seed in walk_forward_config.test_seeds
             ]
 
-        selected = next(
-            item for item in metrics if item["selected_checkpoint"]
-        )
         fold_record = {
             "fold": fold.fold,
             "split": fold.to_dict(),
@@ -272,6 +379,14 @@ def run_walk_forward_training(
                 "scope": selected["evaluation_scope"],
                 "episode": selected["episode"],
                 "validation_total_reward": selected["evaluation_total_reward"],
+                "model_id": winning_run["model_id"],
+            },
+            "model_selection": {
+                "criterion": "validation_total_reward",
+                "direction": "maximize",
+                "tie_break": ["parameter_count", "model_id"],
+                "selected_model_id": winning_run["model_id"],
+                "candidates": candidate_results,
             },
             "test": _reports_to_dict(test_reports),
             "baselines": {
@@ -288,8 +403,8 @@ def run_walk_forward_training(
             },
         }
         checkpoint = output_dir / (
-            f"{dataset.symbol}-fold-{fold.fold:03d}-{model_spec.encoder}-"
-            f"{model_spec.kind}.pt"
+            f"{dataset.symbol}-fold-{fold.fold:03d}-"
+            f"{winning_run['model_id']}.pt"
         )
         save_checkpoint(
             checkpoint,
@@ -311,7 +426,11 @@ def run_walk_forward_training(
         "mode": "research_demo",
         "symbol": dataset.symbol,
         "walk_forward": asdict(walk_forward_config),
-        "model": asdict(model_spec),
+        "model": asdict(model_specs[0]) if len(model_specs) == 1 else None,
+        "candidate_models": [
+            {"model_id": spec.identifier, "model": asdict(spec)}
+            for spec in model_specs
+        ],
         "training": asdict(training_config),
         "folds": fold_results,
     }
@@ -327,7 +446,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--symbol", default="AAPL")
-    parser.add_argument("--output-dir", type=Path, default=Path("data/models/walk-forward"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("data/models/walk-forward"),
+    )
     parser.add_argument("--min-train-size", type=int, default=500)
     parser.add_argument("--validation-size", type=int, default=100)
     parser.add_argument("--test-size", type=int, default=100)
@@ -347,6 +470,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--long-volatility-quantity", type=int, default=1)
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
+    parser.add_argument(
+        "--candidate",
+        action="append",
+        metavar="ENCODER:KIND",
+        help=(
+            "repeat to select architectures using validation only; "
+            "for example --candidate flat:gru --candidate graph:hybrid"
+        ),
+    )
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--episodes", type=int, default=25)
@@ -373,10 +505,30 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
+    candidates = args.candidate or [f"{args.encoder}:{args.kind}"]
+    specs = []
+    for candidate in candidates:
+        parts = candidate.split(":")
+        if len(parts) != 2:
+            raise ValueError("candidate must use ENCODER:KIND format")
+        encoder, kind = parts
+        specs.append(
+            ModelSpec(
+                kind=kind,
+                encoder=encoder,
+                hidden_size=args.hidden_size,
+                initial_hold_bias=args.initial_hold_bias,
+            )
+        )
+    return _normalize_model_specs(specs)
+
+
 def main() -> None:
     args = _parser().parse_args()
     dataset = SnapshotDataset.from_directory(args.data_dir, args.symbol)
     try:
+        model_specs = _model_specs_from_args(args)
         summary = run_walk_forward_training(
             dataset,
             WalkForwardConfig(
@@ -396,12 +548,7 @@ def main() -> None:
                 long_volatility_min_edge=args.long_volatility_min_edge,
                 long_volatility_quantity=args.long_volatility_quantity,
             ),
-            ModelSpec(
-                kind=args.kind,
-                encoder=args.encoder,
-                hidden_size=args.hidden_size,
-                initial_hold_bias=args.initial_hold_bias,
-            ),
+            model_specs,
             TrainingConfig(
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
