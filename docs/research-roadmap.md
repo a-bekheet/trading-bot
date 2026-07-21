@@ -80,6 +80,13 @@ above zero per held-out seed. Folds below the minimum sample count produce no
 bounds, preventing tiny integration datasets from masquerading as statistical
 evidence.
 
+A causal long-volatility baseline now converts the IV-minus-realized feature
+into an executable comparator: after sufficient history, it opens feasible
+front-ATM positive- and negative-Delta legs when realized volatility clears IV
+by a configured edge, then reduces residual Delta with shares. It remains
+long-only and has no lifecycle exit, so it tests whether the learned agent beats
+a simple underpriced-volatility rule rather than a complete volatility book.
+
 ## Prioritized implementation sequence
 
 ### 1. Make evaluation credible
@@ -99,7 +106,9 @@ evidence.
 - No trade and first-feasible policies test environment mechanics.
 - Retain the implemented Black-Scholes Delta hedge as a comparator and extend
   it to explicit option-liability episodes when the historical dataset permits.
-- Add simple IV mean-reversion/carry rules that use only available quotes.
+- Retain the implemented long-volatility IV-versus-realized rule; add a
+  collateralized short-volatility/carry comparator only after margin, assignment,
+  and option-liability accounting exist.
 - Add a Monte-Carlo policy-gradient trainer as an algorithmic comparator.
 
 ### 3. Improve the state without inflating latency

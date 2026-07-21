@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from trading_bot.training.baselines import (
+    LongVolatilityConfig,
     buy_first_then_delta_hedge,
     first_feasible,
+    long_volatility_delta_hedge,
     no_op,
 )
 from trading_bot.training.dataset import SnapshotDataset
@@ -33,7 +35,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v6"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v7"
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,10 @@ class WalkForwardConfig:
     bootstrap_confidence: float = 0.95
     bootstrap_min_observations: int = 20
     bootstrap_seed: int = 70_001
+    long_volatility_window: int = 16
+    long_volatility_min_coverage: float = 0.75
+    long_volatility_min_edge: float = 0.02
+    long_volatility_quantity: int = 1
 
     def __post_init__(self) -> None:
         if min(self.min_train_size, self.validation_size, self.test_size) < 2:
@@ -67,6 +73,12 @@ class WalkForwardConfig:
             raise ValueError("bootstrap_confidence must be between zero and one")
         if self.bootstrap_min_observations < 2:
             raise ValueError("bootstrap_min_observations must be at least two")
+        LongVolatilityConfig(
+            realized_window=self.long_volatility_window,
+            min_coverage=self.long_volatility_min_coverage,
+            min_volatility_edge=self.long_volatility_min_edge,
+            quantity=self.long_volatility_quantity,
+        )
 
 
 @dataclass(frozen=True)
@@ -140,6 +152,12 @@ def run_walk_forward_training(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     environment_options = dict(env_kwargs or {})
+    long_volatility_config = LongVolatilityConfig(
+        realized_window=walk_forward_config.long_volatility_window,
+        min_coverage=walk_forward_config.long_volatility_min_coverage,
+        min_volatility_edge=walk_forward_config.long_volatility_min_edge,
+        quantity=walk_forward_config.long_volatility_quantity,
+    )
     fold_results = []
     for fold in folds:
         train_data, validation_data, test_data = fold.apply(dataset)
@@ -178,6 +196,14 @@ def run_walk_forward_training(
             ],
             "buy_first_then_delta_hedge": [
                 run_episode_trace(test_env, buy_first_then_delta_hedge(), seed)
+                for seed in walk_forward_config.test_seeds
+            ],
+            "long_volatility_delta_hedge": [
+                run_episode_trace(
+                    test_env,
+                    long_volatility_delta_hedge(long_volatility_config),
+                    seed,
+                )
                 for seed in walk_forward_config.test_seeds
             ],
         }
@@ -252,6 +278,9 @@ def run_walk_forward_training(
                 name: _reports_to_dict(reports)
                 for name, reports in baseline_reports.items()
             },
+            "baseline_configuration": {
+                "long_volatility_delta_hedge": asdict(long_volatility_config),
+            },
             "statistical_comparisons": statistical_comparisons,
             "cost_stress": {
                 name: _reports_to_dict(reports)
@@ -310,6 +339,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-confidence", type=float, default=0.95)
     parser.add_argument("--bootstrap-min-observations", type=int, default=20)
     parser.add_argument("--bootstrap-seed", type=int, default=70_001)
+    parser.add_argument("--long-volatility-window", type=int, default=16)
+    parser.add_argument(
+        "--long-volatility-min-coverage", type=float, default=0.75
+    )
+    parser.add_argument("--long-volatility-min-edge", type=float, default=0.02)
+    parser.add_argument("--long-volatility-quantity", type=int, default=1)
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
     parser.add_argument("--hidden-size", type=int, default=128)
@@ -356,6 +391,10 @@ def main() -> None:
                 bootstrap_confidence=args.bootstrap_confidence,
                 bootstrap_min_observations=args.bootstrap_min_observations,
                 bootstrap_seed=args.bootstrap_seed,
+                long_volatility_window=args.long_volatility_window,
+                long_volatility_min_coverage=args.long_volatility_min_coverage,
+                long_volatility_min_edge=args.long_volatility_min_edge,
+                long_volatility_quantity=args.long_volatility_quantity,
             ),
             ModelSpec(
                 kind=args.kind,

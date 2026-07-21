@@ -231,6 +231,12 @@ duplicate deterministic seeds as independent observations. The default minimum
 is 20 transitions; shorter paths must report `insufficient_history` and null
 intervals. Bootstrap results are post-selection evidence only and may never
 affect features, hyperparameters, early stopping, or checkpoint choice.
+The long-volatility baseline is causal: require its configured realized-vol
+coverage and edge over front ATM IV, select feasible front-ATM positive- and
+negative-Delta legs, enter once, then hedge residual Delta on later snapshots.
+Persist its horizon, threshold, coverage, and quantity in each fold. Do not call
+it a straddle when the nearest feasible call and put have different strikes,
+and do not infer a short-volatility result from a long-only environment.
 
 Underlying fills use the captured spot with explicit synthetic slippage and
 per-share commission because the current CSV has no underlying bid/ask. Keep

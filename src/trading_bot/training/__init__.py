@@ -1,5 +1,13 @@
 """Reinforcement-learning research surfaces."""
 
+from trading_bot.training.baselines import (
+    LongVolatilityConfig,
+    buy_first_then_delta_hedge,
+    delta_neutral,
+    first_feasible,
+    long_volatility_delta_hedge,
+    no_op,
+)
 from trading_bot.training.env import OptionsEnv
 from trading_bot.training.evaluation import (
     BootstrapComparison,
@@ -30,11 +38,13 @@ from trading_bot.training.walk_forward import (
 
 __all__ = [
     "Action", "BootstrapComparison", "CostScenario", "EpisodeReport",
-    "EpisodeTrace", "EnvManifest", "Observation",
+    "EpisodeTrace", "EnvManifest", "LongVolatilityConfig", "Observation",
     "ModelSpec", "OptionsEnv", "TrainingConfig", "Transition",
     "WalkForwardConfig", "WalkForwardSplit",
-    "cost_stressed_environment", "evaluate_cost_stress", "evaluate_policy",
+    "buy_first_then_delta_hedge", "cost_stressed_environment",
+    "delta_neutral", "evaluate_cost_stress", "evaluate_policy",
     "evaluate_recurrent_policy", "load_checkpoint",
+    "first_feasible", "long_volatility_delta_hedge", "no_op",
     "paired_moving_block_bootstrap", "run_episode", "run_episode_trace",
     "run_walk_forward_training", "train_actor_critic", "walk_forward_splits",
 ]

@@ -307,8 +307,15 @@ validation reward, and touches the test range only afterward. It writes a safe
 checkpoint per fold plus a JSON summary with exact split boundaries, distinct
 train/validation/test fingerprints, held-out recurrent results, no-op and
 first-feasible baselines, a buy-first-then-Delta-hedge comparator, and
-normal/doubled-cost reports. This improves the evaluation boundary; Yahoo
-snapshots and these simple baselines still do not establish alpha.
+normal/doubled-cost reports. A feature-aware long-volatility comparator waits
+for sufficient realized-volatility coverage, buys a front-ATM call/put pair
+only when realized volatility exceeds ATM IV by a configured edge, and then
+hedges residual Delta with shares. Its defaults are a 16-snapshot horizon, 75%
+coverage, a 0.02 volatility edge, and one contract per leg; tune them with the
+`--long-volatility-*` flags. The rule is long-only and holds the pair for the
+episode, so it is a benchmark rather than a complete volatility strategy. This
+improves the evaluation boundary; Yahoo snapshots and these baselines still do
+not establish alpha.
 
 Held-out agent and baseline paths are also compared with a paired circular
 moving-block bootstrap over cumulative log-return difference. Pairing uses the
