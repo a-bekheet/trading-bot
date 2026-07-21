@@ -18,7 +18,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v10"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v11"
 
 
 @dataclass(frozen=True)

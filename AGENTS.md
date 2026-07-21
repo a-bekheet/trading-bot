@@ -80,9 +80,11 @@ append. Important model/input columns are:
 Training-time surface features include forward log-moneyness, extrinsic value,
 ATM IV/skew, ATM term slope, put-call IV spread, and parity residual. They are
 derived within a single captured timestamp and are not persisted into the raw
-CSV contract. The market vector also contains front-expiry ATM IV and its
-difference from causal 4/16-snapshot realized volatility. Keep those global
-regime features out of each contract node.
+CSV contract. The market vector also contains front-expiry ATM IV, executable
+25-delta risk reversal and butterfly, ATM/wing/quote/Greek coverage, and the
+ATM-IV difference from causal 4/16-snapshot realized volatility. Wing factors
+must exclude zero-bid, crossed, or otherwise unexecutable quotes. Keep global
+regime and quality features out of each contract node.
 
 Greek conventions:
 
@@ -173,7 +175,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v4`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v5`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
 is expressed in years, and heavy-tailed fields are compressed and clipped. Raw
@@ -188,6 +190,13 @@ features, not contract features; never duplicate global state across every
 slot. Realized volatility uses only timestamped prices at or before the current
 snapshot, annualizes by actual elapsed time, and carries a coverage fraction so
 zero history cannot masquerade as zero volatility.
+
+Front 25-delta risk reversal is call IV minus put IV; butterfly is mean wing IV
+minus executable ATM IV. Both are computed cross-sectionally from the current
+snapshot only and require explicit coverage. Never impute a missing wing with
+zero or use an unexecutable quote to manufacture a surface factor. A wing must
+be within 0.15 Delta of its target and ATM must be within 0.10 absolute forward
+log-moneyness; otherwise reduce coverage and leave the factor neutral.
 
 The trainer uses stateful factorized per-slot PPO ratios, GAE, policy/value
 clipping, target-KL stopping, entropy regularization, and gradient clipping.

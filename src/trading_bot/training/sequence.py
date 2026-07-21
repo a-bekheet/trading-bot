@@ -59,6 +59,13 @@ def _dimensionless_components(
             )
         front_iv_index = market_indices["frontAtmIv"]
         market[front_iv_index] = np.log1p(max(market[front_iv_index], 0.0))
+        for name in (
+            "front25DeltaRiskReversal",
+            "front25DeltaButterfly",
+        ):
+            index = market_indices[name]
+            value = market[index]
+            market[index] = np.sign(value) * np.log1p(abs(value))
         for window in REALIZED_VOL_WINDOWS:
             spread_index = market_indices[f"atmIvMinusRealizedVol{window}"]
             spread = market[spread_index]

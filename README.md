@@ -141,15 +141,21 @@ change/skew, ATM term slope, put-call IV spread, and put-call parity residual.
 Underlying return and annualized realized volatility over 4- and 16-snapshot
 windows live once in the market vector rather than being repeated for every
 contract. Front-expiry ATM IV and its difference from both realized-volatility
-horizons provide a compact volatility-risk-premium regime signal. Each realized
-volatility estimate has an explicit history-coverage feature, and the IV-minus-
-realized signal stays neutral until some causal return history exists.
+horizons provide a compact volatility-risk-premium regime signal. The same
+snapshot-level vector carries executable front-expiry 25-delta risk reversal
+and butterfly factors, exposing smirk and wing convexity without repeating them
+across graph nodes. ATM/wing, executable-quote, Greek, and realized-volatility
+coverage features distinguish missing surfaces from genuine zero signals. Wing
+selection ignores zero-bid or otherwise unexecutable quotes. The IV-minus-
+realized signal stays neutral until some causal return history exists. Nearest
+wing contracts must also lie within 0.15 Delta of the 25-delta target, so an
+ATM-only chain cannot masquerade as a complete smile.
 Fixed policy slots are stratified across expiration and option type before
 taking deeper strikes. Chronological windows are available through
 `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v4` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v5` transform. Prices and strikes are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 the underlying position is scaled by its NAV weight, portfolio values become
 ratios, DTE is in years, and heavy-tailed age/liquidity fields are compressed.
@@ -157,6 +163,10 @@ Raw volume and
 open interest are omitted because their causal log features contain the useful
 ordering at a much better numerical scale. The transform is fitted on no data,
 so it cannot leak future distribution statistics into a training window.
+On the included 84-contract AAPL snapshot, the complete market-surface and
+quality calculation took about 3.14 ms median per snapshot in a local CPU
+microbenchmark. It runs once during dataset engineering, not on every policy
+step; treat that number as machine-specific engineering evidence.
 
 Optional recurrent actor-critic models support GRU, LSTM, and parallel hybrid
 GRU+LSTM encoders:

@@ -9,6 +9,8 @@ import pandas as pd
 
 
 REALIZED_VOL_WINDOWS = (4, 16)
+FRONT_ATM_LOG_MONEYNESS_TOLERANCE = 0.10
+FRONT_WING_DELTA_TOLERANCE = 0.15
 MARKET_ENGINEERED_FEATURES = (
     "underlyingReturn",
     "realizedVol4",
@@ -16,6 +18,12 @@ MARKET_ENGINEERED_FEATURES = (
     "realizedVol16",
     "realizedVol16Coverage",
     "frontAtmIv",
+    "frontAtmIvCoverage",
+    "front25DeltaRiskReversal",
+    "front25DeltaButterfly",
+    "front25DeltaCoverage",
+    "executableQuoteCoverage",
+    "greekCoverage",
     "atmIvMinusRealizedVol4",
     "atmIvMinusRealizedVol16",
 )
@@ -175,32 +183,128 @@ def _surface_features(result: pd.DataFrame) -> None:
 
 
 def _market_surface_features(result: pd.DataFrame) -> None:
-    """Add one snapshot-level volatility regime signal to every source row."""
-    result["frontAtmIv"] = 0.0
-    result["atmIvMinusRealizedVol4"] = 0.0
-    result["atmIvMinusRealizedVol16"] = 0.0
-    required = {"expiration", "optionType", "atmIv", "dteDays"}
+    """Add compact, causal surface factors and explicit quality coverage."""
+    neutral = (
+        "frontAtmIv",
+        "frontAtmIvCoverage",
+        "front25DeltaRiskReversal",
+        "front25DeltaButterfly",
+        "front25DeltaCoverage",
+        "executableQuoteCoverage",
+        "greekCoverage",
+        "atmIvMinusRealizedVol4",
+        "atmIvMinusRealizedVol16",
+    )
+    for name in neutral:
+        result[name] = 0.0
+
+    quote_required = {"bid", "ask", "lastPrice"}
+    if quote_required.issubset(result.columns):
+        bid = pd.to_numeric(result["bid"], errors="coerce")
+        ask = pd.to_numeric(result["ask"], errors="coerce")
+        last = pd.to_numeric(result["lastPrice"], errors="coerce")
+        executable = (
+            np.isfinite(bid)
+            & np.isfinite(ask)
+            & np.isfinite(last)
+            & (bid > 0)
+            & (ask > 0)
+            & (last > 0)
+            & (bid <= ask)
+        )
+        result["executableQuoteCoverage"] = float(executable.mean())
+    else:
+        executable = pd.Series(False, index=result.index)
+
+    greek_names = ("delta", "gamma", "theta", "vega")
+    if set(greek_names).issubset(result.columns):
+        greeks = result.loc[:, greek_names].apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+        result["greekCoverage"] = float(
+            np.isfinite(greeks.to_numpy(dtype=np.float64)).all(axis=1).mean()
+        )
+
+    required = {
+        "expiration",
+        "optionType",
+        "impliedVolatility",
+        "forwardLogMoneyness",
+        "dteDays",
+    }
     if not required.issubset(result.columns):
         return
 
-    groups = pd.DataFrame({
+    surface = pd.DataFrame({
         "expiration": result["expiration"].astype(str),
         "optionType": result["optionType"].astype(str).str.lower(),
-        "atmIv": pd.to_numeric(result["atmIv"], errors="coerce"),
+        "iv": pd.to_numeric(result["impliedVolatility"], errors="coerce"),
+        "delta": pd.to_numeric(result.get("delta"), errors="coerce"),
+        "forwardLogMoneyness": pd.to_numeric(
+            result["forwardLogMoneyness"],
+            errors="coerce",
+        ),
         "dteDays": pd.to_numeric(result["dteDays"], errors="coerce"),
-    }).dropna()
-    groups = groups[(groups["atmIv"] > 0) & (groups["dteDays"] >= 0)]
-    if groups.empty:
+        "executable": executable,
+    })
+    surface = surface[
+        surface["executable"]
+        & np.isfinite(surface["iv"])
+        & (surface["iv"] > 0)
+        & np.isfinite(surface["dteDays"])
+        & (surface["dteDays"] >= 0)
+    ]
+    if surface.empty:
         return
-    groups = groups.groupby(
-        ["expiration", "optionType"], as_index=False, sort=False
-    ).first()
-    front_dte = float(groups["dteDays"].min())
-    front = groups[np.isclose(groups["dteDays"], front_dte)]
-    front_atm_iv = float(front["atmIv"].median())
+
+    front_dte = float(surface["dteDays"].min())
+    front = surface[np.isclose(surface["dteDays"], front_dte)]
+    atm_values = []
+    for side in ("call", "put"):
+        side_rows = front[
+            front["optionType"].eq(side)
+            & np.isfinite(front["forwardLogMoneyness"])
+        ]
+        if side_rows.empty:
+            continue
+        atm_index = side_rows["forwardLogMoneyness"].abs().idxmin()
+        if (
+            abs(float(side_rows.loc[atm_index, "forwardLogMoneyness"]))
+            > FRONT_ATM_LOG_MONEYNESS_TOLERANCE
+        ):
+            continue
+        atm_values.append(float(side_rows.loc[atm_index, "iv"]))
+    result["frontAtmIvCoverage"] = len(atm_values) / 2
+    if not atm_values:
+        return
+    front_atm_iv = float(np.median(atm_values))
     if not np.isfinite(front_atm_iv) or front_atm_iv <= 0:
         return
     result["frontAtmIv"] = front_atm_iv
+
+    wing_values: dict[str, float] = {}
+    for side, target_delta in (("call", 0.25), ("put", -0.25)):
+        side_rows = front[
+            front["optionType"].eq(side)
+            & np.isfinite(front["delta"])
+        ]
+        if side_rows.empty:
+            continue
+        delta_distance = (side_rows["delta"] - target_delta).abs()
+        wing_index = delta_distance.idxmin()
+        if float(delta_distance.loc[wing_index]) > FRONT_WING_DELTA_TOLERANCE:
+            continue
+        wing_values[side] = float(side_rows.loc[wing_index, "iv"])
+    result["front25DeltaCoverage"] = len(wing_values) / 2
+    if len(wing_values) == 2:
+        call_iv = wing_values["call"]
+        put_iv = wing_values["put"]
+        result["front25DeltaRiskReversal"] = call_iv - put_iv
+        result["front25DeltaButterfly"] = (
+            (call_iv + put_iv) / 2 - front_atm_iv
+        )
+
     for window in REALIZED_VOL_WINDOWS:
         coverage = float(result[f"realizedVol{window}Coverage"].iloc[0])
         if coverage <= 0:

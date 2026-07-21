@@ -87,6 +87,10 @@ class FeatureSequenceTests(TestCase):
         self.assertTrue(np.allclose(engineered["ivSkew"], 0))
         self.assertTrue(np.allclose(engineered["putCallIvSpread"], -0.02))
         self.assertTrue(np.allclose(engineered["frontAtmIv"], 0.21))
+        self.assertTrue(np.allclose(engineered["frontAtmIvCoverage"], 1))
+        self.assertTrue(np.allclose(engineered["front25DeltaCoverage"], 0))
+        self.assertTrue(np.allclose(engineered["executableQuoteCoverage"], 1))
+        self.assertTrue(np.allclose(engineered["greekCoverage"], 0))
         self.assertTrue(np.allclose(engineered["atmIvMinusRealizedVol4"], 0))
         self.assertEqual(front["parityResidual"].nunique(), 1)
         self.assertTrue((engineered["extrinsicValuePct"] >= 0).all())
@@ -144,7 +148,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v4")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v5")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
@@ -155,6 +159,12 @@ class FeatureSequenceTests(TestCase):
         market[MARKET_FEATURES.index("riskFreeRate")] = 0.04
         market[MARKET_FEATURES.index("realizedVol4")] = 0.2
         market[MARKET_FEATURES.index("frontAtmIv")] = 0.25
+        market[MARKET_FEATURES.index("frontAtmIvCoverage")] = 1
+        market[MARKET_FEATURES.index("front25DeltaRiskReversal")] = -0.04
+        market[MARKET_FEATURES.index("front25DeltaButterfly")] = 0.05
+        market[MARKET_FEATURES.index("front25DeltaCoverage")] = 1
+        market[MARKET_FEATURES.index("executableQuoteCoverage")] = 0.8
+        market[MARKET_FEATURES.index("greekCoverage")] = 0.75
         market[MARKET_FEATURES.index("atmIvMinusRealizedVol4")] = 0.05
         observation = Observation(
             "now",
@@ -176,7 +186,90 @@ class FeatureSequenceTests(TestCase):
             vector[MARKET_FEATURES.index("atmIvMinusRealizedVol4")],
             np.log1p(0.05),
         )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("front25DeltaRiskReversal")],
+            -np.log1p(0.04),
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("front25DeltaButterfly")],
+            np.log1p(0.05),
+        )
+        self.assertEqual(
+            vector[MARKET_FEATURES.index("front25DeltaCoverage")],
+            1,
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("executableQuoteCoverage")],
+            0.8,
+        )
         self.assertTrue(np.isfinite(vector).all())
+
+    def test_front_wing_surface_factors_exclude_unexecutable_quotes(self):
+        rows = []
+        for symbol, side, strike, delta, volatility, bid, vega in (
+            ("ATM-C", "call", 100, 0.50, 0.20, 1.0, 0.2),
+            ("WING-C", "call", 110, 0.25, 0.24, 1.0, 0.2),
+            ("BAD-C", "call", 111, 0.249, 0.99, 0.0, np.nan),
+            ("ATM-P", "put", 100, -0.50, 0.22, 1.0, 0.2),
+            ("WING-P", "put", 90, -0.25, 0.28, 1.0, 0.2),
+        ):
+            rows.append({
+                "collectedAt": "2026-07-21T14:00:00Z",
+                "contractSymbol": symbol,
+                "expiration": "2026-08-21",
+                "optionType": side,
+                "bid": bid,
+                "ask": 1.2,
+                "lastPrice": 1.1,
+                "strike": strike,
+                "underlyingPrice": 100,
+                "riskFreeRate": 0.0,
+                "dividendYield": 0.0,
+                "timeToExpiryYears": 31 / 365,
+                "impliedVolatility": volatility,
+                "delta": delta,
+                "gamma": 0.01,
+                "theta": -0.1,
+                "vega": vega,
+            })
+
+        engineered = engineer_snapshot(pd.DataFrame(rows))
+        first = engineered.iloc[0]
+
+        self.assertAlmostEqual(first["frontAtmIv"], 0.21)
+        self.assertEqual(first["frontAtmIvCoverage"], 1)
+        self.assertAlmostEqual(first["front25DeltaRiskReversal"], -0.04)
+        self.assertAlmostEqual(first["front25DeltaButterfly"], 0.05)
+        self.assertEqual(first["front25DeltaCoverage"], 1)
+        self.assertAlmostEqual(first["executableQuoteCoverage"], 0.8)
+        self.assertAlmostEqual(first["greekCoverage"], 0.8)
+
+    def test_sparse_atm_only_surface_does_not_masquerade_as_wings(self):
+        rows = []
+        for symbol, side, delta, volatility in (
+            ("ATM-C", "call", 0.50, 0.20),
+            ("ATM-P", "put", -0.50, 0.22),
+        ):
+            rows.append({
+                "collectedAt": "2026-07-21T14:00:00Z",
+                "contractSymbol": symbol,
+                "expiration": "2026-08-21",
+                "optionType": side,
+                "bid": 1.0,
+                "ask": 1.2,
+                "lastPrice": 1.1,
+                "strike": 100,
+                "underlyingPrice": 100,
+                "impliedVolatility": volatility,
+                "delta": delta,
+            })
+
+        engineered = engineer_snapshot(pd.DataFrame(rows))
+
+        self.assertTrue((engineered["frontAtmIvCoverage"] == 1).all())
+        self.assertTrue((engineered["front25DeltaCoverage"] == 0).all())
+        self.assertTrue((engineered["front25DeltaRiskReversal"] == 0).all())
+        self.assertTrue((engineered["front25DeltaButterfly"] == 0).all())
 
     def test_realized_volatility_is_backward_only_with_explicit_coverage(self):
         rows = []
@@ -229,4 +322,7 @@ class FeatureSequenceTests(TestCase):
         self.assertNotIn("underlyingReturn", CONTRACT_FEATURES)
         self.assertNotIn("frontAtmIv", CONTRACT_FEATURES)
         self.assertIn("atmIvMinusRealizedVol16", MARKET_FEATURES)
+        self.assertIn("front25DeltaRiskReversal", MARKET_FEATURES)
+        self.assertIn("front25DeltaButterfly", MARKET_FEATURES)
+        self.assertIn("executableQuoteCoverage", MARKET_FEATURES)
         self.assertTrue(np.isfinite(observation_vector(observation)).all())
