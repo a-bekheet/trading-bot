@@ -301,8 +301,11 @@ observation after training. Record median, p95, and mean latency together with
 device, PyTorch version, thread count, warm-up iterations, and measured
 iterations. Restore the model's prior train/eval mode afterward. Timing is
 machine-specific diagnostic evidence and must not silently enter validation
-ranking, tie-breaking, or held-out selection; any future latency constraint
-must be declared before the experiment.
+ranking, tie-breaking, or held-out selection. An explicit predeclared median
+latency ceiling may filter deployment-ineligible candidates before winner
+selection; preserve their validation evidence and exclusion reason, allow only
+eligible candidates to reach test, and fail if none remain. With no ceiling,
+timing must remain informational.
 
 Feature-removal candidates must use the named, non-overlapping groups in
 `sequence.FEATURE_ABLATION_GROUPS`. Apply masks inside the recurrent model after

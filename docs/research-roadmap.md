@@ -173,11 +173,13 @@ the recurrent layer handles time. Next experiments should compare:
 The flat/graph and recurrent-family tournament plumbing, exact parameter-cap
 matching, and a standardized streaming batch-one inference benchmark are
 implemented. Each fold reports median, p95, and mean latency with runtime
-context from a training observation; timing does not affect model selection.
-The next valid experiment needs sufficiently long point-in-time history and
-should predeclare how latency evidence will constrain deployable candidates.
-Equal parameter counts do not imply equal graph construction or recurrent
-execution cost, and timings cannot be compared across different machines.
+context from a training observation. Timing is informational by default; a
+predeclared median ceiling can exclude deployment-ineligible candidates before
+the validation winner reaches test, with exclusions kept in the artifact. The
+next valid experiment needs sufficiently long point-in-time history and should
+predeclare any such ceiling. Equal parameter counts do not imply equal graph
+construction or recurrent execution cost, and timings cannot be compared
+across different machines.
 Validation-patience stopping now avoids continuing stalled candidates through
 their entire requested budget and records completed episodes per architecture.
 This is a compute optimization, not evidence that shorter training improves

@@ -45,7 +45,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v15"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v16"
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,7 @@ class WalkForwardConfig:
     long_volatility_quantity: int = 1
     latency_warmup_iterations: int = 10
     latency_measured_iterations: int = 100
+    max_median_inference_latency_us: float | None = None
 
     def __post_init__(self) -> None:
         if min(self.min_train_size, self.validation_size, self.test_size) < 2:
@@ -89,6 +90,13 @@ class WalkForwardConfig:
             raise ValueError("latency_warmup_iterations cannot be negative")
         if self.latency_measured_iterations < 1:
             raise ValueError("latency_measured_iterations must be positive")
+        if self.max_median_inference_latency_us is not None and (
+            not math.isfinite(self.max_median_inference_latency_us)
+            or self.max_median_inference_latency_us <= 0
+        ):
+            raise ValueError(
+                "max_median_inference_latency_us must be finite and positive"
+            )
         LongVolatilityConfig(
             realized_window=self.long_volatility_window,
             min_coverage=self.long_volatility_min_coverage,
@@ -328,6 +336,11 @@ def run_walk_forward_training(
                     walk_forward_config.latency_measured_iterations
                 ),
             )
+            latency_eligible = (
+                walk_forward_config.max_median_inference_latency_us is None
+                or inference_latency["median_microseconds"]
+                <= walk_forward_config.max_median_inference_latency_us
+            )
             selected = _selected_metric(metrics)
             candidate_runs.append({
                 "model_id": candidate.identifier,
@@ -338,6 +351,7 @@ def run_walk_forward_training(
                 "training_config": candidate_training,
                 "parameter_count": resolved_parameter_count,
                 "inference_latency": inference_latency,
+                "latency_eligible": latency_eligible,
                 "masked_input_count": len(
                     recurrent_config.masked_input_indices
                 ),
@@ -373,8 +387,21 @@ def run_walk_forward_training(
                 ).identifier,
             })
 
+        eligible_runs = [
+            run for run in candidate_runs if run["latency_eligible"]
+        ]
+        if not eligible_runs:
+            observed = ", ".join(
+                f"{run['model_id']}={run['inference_latency']['median_microseconds']:.3f}us"
+                for run in candidate_runs
+            )
+            raise ValueError(
+                "no model candidate satisfies max_median_inference_latency_us="
+                f"{walk_forward_config.max_median_inference_latency_us}; "
+                f"observed {observed}"
+            )
         winning_run = min(
-            candidate_runs,
+            eligible_runs,
             key=lambda run: (
                 -run["validation_selection_score"],
                 run["parameter_count"],
@@ -390,6 +417,12 @@ def run_walk_forward_training(
                 "resolved_model": asdict(run["recurrent_config"]),
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
+                "deployment_eligible": run["latency_eligible"],
+                "ineligibility_reason": (
+                    None
+                    if run["latency_eligible"]
+                    else "median_inference_latency_exceeded"
+                ),
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
                     - run["parameter_count"]
@@ -576,6 +609,16 @@ def run_walk_forward_training(
                     "optimizer_updates",
                     "model_id",
                 ],
+                "eligibility_constraint": {
+                    "metric": "median_inference_latency_us",
+                    "maximum": (
+                        walk_forward_config.max_median_inference_latency_us
+                    ),
+                    "enabled": (
+                        walk_forward_config.max_median_inference_latency_us
+                        is not None
+                    ),
+                },
                 "selected_model_id": winning_run["model_id"],
                 "candidates": candidate_results,
             },
@@ -661,6 +704,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--long-volatility-quantity", type=int, default=1)
     parser.add_argument("--latency-warmup-iterations", type=int, default=10)
     parser.add_argument("--latency-measured-iterations", type=int, default=100)
+    parser.add_argument("--max-median-inference-latency-us", type=float)
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
@@ -778,6 +822,9 @@ def main() -> None:
                 long_volatility_quantity=args.long_volatility_quantity,
                 latency_warmup_iterations=args.latency_warmup_iterations,
                 latency_measured_iterations=args.latency_measured_iterations,
+                max_median_inference_latency_us=(
+                    args.max_median_inference_latency_us
+                ),
             ),
             model_specs,
             TrainingConfig(

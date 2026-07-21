@@ -349,6 +349,7 @@ train-walk-forward \
   --parameter-budget 20000 \
   --latency-warmup-iterations 10 \
   --latency-measured-iterations 100 \
+  --max-median-inference-latency-us 500 \
   --ablation surface_wings \
   --ablation volatility_regime
 ```
@@ -385,8 +386,12 @@ count, warm-up count, and measured count. Configure the run length with
 `--latency-warmup-iterations` and `--latency-measured-iterations`. Timing is
 diagnostic only: it never changes validation ranking, and it is not portable
 across hardware or runtime configurations. Use it to expose graph construction
-or recurrent execution cost before designing a separately declared latency
-constraint.
+or recurrent execution cost. When a deployment SLA is known in advance,
+`--max-median-inference-latency-us` makes that predeclared ceiling an
+eligibility constraint: candidates above it retain their configuration,
+validation evidence, measured latency, and exclusion reason, but cannot win or
+reach test. The run fails if every candidate exceeds the ceiling. The default
+is no ceiling, so timing does not affect selection unless explicitly requested.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are

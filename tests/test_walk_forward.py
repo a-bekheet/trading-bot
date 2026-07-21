@@ -3,6 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, skipUnless
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -118,6 +119,11 @@ class WalkForwardTrainingTests(TestCase):
         self.assertGreater(
             candidate["inference_latency"]["median_microseconds"],
             0,
+        )
+        self.assertTrue(candidate["deployment_eligible"])
+        self.assertIsNone(candidate["ineligibility_reason"])
+        self.assertFalse(
+            fold["model_selection"]["eligibility_constraint"]["enabled"]
         )
         self.assertEqual(
             set(fold["baselines"]),
@@ -402,6 +408,81 @@ class WalkForwardTrainingTests(TestCase):
         self.assertGreater(len(resolved_sizes), 1)
 
     @skipUnless(torch is not None, "install the optional ml extra")
+    def test_declared_latency_ceiling_excludes_slow_candidate(self):
+        candidates = (
+            ModelSpec("gru", "flat", hidden_size=4),
+            ModelSpec("lstm", "flat", hidden_size=4),
+        )
+
+        def fake_benchmark(model, *_args, **_kwargs):
+            latency = 50.0 if model.config.kind == "gru" else 500.0
+            return {"median_microseconds": latency}
+
+        with TemporaryDirectory() as directory, patch(
+            "trading_bot.training.walk_forward.benchmark_recurrent_inference",
+            side_effect=fake_benchmark,
+        ):
+            summary = run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    test_seeds=(43,),
+                    max_median_inference_latency_us=100.0,
+                ),
+                candidates,
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                ),
+                Path(directory),
+                env_kwargs={"slot_count": 1},
+            )
+
+        selection = summary["folds"][0]["model_selection"]
+        results = {
+            result["model"]["kind"]: result
+            for result in selection["candidates"]
+        }
+        self.assertTrue(selection["eligibility_constraint"]["enabled"])
+        self.assertEqual(selection["eligibility_constraint"]["maximum"], 100.0)
+        self.assertEqual(selection["selected_model_id"], candidates[0].identifier)
+        self.assertTrue(results["gru"]["deployment_eligible"])
+        self.assertFalse(results["lstm"]["deployment_eligible"])
+        self.assertEqual(
+            results["lstm"]["ineligibility_reason"],
+            "median_inference_latency_exceeded",
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_latency_ceiling_fails_when_every_candidate_is_too_slow(self):
+        with TemporaryDirectory() as directory, patch(
+            "trading_bot.training.walk_forward.benchmark_recurrent_inference",
+            return_value={"median_microseconds": 50.0},
+        ), self.assertRaisesRegex(ValueError, "no model candidate satisfies"):
+            run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    max_median_inference_latency_us=10.0,
+                ),
+                ModelSpec(hidden_size=4),
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                ),
+                Path(directory),
+                env_kwargs={"slot_count": 1},
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_parameter_budget_below_minimum_model(self):
         env = OptionsEnv(walk_forward_dataset(), slot_count=1)
         with self.assertRaisesRegex(ValueError, "below the minimum"):
@@ -450,6 +531,17 @@ class WalkForwardTrainingTests(TestCase):
                 2,
                 latency_measured_iterations=0,
             )
+        for invalid in (0.0, float("inf"), float("nan")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "finite and positive",
+            ):
+                WalkForwardConfig(
+                    2,
+                    2,
+                    2,
+                    max_median_inference_latency_us=invalid,
+                )
 
     def test_rejects_insufficient_history(self):
         with TemporaryDirectory() as directory:
