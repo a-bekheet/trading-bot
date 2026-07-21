@@ -18,7 +18,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v12"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v13"
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,7 @@ class TrainingConfig:
     evaluation_interval: int = 5
     selection_patience: int | None = 3
     selection_min_delta: float = 0.0
+    algorithm: str = "ppo"
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
@@ -69,6 +70,8 @@ class TrainingConfig:
             or self.selection_min_delta < 0
         ):
             raise ValueError("selection_min_delta must be finite and non-negative")
+        if self.algorithm not in {"ppo", "reinforce"}:
+            raise ValueError("algorithm must be ppo or reinforce")
 
 
 def _torch():
@@ -207,6 +210,22 @@ def _generalized_advantages(
         advantages[index] = advantage
         following_value = values[index]
     return advantages, advantages + values
+
+
+def _discounted_returns(
+    rewards,
+    next_value: float,
+    terminal: bool,
+    gamma: float,
+    torch,
+):
+    """Causal Monte-Carlo returns with bootstrap for bounded rollouts."""
+    returns = torch.zeros_like(rewards)
+    running = torch.tensor(0.0 if terminal else float(next_value))
+    for index in range(len(rewards) - 1, -1, -1):
+        running = rewards[index] + gamma * running
+        returns[index] = running
+    return returns
 
 
 def _sample_rollout_bounds(
@@ -369,14 +388,24 @@ def train_actor_critic(
         old_log_probs_tensor = torch.stack(old_log_probabilities)
         old_values_tensor = torch.stack(old_values)
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
-        advantages, returns_tensor = _generalized_advantages(
-            rewards_tensor,
-            old_values_tensor,
-            next_value,
-            final_terminal,
-            config,
-            torch,
-        )
+        if config.algorithm == "ppo":
+            advantages, returns_tensor = _generalized_advantages(
+                rewards_tensor,
+                old_values_tensor,
+                next_value,
+                final_terminal,
+                config,
+                torch,
+            )
+        else:
+            returns_tensor = _discounted_returns(
+                rewards_tensor,
+                next_value,
+                final_terminal,
+                config.gamma,
+                torch,
+            )
+            advantages = returns_tensor - old_values_tensor
         if len(advantages) > 1:
             advantages = (advantages - advantages.mean()) / (
                 advantages.std(unbiased=False) + 1e-8
@@ -393,7 +422,8 @@ def train_actor_critic(
             for start in range(0, steps, config.sequence_length)
         ]
         device = next(model.parameters()).device
-        for _ in range(config.ppo_epochs):
+        update_epochs = config.ppo_epochs if config.algorithm == "ppo" else 1
+        for _ in range(update_epochs):
             order = torch.randperm(len(chunks)).tolist()
             cursor = 0
             while cursor < len(order):
@@ -460,22 +490,33 @@ def train_actor_critic(
                 log_ratio = new_log_probs - old_log_probs_tensor[batch]
                 ratio = log_ratio.exp()
                 batch_advantages = advantages[batch].unsqueeze(-1)
-                unclipped = ratio * batch_advantages
-                clipped = ratio.clamp(
-                    1 - config.clip_ratio,
-                    1 + config.clip_ratio,
-                ) * batch_advantages
-                policy_loss = -torch.minimum(unclipped, clipped).mean()
+                if config.algorithm == "ppo":
+                    unclipped = ratio * batch_advantages
+                    clipped = ratio.clamp(
+                        1 - config.clip_ratio,
+                        1 + config.clip_ratio,
+                    ) * batch_advantages
+                    policy_loss = -torch.minimum(unclipped, clipped).mean()
 
-                value_delta = predicted_values - old_values_tensor[batch]
-                clipped_values = old_values_tensor[batch] + value_delta.clamp(
-                    -config.value_clip,
-                    config.value_clip,
-                )
-                value_loss = 0.5 * torch.maximum(
-                    (predicted_values - returns_tensor[batch]).square(),
-                    (clipped_values - returns_tensor[batch]).square(),
-                ).mean()
+                    value_delta = predicted_values - old_values_tensor[batch]
+                    clipped_values = (
+                        old_values_tensor[batch]
+                        + value_delta.clamp(
+                            -config.value_clip,
+                            config.value_clip,
+                        )
+                    )
+                    value_loss = 0.5 * torch.maximum(
+                        (predicted_values - returns_tensor[batch]).square(),
+                        (clipped_values - returns_tensor[batch]).square(),
+                    ).mean()
+                else:
+                    policy_loss = -(
+                        new_log_probs * batch_advantages
+                    ).mean()
+                    value_loss = 0.5 * (
+                        predicted_values - returns_tensor[batch]
+                    ).square().mean()
                 entropy = distribution.entropy().mean()
                 loss = (
                     policy_loss
@@ -498,10 +539,18 @@ def train_actor_critic(
                         float(entropy.detach()),
                         float(gradient_norm),
                         approx_kl,
-                        float((ratio.sub(1).abs() > config.clip_ratio).float().mean()),
+                        (
+                            float(
+                                (ratio.sub(1).abs() > config.clip_ratio)
+                                .float()
+                                .mean()
+                            )
+                            if config.algorithm == "ppo"
+                            else 0.0
+                        ),
                     )
                 )
-                if approx_kl > config.target_kl:
+                if config.algorithm == "ppo" and approx_kl > config.target_kl:
                     stop_early = True
                     break
             if stop_early:
@@ -577,7 +626,16 @@ def train_actor_critic(
                 "approx_kl": float(means[5]),
                 "clip_fraction": float(means[6]),
                 "explained_variance": explained_variance,
-                "ppo_updates": len(update_metrics),
+                "algorithm": config.algorithm,
+                "optimizer_updates": len(update_metrics),
+                "ppo_updates": (
+                    len(update_metrics) if config.algorithm == "ppo" else 0
+                ),
+                "reinforce_updates": (
+                    len(update_metrics)
+                    if config.algorithm == "reinforce"
+                    else 0
+                ),
                 "recurrent_chunks": len(chunks),
                 "early_stop_kl": int(stop_early),
                 "invalid_actions": invalid_actions,
@@ -619,7 +677,11 @@ def checkpoint_manifest(
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "mode": "research_demo",
-        "algorithm": "stateful_factorized_ppo",
+        "algorithm": (
+            "stateful_factorized_ppo"
+            if training_config.algorithm == "ppo"
+            else "stateful_factorized_reinforce_baseline"
+        ),
         "action_policy": {
             "factorization": "independent_masked_rows",
             "initial_hold_bias": recurrent_config.initial_hold_bias,
@@ -709,6 +771,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbol", default="AAPL")
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
+    parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=128)
@@ -799,6 +862,7 @@ def main() -> None:
             None if args.selection_patience == 0 else args.selection_patience
         ),
         selection_min_delta=args.selection_min_delta,
+        algorithm=args.algorithm,
     )
     model, metrics = train_actor_critic(env, recurrent_config, training_config)
     output = args.output or Path("data/models") / (

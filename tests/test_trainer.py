@@ -20,6 +20,7 @@ from trading_bot.training.sequence import observation_vector
 from trading_bot.training.trainer import (
     CHECKPOINT_SCHEMA_VERSION,
     TrainingConfig,
+    _discounted_returns,
     _generalized_advantages,
     _sample_rollout_bounds,
     evaluate_recurrent_policy,
@@ -151,7 +152,7 @@ class TrainerTests(TestCase):
             kind="hybrid",
         )
 
-        _, metrics = train_actor_critic(
+        model, metrics = train_actor_critic(
             env,
             recurrent,
             TrainingConfig(
@@ -290,6 +291,60 @@ class TrainerTests(TestCase):
         with self.assertRaisesRegex(ValueError, "selection_min_delta"):
             TrainingConfig(selection_min_delta=float("nan"))
 
+    def test_rejects_unknown_training_algorithm(self):
+        with self.assertRaisesRegex(ValueError, "algorithm"):
+            TrainingConfig(algorithm="q_learning")
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_reinforce_with_baseline_updates_recurrent_policy(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=8,
+        )
+
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=1,
+            ppo_epochs=4,
+            algorithm="reinforce",
+        )
+        model, metrics = train_actor_critic(
+            env,
+            recurrent,
+            training,
+        )
+
+        self.assertEqual(metrics[0]["algorithm"], "reinforce")
+        self.assertEqual(metrics[0]["ppo_updates"], 0)
+        self.assertEqual(metrics[0]["reinforce_updates"], 1)
+        self.assertEqual(
+            metrics[0]["optimizer_updates"],
+            metrics[0]["reinforce_updates"],
+        )
+        self.assertTrue(math.isfinite(metrics[0]["policy_loss"]))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "reinforce.pt"
+            save_checkpoint(
+                path,
+                model,
+                env,
+                recurrent,
+                training,
+                metrics,
+            )
+            _, manifest = load_checkpoint(path)
+
+        self.assertEqual(
+            manifest["algorithm"],
+            "stateful_factorized_reinforce_baseline",
+        )
+        self.assertEqual(manifest["training"]["algorithm"], "reinforce")
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_checkpoint_with_incompatible_feature_transform(self):
         with TemporaryDirectory() as directory:
@@ -320,6 +375,16 @@ class TrainerTests(TestCase):
 
         torch.testing.assert_close(advantages, torch.tensor([1.5, 0.75]))
         torch.testing.assert_close(returns, torch.tensor([2.0, 1.0]))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_discounted_monte_carlo_returns_handle_terminal_and_bootstrap(self):
+        rewards = torch.tensor([1.0, 1.0])
+
+        terminal = _discounted_returns(rewards, 99.0, True, 0.5, torch)
+        bounded = _discounted_returns(rewards, 2.0, False, 0.5, torch)
+
+        torch.testing.assert_close(terminal, torch.tensor([1.5, 1.0]))
+        torch.testing.assert_close(bounded, torch.tensor([2.0, 2.0]))
 
     def test_rollout_segments_are_seeded_bounded_and_regime_diverse(self):
         first_rng = np.random.default_rng(31)

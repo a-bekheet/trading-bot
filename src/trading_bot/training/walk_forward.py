@@ -41,7 +41,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v11"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v12"
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,7 @@ class ModelSpec:
     graph_neighbors: int = 3
     initial_hold_bias: float = 5.0
     disabled_feature_groups: tuple[str, ...] = ()
+    algorithm: str = "ppo"
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid"}:
@@ -117,6 +118,8 @@ class ModelSpec:
             )
         if not 0 <= self.dropout < 1:
             raise ValueError("model dropout must be in [0, 1)")
+        if self.algorithm not in {"ppo", "reinforce"}:
+            raise ValueError("model algorithm must be ppo or reinforce")
         feature_ablation_indices(self.disabled_feature_groups, 1)
 
     @property
@@ -238,10 +241,14 @@ def run_walk_forward_training(
         candidate_runs = []
         for candidate in model_specs:
             recurrent_config = candidate.build(train_env)
+            candidate_training = replace(
+                fold_training,
+                algorithm=candidate.algorithm,
+            )
             model, metrics = train_actor_critic(
                 train_env,
                 recurrent_config,
-                fold_training,
+                candidate_training,
                 selection_env=validation_env,
             )
             selected = _selected_metric(metrics)
@@ -251,6 +258,7 @@ def run_walk_forward_training(
                 "recurrent_config": recurrent_config,
                 "model": model,
                 "metrics": metrics,
+                "training_config": candidate_training,
                 "parameter_count": sum(
                     parameter.numel() for parameter in model.parameters()
                 ),
@@ -268,6 +276,9 @@ def run_walk_forward_training(
                 "selection_scope": selected["evaluation_scope"],
                 "episodes_completed": len(metrics),
                 "stopped_early": bool(metrics[-1]["early_stop_selection"]),
+                "optimizer_updates": sum(
+                    item["optimizer_updates"] for item in metrics
+                ),
                 "full_model_id": replace(
                     candidate,
                     disabled_feature_groups=(),
@@ -280,6 +291,7 @@ def run_walk_forward_training(
                 -run["validation_total_reward"],
                 run["parameter_count"],
                 run["active_input_count"],
+                run["optimizer_updates"],
                 run["model_id"],
             ),
         )
@@ -292,6 +304,7 @@ def run_walk_forward_training(
                 "active_input_count": run["active_input_count"],
                 "episodes_completed": run["episodes_completed"],
                 "stopped_early": run["stopped_early"],
+                "optimizer_updates": run["optimizer_updates"],
                 "validation_reward_lift_vs_full": None,
                 "selection": {
                     "scope": run["selection_scope"],
@@ -316,6 +329,7 @@ def run_walk_forward_training(
         model = winning_run["model"]
         metrics = winning_run["metrics"]
         recurrent_config = winning_run["recurrent_config"]
+        selected_training = winning_run["training_config"]
         selected = _selected_metric(metrics)
         candidate_runs.clear()
 
@@ -326,7 +340,7 @@ def run_walk_forward_training(
         test_traces = [
             run_episode_trace(
                 test_env,
-                recurrent_policy(model, fold_training.sequence_length),
+                recurrent_policy(model, selected_training.sequence_length),
                 seed,
             )
             for seed in walk_forward_config.test_seeds
@@ -400,7 +414,7 @@ def run_walk_forward_training(
             cost_stress[scenario.name] = [
                 run_episode(
                     cost_stressed_environment(test_env, scenario),
-                    recurrent_policy(model, fold_training.sequence_length),
+                    recurrent_policy(model, selected_training.sequence_length),
                     seed,
                 )
                 for seed in walk_forward_config.test_seeds
@@ -426,6 +440,7 @@ def run_walk_forward_training(
                 "tie_break": [
                     "parameter_count",
                     "active_input_count",
+                    "optimizer_updates",
                     "model_id",
                 ],
                 "selected_model_id": winning_run["model_id"],
@@ -454,7 +469,7 @@ def run_walk_forward_training(
             model,
             train_env,
             recurrent_config,
-            fold_training,
+            selected_training,
             metrics,
             provenance={
                 "walk_forward_schema": WALK_FORWARD_SCHEMA_VERSION,
@@ -513,13 +528,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--long-volatility-quantity", type=int, default=1)
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
+    parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
     parser.add_argument(
         "--candidate",
         action="append",
-        metavar="ENCODER:KIND",
+        metavar="ENCODER:KIND[:ALGORITHM]",
         help=(
-            "repeat to select architectures using validation only; "
-            "for example --candidate flat:gru --candidate graph:hybrid"
+            "repeat to select architectures and PPO/REINFORCE using "
+            "validation only"
         ),
     )
     parser.add_argument(
@@ -569,15 +585,19 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
     specs = []
     for candidate in candidates:
         parts = candidate.split(":")
-        if len(parts) != 2:
-            raise ValueError("candidate must use ENCODER:KIND format")
-        encoder, kind = parts
+        if len(parts) not in {2, 3}:
+            raise ValueError(
+                "candidate must use ENCODER:KIND or ENCODER:KIND:ALGORITHM"
+            )
+        encoder, kind = parts[:2]
+        algorithm = parts[2] if len(parts) == 3 else args.algorithm
         specs.append(
             ModelSpec(
                 kind=kind,
                 encoder=encoder,
                 hidden_size=args.hidden_size,
                 initial_hold_bias=args.initial_hold_bias,
+                algorithm=algorithm,
             )
         )
     full_specs = tuple(specs)
@@ -627,6 +647,7 @@ def main() -> None:
                 ),
                 selection_min_delta=args.selection_min_delta,
                 entropy_coefficient=args.entropy_coefficient,
+                algorithm=args.algorithm,
                 seed=args.seed,
             ),
             args.output_dir,

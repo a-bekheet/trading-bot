@@ -198,6 +198,18 @@ Run the research-demo PPO trainer against collected snapshots:
 train-demo --symbol AAPL --kind hybrid --episodes 25 --sequence-length 8
 ```
 
+Use the same recurrent policy with a Monte-Carlo policy-gradient comparator:
+
+```bash
+train-demo --symbol AAPL --kind gru --algorithm reinforce --episodes 25
+```
+
+`reinforce` computes discounted trajectory returns, bootstraps only a bounded
+nonterminal rollout, subtracts the learned value baseline, and makes one
+on-policy optimizer pass through contiguous recurrent chunks. PPO remains the
+default and retains clipped multi-epoch updates. Metrics distinguish PPO,
+REINFORCE, and total optimizer updates so their compute is auditable.
+
 Training episodes default to reproducible random windows of at most 128
 transitions inside the supplied training partition. This exposes PPO to more
 market regimes and bounds update cost without touching validation or test data.
@@ -313,19 +325,21 @@ train-walk-forward \
   --validation-size 100 \
   --test-size 100 \
   --embargo 8 \
-  --candidate flat:gru \
-  --candidate flat:lstm \
-  --candidate graph:hybrid \
+  --candidate flat:gru:ppo \
+  --candidate flat:lstm:reinforce \
+  --candidate graph:hybrid:ppo \
   --ablation surface_wings \
   --ablation volatility_regime
 ```
 
-Repeat `--candidate ENCODER:KIND` to run a leak-safe architecture tournament.
-Every GRU, LSTM, hybrid, flat, or graph candidate receives the same fold and
-training seed. Each candidate restores its best validation checkpoint; the
+Repeat `--candidate ENCODER:KIND[:ALGORITHM]` to run a leak-safe architecture
+and learning-algorithm tournament. The optional algorithm is `ppo` or
+`reinforce` and defaults to `--algorithm` when omitted. Every GRU, LSTM, hybrid,
+flat, or graph candidate receives the same fold and training seed. Each
+candidate restores its best validation checkpoint; the
 highest validation reward wins, with fewer trainable parameters and then a
-smaller active input set and stable model ID breaking ties. Only that winner is
-instantiated against the
+smaller active input set, fewer optimizer updates, and stable model ID breaking
+ties. Only that winner is instantiated against the
 held-out test range and only its checkpoint is saved. The summary retains every
 candidate's configuration, parameter count, and validation score, but never a
 losing-candidate test result. It also records episodes completed and whether

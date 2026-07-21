@@ -72,6 +72,12 @@ the old policy state. This removes fictitious zero-padded history and avoids
 recomputing a full temporal window at every decision. It improves temporal
 correctness and latency; it is not evidence of alpha.
 
+The same recurrent architectures now support a Monte-Carlo REINFORCE
+comparator with a learned value baseline. It uses one on-policy pass over
+discounted returns and shares the validation-only tournament boundary with
+PPO, allowing algorithmic lift to be tested without exposing every learner to
+the held-out range.
+
 The market state now includes front-expiry ATM IV and its difference from
 backward-only 4/16-snapshot realized volatility, each paired with the existing
 history coverage. PPO training samples seeded bounded windows across the
@@ -125,7 +131,8 @@ a simple underpriced-volatility rule rather than a complete volatility book.
 - Retain the implemented long-volatility IV-versus-realized rule; add a
   collateralized short-volatility/carry comparator only after margin, assignment,
   and option-liability accounting exist.
-- Add a Monte-Carlo policy-gradient trainer as an algorithmic comparator.
+- Retain the implemented recurrent Monte-Carlo REINFORCE-with-value-baseline
+  trainer as an algorithmic comparator to PPO.
 
 ### 3. Improve the state without inflating latency
 

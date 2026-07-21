@@ -148,6 +148,12 @@ class WalkForwardTrainingTests(TestCase):
             ),
             ModelSpec(kind="lstm", encoder="flat", hidden_size=8),
             ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=8,
+                algorithm="reinforce",
+            ),
+            ModelSpec(
                 kind="hybrid",
                 encoder="graph",
                 hidden_size=8,
@@ -186,6 +192,7 @@ class WalkForwardTrainingTests(TestCase):
                     -result["selection"]["validation_total_reward"],
                     result["parameter_count"],
                     result["active_input_count"],
+                    result["optimizer_updates"],
                     result["model_id"],
                 ),
             )
@@ -193,14 +200,19 @@ class WalkForwardTrainingTests(TestCase):
             _, manifest = load_checkpoint(checkpoint_files[0])
 
         self.assertIsNone(summary["model"])
-        self.assertEqual(len(summary["candidate_models"]), 4)
-        self.assertEqual(len(candidate_results), 4)
+        self.assertEqual(len(summary["candidate_models"]), 5)
+        self.assertEqual(len(candidate_results), 5)
         self.assertEqual(len(checkpoint_files), 1)
         self.assertTrue(all(result["episodes_completed"] == 1 for result in candidate_results))
         self.assertTrue(all(not result["stopped_early"] for result in candidate_results))
         self.assertEqual(
             selection["tie_break"],
-            ["parameter_count", "active_input_count", "model_id"],
+            [
+                "parameter_count",
+                "active_input_count",
+                "optimizer_updates",
+                "model_id",
+            ],
         )
         self.assertEqual(selection["selected_model_id"], expected["model_id"])
         self.assertEqual(fold["selection"]["model_id"], expected["model_id"])
@@ -212,6 +224,18 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(
             manifest["model"]["encoder"],
             expected["model"]["encoder"],
+        )
+        self.assertEqual(
+            manifest["training"]["algorithm"],
+            expected["model"]["algorithm"],
+        )
+        self.assertEqual(
+            manifest["algorithm"],
+            (
+                "stateful_factorized_ppo"
+                if expected["model"]["algorithm"] == "ppo"
+                else "stateful_factorized_reinforce_baseline"
+            ),
         )
         self.assertEqual(
             tuple(manifest["model"]["masked_input_indices"]),
@@ -230,6 +254,7 @@ class WalkForwardTrainingTests(TestCase):
             for result in candidate_results
             if result["model"]["kind"] == "gru"
             and result["model"]["encoder"] == "flat"
+            and result["model"]["algorithm"] == ablated["model"]["algorithm"]
             and not result["model"]["disabled_feature_groups"]
         )
         self.assertAlmostEqual(
@@ -248,7 +273,7 @@ class WalkForwardTrainingTests(TestCase):
             "--candidate",
             "flat:gru",
             "--candidate",
-            "graph:hybrid",
+            "graph:hybrid:reinforce",
             "--ablation",
             "surface_wings",
         ])
@@ -259,6 +284,10 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(
             sum(bool(spec.disabled_feature_groups) for spec in specs),
             2,
+        )
+        self.assertEqual(
+            {spec.algorithm for spec in specs},
+            {"ppo", "reinforce"},
         )
 
     def test_model_candidates_have_stable_unique_identifiers(self):
@@ -281,6 +310,8 @@ class WalkForwardTrainingTests(TestCase):
     def test_rejects_invalid_model_candidate(self):
         with self.assertRaisesRegex(ValueError, "kind"):
             ModelSpec(kind="transformer")
+        with self.assertRaisesRegex(ValueError, "algorithm"):
+            ModelSpec(algorithm="q_learning")
 
     def test_rejects_insufficient_history(self):
         with TemporaryDirectory() as directory:

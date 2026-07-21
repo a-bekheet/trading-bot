@@ -198,8 +198,12 @@ zero or use an unexecutable quote to manufacture a surface factor. A wing must
 be within 0.15 Delta of its target and ATM must be within 0.10 absolute forward
 log-moneyness; otherwise reduce coverage and leave the factor neutral.
 
-The trainer uses stateful factorized per-slot PPO ratios, GAE, policy/value
-clipping, target-KL stopping, entropy regularization, and gradient clipping.
+The trainer supports stateful factorized PPO and Monte-Carlo REINFORCE with a
+learned value baseline. PPO uses per-slot likelihood ratios, GAE, policy/value
+clipping, and target-KL stopping. REINFORCE uses discounted trajectory returns,
+bootstraps bounded nonterminal rollouts only, and performs exactly one on-policy
+optimizer pass; never reuse its trajectory across epochs. Both algorithms use
+entropy regularization, gradient clipping, and contiguous recurrent chunks.
 Policy heads initialize with a trainable hold-logit prior because a near-uniform
 33-row categorical policy creates pathological turnover before learning begins.
 The default entropy coefficient is `1e-4`, calibrated to return-scale rewards.
@@ -263,9 +267,10 @@ exactly `K` contract nodes. Keep `RecurrentConfig.slot_count` equal to
 
 `run_walk_forward_training` is the executable research boundary. For every
 fold, train only on `train`, choose and restore weights only from `validation`,
-then evaluate `test`. Architecture tournaments must give candidates the same
-fold and seed, rank validation reward only, and break exact ties by parameter
-count, active input count, then stable model ID. Instantiate the test environment
+then evaluate `test`. Architecture tournaments must give PPO and REINFORCE
+candidates the same fold and seed, rank validation reward only, and break exact
+ties by parameter count, active input count, optimizer updates, then stable
+model ID. Instantiate the test environment
 only after the winner is fixed, save only the winning checkpoint, and never
 attach test metrics to losing candidates. The test range may populate reports
 and provenance only after selection; it must never affect features,
