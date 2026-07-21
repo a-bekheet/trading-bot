@@ -45,7 +45,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v16"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v17"
 
 
 @dataclass(frozen=True)
@@ -602,6 +602,12 @@ def run_walk_forward_training(
                     "turnover_penalty": (
                         selected_training.selection_turnover_penalty
                     ),
+                    "cross_ticker_std_penalty": (
+                        selected_training.selection_cross_ticker_std_penalty
+                    ),
+                    "worst_ticker_weight": (
+                        selected_training.selection_worst_ticker_weight
+                    ),
                 },
                 "tie_break": [
                     "parameter_count",
@@ -752,6 +758,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--selection-drawdown-penalty", type=float, default=0.0)
     parser.add_argument("--selection-downside-penalty", type=float, default=0.0)
     parser.add_argument("--selection-turnover-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--selection-cross-ticker-std-penalty",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--selection-worst-ticker-weight",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument("--max-quantity", type=int, default=3)
@@ -844,6 +860,12 @@ def main() -> None:
                 ),
                 selection_downside_penalty=args.selection_downside_penalty,
                 selection_turnover_penalty=args.selection_turnover_penalty,
+                selection_cross_ticker_std_penalty=(
+                    args.selection_cross_ticker_std_penalty
+                ),
+                selection_worst_ticker_weight=(
+                    args.selection_worst_ticker_weight
+                ),
                 entropy_coefficient=args.entropy_coefficient,
                 algorithm=args.algorithm,
                 seed=args.seed,

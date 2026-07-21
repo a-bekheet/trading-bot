@@ -25,7 +25,10 @@ from trading_bot.training.trainer import (
     TrainingConfig,
     _discounted_returns,
     _generalized_advantages,
+    _parser,
     _sample_rollout_bounds,
+    _symbols_from_args,
+    aggregate_selection_scores,
     benchmark_recurrent_inference,
     evaluate_recurrent_policy,
     load_checkpoint,
@@ -37,6 +40,14 @@ from tests.test_training_env import demo_dataset, three_snapshot_dataset
 
 
 class TrainerTests(TestCase):
+    def test_cli_selects_single_or_top50_training_universe(self):
+        single = _parser().parse_args(["--symbol", "msft"])
+        universe = _parser().parse_args(["--universe", "top50"])
+
+        self.assertEqual(_symbols_from_args(single), ("MSFT",))
+        self.assertEqual(len(_symbols_from_args(universe)), 50)
+        self.assertEqual(len(set(_symbols_from_args(universe))), 50)
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_benchmarks_streaming_policy_inference_without_changing_mode(self):
         env = OptionsEnv(three_snapshot_dataset(), slot_count=1)
@@ -162,6 +173,8 @@ class TrainerTests(TestCase):
                 "drawdown_penalty": 0.0,
                 "downside_penalty": 0.0,
                 "turnover_penalty": 0.0,
+                "cross_ticker_std_penalty": 0.0,
+                "worst_ticker_weight": 0.0,
             },
         )
         self.assertEqual(
@@ -189,6 +202,11 @@ class TrainerTests(TestCase):
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
             env.manifest.fingerprint,
+        )
+        self.assertEqual(len(sidecar["training_environments"]), 1)
+        self.assertEqual(
+            sidecar["training_environment_fingerprints"],
+            {env.dataset.symbol: env.manifest.fingerprint},
         )
         self.assertIn("state_dict", checkpoint)
         self.assertEqual(restored_manifest["schema_version"], CHECKPOINT_SCHEMA_VERSION)
@@ -362,6 +380,14 @@ class TrainerTests(TestCase):
             TrainingConfig(selection_min_delta=float("nan"))
         with self.assertRaisesRegex(ValueError, "risk penalties"):
             TrainingConfig(selection_drawdown_penalty=-1)
+        with self.assertRaisesRegex(ValueError, "risk penalties"):
+            TrainingConfig(selection_cross_ticker_std_penalty=-1)
+        for invalid in (-0.1, 1.1, float("nan")):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "worst_ticker_weight",
+            ):
+                TrainingConfig(selection_worst_ticker_weight=invalid)
 
     def test_selection_score_combines_declared_validation_risks(self):
         report = SimpleNamespace(
@@ -382,6 +408,124 @@ class TrainerTests(TestCase):
         report.max_drawdown = -0.01
         with self.assertRaisesRegex(ValueError, "risk metrics"):
             selection_score(report, config)
+
+    def test_aggregate_selection_score_penalizes_fragile_ticker_results(self):
+        aggregate = aggregate_selection_scores(
+            (1.0, -1.0),
+            TrainingConfig(
+                selection_cross_ticker_std_penalty=0.5,
+                selection_worst_ticker_weight=0.25,
+            ),
+        )
+
+        self.assertEqual(aggregate["mean"], 0.0)
+        self.assertEqual(aggregate["worst"], -1.0)
+        self.assertEqual(aggregate["standard_deviation"], 1.0)
+        self.assertEqual(aggregate["score"], -0.75)
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            aggregate_selection_scores((), TrainingConfig())
+        with self.assertRaisesRegex(ValueError, "finite"):
+            aggregate_selection_scores((float("nan"),), TrainingConfig())
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_shared_policy_balances_isolated_ticker_episodes_and_validation(self):
+        base = three_snapshot_dataset()
+        training_envs = (
+            OptionsEnv(SnapshotDataset(base.snapshots, "AAA"), slot_count=2),
+            OptionsEnv(SnapshotDataset(base.snapshots, "BBB"), slot_count=2),
+        )
+        selection_envs = (
+            OptionsEnv(SnapshotDataset(base.snapshots, "AAA"), slot_count=2),
+            OptionsEnv(SnapshotDataset(base.snapshots, "BBB"), slot_count=2),
+        )
+        observation, _ = training_envs[0].reset(seed=5)
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_slot_count=training_envs[0].action_shape[0],
+            action_count=training_envs[0].action_shape[1],
+            hidden_size=4,
+        )
+        config = TrainingConfig(
+            episodes=2,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=4,
+            evaluation_interval=2,
+            selection_patience=None,
+            selection_cross_ticker_std_penalty=0.5,
+            selection_worst_ticker_weight=0.25,
+            seed=5,
+        )
+
+        model, metrics = train_actor_critic(
+            training_envs,
+            recurrent,
+            config,
+            selection_env=selection_envs,
+        )
+
+        self.assertEqual(
+            {metric["training_symbol"] for metric in metrics},
+            {"AAA", "BBB"},
+        )
+        self.assertEqual(
+            metrics[-1]["evaluation_scope"],
+            "validation_universe_research_demo",
+        )
+        self.assertEqual(
+            set(metrics[-1]["evaluation_by_symbol"]),
+            {"AAA", "BBB"},
+        )
+        per_ticker = [
+            item["selection_score"]
+            for item in metrics[-1]["evaluation_by_symbol"].values()
+        ]
+        expected = aggregate_selection_scores(per_ticker, config)
+        self.assertAlmostEqual(
+            metrics[-1]["evaluation_selection_score"],
+            expected["score"],
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "shared.pt"
+            save_checkpoint(
+                path,
+                model,
+                training_envs,
+                recurrent,
+                config,
+                metrics,
+            )
+            manifest = json.loads(
+                path.with_suffix(".pt.json").read_text()
+            )
+        self.assertEqual(
+            set(manifest["training_environment_fingerprints"]),
+            {"AAA", "BBB"},
+        )
+        self.assertEqual(len(manifest["training_environments"]), 2)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_shared_policy_rejects_partial_ticker_coverage(self):
+        base = three_snapshot_dataset()
+        envs = (
+            OptionsEnv(SnapshotDataset(base.snapshots, "AAA"), slot_count=2),
+            OptionsEnv(SnapshotDataset(base.snapshots, "BBB"), slot_count=2),
+        )
+        observation, _ = envs[0].reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_slot_count=envs[0].action_shape[0],
+            action_count=envs[0].action_shape[1],
+            hidden_size=4,
+        )
+        with self.assertRaisesRegex(ValueError, "one episode per ticker"):
+            train_actor_critic(
+                envs,
+                recurrent,
+                TrainingConfig(episodes=1),
+            )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_risk_score_can_select_safer_lower_reward_checkpoint(self):

@@ -83,6 +83,14 @@ discounted returns and shares the validation-only tournament boundary with
 PPO, allowing algorithmic lift to be tested without exposing every learner to
 the held-out range.
 
+The trainer now supports one ticker-invariant recurrent policy over the full
+top-50 environment pool. Seeded shuffled cycles give each symbol balanced
+rollout coverage without crossing recurrent, portfolio, reward, or advantage
+boundaries. Selection retains each ticker report and can penalize cross-ticker
+score dispersion or blend mean performance toward the worst ticker. The
+current executable command is in-sample integration evidence; a shared
+walk-forward runner must precede any cross-ticker alpha claim.
+
 Selection can now use a declared validation-only reward-minus-risk score with
 separate maximum-drawdown, downside-deviation, and turnover coefficients. The
 score controls early stopping, checkpoint restoration, algorithms,

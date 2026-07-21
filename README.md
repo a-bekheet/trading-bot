@@ -210,6 +210,28 @@ on-policy optimizer pass through contiguous recurrent chunks. PPO remains the
 default and retains clipped multi-epoch updates. Metrics distinguish PPO,
 REINFORCE, and total optimizer updates so their compute is auditable.
 
+Train one ticker-invariant shared policy across the collected top-50 universe:
+
+```bash
+train-demo \
+  --universe top50 \
+  --kind hybrid \
+  --episodes 100 \
+  --selection-cross-ticker-std-penalty 0.25 \
+  --selection-worst-ticker-weight 0.25
+```
+
+Multi-ticker training uses a seeded shuffled order within balanced cycles and
+requires at least one episode per ticker. Every episode owns a separate
+environment, so recurrent state, cash, positions, returns, and rollout windows
+reset at symbol boundaries; trajectories are never concatenated across
+tickers. Checkpoint evaluation runs every ticker independently and preserves
+each report and fingerprint. The shared observation remains dimensionless and
+does not add a symbol ID, encouraging transfer rather than memorizing the 50
+training names. The executable `train-demo` selection is still explicitly
+in-sample; use it for integration and representation research, not performance
+claims, until universe walk-forward orchestration is enabled.
+
 Checkpoint and architecture selection can penalize validation-path risk:
 
 ```bash
@@ -226,6 +248,12 @@ Zero remains the default for every coefficient, preserving raw-reward behavior
 until an experiment declares its risk tradeoff. The same score controls
 checkpoint restoration, patience, ablation lift, and tournament ranking; raw
 reward and every component remain in the artifact. Test metrics never enter it.
+For shared policies, per-ticker scores are aggregated as
+`(1-w) * mean + w * worst - d * standard_deviation`, where `w` is
+`--selection-worst-ticker-weight` in `[0, 1]` and `d` is
+`--selection-cross-ticker-std-penalty`. Both default to zero, preserving the
+single-ticker and mean-score behavior. Declare them before validation; they are
+robustness controls, not evidence of alpha.
 
 Training episodes default to reproducible random windows of at most 128
 transitions inside the supplied training partition. This exposes PPO to more

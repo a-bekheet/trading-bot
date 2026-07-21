@@ -236,6 +236,18 @@ must use only that validation environment and be labeled
 `validation_research_demo`. Checkpoints must load with PyTorch
 `weights_only=True`; never weaken this to unrestricted pickle loading.
 
+Shared-policy training accepts unique-symbol environment pools with identical
+feature and action layouts. Schedule seeded shuffled ticker cycles and require
+at least one episode per ticker. Reset recurrent state, portfolio state, and
+rollout bounds at every ticker boundary; never concatenate trajectories or
+advantages across symbols. Evaluate each selection environment with a fresh
+policy state, persist every per-symbol report and environment fingerprint, and
+label multi-ticker scopes `in_sample_universe_research_demo` or
+`validation_universe_research_demo`. Aggregate per-ticker selection scores as
+`(1-w) * mean + w * worst - d * std`, using only predeclared worst-ticker weight
+and dispersion penalty. A symbol embedding is not part of the current contract;
+the dimensionless shared policy must remain usable on unseen tickers.
+
 The graph encoder uses only valid option slots, symmetric nearest-neighbor edges,
 and self edges. Padded contracts must neither send nor receive messages. Keep the
 dense implementation while the slot count is small; require profiling evidence

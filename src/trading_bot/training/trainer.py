@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -17,9 +18,10 @@ from trading_bot.training.evaluation import EpisodeReport, run_episode
 from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_actor_critic
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
+from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v14"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v15"
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,8 @@ class TrainingConfig:
     selection_drawdown_penalty: float = 0.0
     selection_downside_penalty: float = 0.0
     selection_turnover_penalty: float = 0.0
+    selection_cross_ticker_std_penalty: float = 0.0
+    selection_worst_ticker_weight: float = 0.0
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
@@ -80,12 +84,18 @@ class TrainingConfig:
             self.selection_drawdown_penalty,
             self.selection_downside_penalty,
             self.selection_turnover_penalty,
+            self.selection_cross_ticker_std_penalty,
         )
         if any(
             not math.isfinite(value) or value < 0
             for value in selection_penalties
         ):
             raise ValueError("selection risk penalties must be finite and non-negative")
+        if (
+            not math.isfinite(self.selection_worst_ticker_weight)
+            or not 0 <= self.selection_worst_ticker_weight <= 1
+        ):
+            raise ValueError("selection_worst_ticker_weight must be in [0, 1]")
 
 
 def _torch():
@@ -94,6 +104,24 @@ def _torch():
     except ImportError as error:  # pragma: no cover - optional dependency path
         raise RuntimeError("Install the ML extra: pip install -e '.[ml]'") from error
     return torch
+
+
+def _environment_pool(
+    env: OptionsEnv | Sequence[OptionsEnv],
+    *,
+    name: str,
+) -> tuple[OptionsEnv, ...]:
+    if isinstance(env, OptionsEnv):
+        return (env,)
+    environments = tuple(env)
+    if not environments:
+        raise ValueError(f"{name} environment pool cannot be empty")
+    if not all(isinstance(item, OptionsEnv) for item in environments):
+        raise TypeError(f"{name} environment pool must contain OptionsEnv instances")
+    symbols = [item.dataset.symbol for item in environments]
+    if len(set(symbols)) != len(symbols):
+        raise ValueError(f"{name} environment symbols must be unique")
+    return environments
 
 
 def _detach_hidden(hidden_state):
@@ -278,6 +306,40 @@ def selection_score(
     )
 
 
+def aggregate_selection_scores(
+    scores: Sequence[float],
+    config: TrainingConfig,
+) -> dict[str, float]:
+    """Aggregate ticker scores without allowing mean-only fragility to hide."""
+    values = np.asarray(tuple(scores), dtype=np.float64)
+    if values.ndim != 1 or not len(values):
+        raise ValueError("at least one per-ticker selection score is required")
+    if not np.isfinite(values).all():
+        raise ValueError("per-ticker selection scores must be finite")
+    mean = float(values.mean())
+    worst = float(values.min())
+    standard_deviation = float(values.std())
+    robust_score = (
+        (1.0 - config.selection_worst_ticker_weight) * mean
+        + config.selection_worst_ticker_weight * worst
+        - config.selection_cross_ticker_std_penalty * standard_deviation
+    )
+    return {
+        "score": float(robust_score),
+        "mean": mean,
+        "worst": worst,
+        "standard_deviation": standard_deviation,
+    }
+
+
+def _episode_report_dict(report) -> dict[str, Any]:
+    return (
+        report.to_dict()
+        if hasattr(report, "to_dict")
+        else dict(vars(report))
+    )
+
+
 def _generalized_advantages(
     rewards,
     values,
@@ -346,24 +408,36 @@ def _sample_rollout_bounds(
 
 
 def train_actor_critic(
-    env: OptionsEnv,
+    env: OptionsEnv | Sequence[OptionsEnv],
     recurrent_config: RecurrentConfig,
     training_config: TrainingConfig | None = None,
     *,
-    selection_env: OptionsEnv | None = None,
+    selection_env: OptionsEnv | Sequence[OptionsEnv] | None = None,
 ):
-    """Train one recurrent policy with clipped PPO and return model/metrics.
+    """Train one recurrent policy over one or more isolated ticker episodes.
 
     This is an integration trainer for the deterministic research surface. It
     deliberately makes no claim about historical or live trading performance.
     """
     torch = _torch()
     config = training_config or TrainingConfig()
+    training_envs = _environment_pool(env, name="training")
+    evaluation_envs = (
+        training_envs
+        if selection_env is None
+        else _environment_pool(selection_env, name="selection")
+    )
+    if len(training_envs) > 1 and config.episodes < len(training_envs):
+        raise ValueError(
+            "multi-ticker training requires at least one episode per ticker"
+        )
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     rollout_rng = np.random.default_rng(config.seed)
+    environment_rng = np.random.default_rng(config.seed + 1_000_003)
 
-    observation, _ = env.reset(seed=config.seed)
+    primary_env = training_envs[0]
+    observation, _ = primary_env.reset(seed=config.seed)
     actual_input_size = observation_vector(observation).shape[0]
     if recurrent_config.input_size != actual_input_size:
         raise ValueError(
@@ -373,22 +447,43 @@ def train_actor_critic(
         recurrent_config.action_slot_count or recurrent_config.slot_count,
         recurrent_config.action_count,
     )
-    if model_action_shape != env.action_shape:
+    if model_action_shape != primary_env.action_shape:
         raise ValueError("model action dimensions do not match the environment")
     if recurrent_config.feature_vector_schema != FEATURE_VECTOR_SCHEMA_VERSION:
         raise ValueError("model feature-vector schema does not match the trainer")
-    evaluation_env = env if selection_env is None else selection_env
-    selection_observation, _ = evaluation_env.reset(seed=config.seed)
-    if observation_vector(selection_observation).shape[0] != actual_input_size:
-        raise ValueError("selection environment feature layout does not match training")
-    if evaluation_env.action_shape != env.action_shape:
-        raise ValueError("selection environment action dimensions do not match training")
-    if len(evaluation_env.dataset) < 2:
-        raise ValueError("selection environment requires at least two snapshots")
+    for pool_name, environments in (
+        ("training", training_envs),
+        ("selection", evaluation_envs),
+    ):
+        for environment in environments:
+            candidate_observation, _ = environment.reset(seed=config.seed)
+            if (
+                observation_vector(candidate_observation).shape[0]
+                != actual_input_size
+            ):
+                raise ValueError(
+                    f"{pool_name} environment feature layout does not match training"
+                )
+            if environment.action_shape != primary_env.action_shape:
+                raise ValueError(
+                    f"{pool_name} environment action dimensions do not match training"
+                )
+            if len(environment.dataset) < 2:
+                raise ValueError(
+                    f"{pool_name} environment requires at least two snapshots"
+                )
     selection_scope = (
-        "in_sample_research_demo"
+        (
+            "in_sample_universe_research_demo"
+            if len(training_envs) > 1
+            else "in_sample_research_demo"
+        )
         if selection_env is None
-        else "validation_research_demo"
+        else (
+            "validation_universe_research_demo"
+            if len(evaluation_envs) > 1
+            else "validation_research_demo"
+        )
     )
 
     model = build_recurrent_actor_critic(recurrent_config)
@@ -402,14 +497,22 @@ def train_actor_critic(
     best_state = None
     evaluations_without_improvement = 0
 
+    environment_order: list[int] = []
     for episode in range(config.episodes):
+        cycle_position = episode % len(training_envs)
+        if cycle_position == 0:
+            environment_order = environment_rng.permutation(
+                len(training_envs)
+            ).tolist()
+        environment_index = environment_order[cycle_position]
+        episode_env = training_envs[environment_index]
         rollout_start, rollout_step_limit = _sample_rollout_bounds(
-            len(env.dataset),
+            len(episode_env.dataset),
             config.max_steps,
             config.random_start,
             rollout_rng,
         )
-        observation, _ = env.reset(
+        observation, _ = episode_env.reset(
             seed=config.seed + episode,
             options={"start_index": rollout_start},
         )
@@ -442,11 +545,11 @@ def train_actor_critic(
             hidden_state = _detach_hidden(hidden_state)
             action_array = action.squeeze(0).detach().cpu().numpy()
             requested_option_orders += int(
-                np.count_nonzero(action_array[:env.slot_count])
+                np.count_nonzero(action_array[:episode_env.slot_count])
             )
             requested_underlying_orders += int(action_array[-1] != 0)
 
-            observation, reward, terminated, truncated, info = env.step(
+            observation, reward, terminated, truncated, info = episode_env.step(
                 action_array
             )
             sequences.append(sequence.squeeze(0).squeeze(0))
@@ -669,17 +772,36 @@ def train_actor_critic(
             or episode == config.episodes - 1
         )
         if should_evaluate:
-            report = evaluate_recurrent_policy(
-                evaluation_env,
-                model,
-                config.sequence_length,
-                seeds=(config.seed + 10_000 + episode,),
-            )[0]
-            evaluation_reward = float(report.total_reward)
-            evaluation_max_drawdown = float(report.max_drawdown)
-            evaluation_downside_deviation = float(report.downside_deviation)
-            evaluation_turnover = float(report.turnover)
-            evaluation_selection_score = selection_score(report, config)
+            reports = {
+                environment.dataset.symbol: evaluate_recurrent_policy(
+                    environment,
+                    model,
+                    config.sequence_length,
+                    seeds=(config.seed + 10_000 + episode + index,),
+                )[0]
+                for index, environment in enumerate(evaluation_envs)
+            }
+            ticker_scores = {
+                symbol: selection_score(report, config)
+                for symbol, report in reports.items()
+            }
+            aggregate = aggregate_selection_scores(
+                ticker_scores.values(),
+                config,
+            )
+            evaluation_reward = float(
+                np.mean([report.total_reward for report in reports.values()])
+            )
+            evaluation_max_drawdown = float(
+                np.mean([report.max_drawdown for report in reports.values()])
+            )
+            evaluation_downside_deviation = float(np.mean([
+                report.downside_deviation for report in reports.values()
+            ]))
+            evaluation_turnover = float(
+                np.mean([report.turnover for report in reports.values()])
+            )
+            evaluation_selection_score = aggregate["score"]
             selection_improved = (
                 evaluation_selection_score
                 > best_score + config.selection_min_delta
@@ -702,12 +824,36 @@ def train_actor_critic(
         metrics.append(
             {
                 "episode": episode,
+                "training_symbol": episode_env.dataset.symbol,
+                "training_environment_index": environment_index,
                 "steps": steps,
                 "rollout_start_index": rollout_start,
                 "rollout_end_index": rollout_start + steps,
                 "total_reward": float(sum(rewards)),
                 "evaluation_total_reward": evaluation_reward,
                 "evaluation_selection_score": evaluation_selection_score,
+                "evaluation_selection_score_mean": (
+                    aggregate["mean"] if should_evaluate else None
+                ),
+                "evaluation_worst_ticker_selection_score": (
+                    aggregate["worst"] if should_evaluate else None
+                ),
+                "evaluation_selection_score_std": (
+                    aggregate["standard_deviation"]
+                    if should_evaluate
+                    else None
+                ),
+                "evaluation_by_symbol": (
+                    {
+                        symbol: {
+                            **_episode_report_dict(report),
+                            "selection_score": ticker_scores[symbol],
+                        }
+                        for symbol, report in reports.items()
+                    }
+                    if should_evaluate
+                    else None
+                ),
                 "evaluation_max_drawdown": evaluation_max_drawdown,
                 "evaluation_downside_deviation": (
                     evaluation_downside_deviation
@@ -753,7 +899,7 @@ def train_actor_critic(
                 ),
                 "requested_action_rate": (
                     (requested_option_orders + requested_underlying_orders)
-                    / (steps * env.action_shape[0])
+                    / (steps * episode_env.action_shape[0])
                 ),
             }
         )
@@ -770,12 +916,14 @@ def train_actor_critic(
 
 
 def checkpoint_manifest(
-    env: OptionsEnv,
+    env: OptionsEnv | Sequence[OptionsEnv],
     recurrent_config: RecurrentConfig,
     training_config: TrainingConfig,
     metrics: list[dict[str, Any]],
     provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    environments = _environment_pool(env, name="checkpoint")
+    primary_env = environments[0]
     selected_metric = next(
         (item for item in metrics if item.get("selected_checkpoint")),
         metrics[-1],
@@ -818,6 +966,12 @@ def checkpoint_manifest(
                 "turnover_penalty": (
                     training_config.selection_turnover_penalty
                 ),
+                "cross_ticker_std_penalty": (
+                    training_config.selection_cross_ticker_std_penalty
+                ),
+                "worst_ticker_weight": (
+                    training_config.selection_worst_ticker_weight
+                ),
             },
             "early_stopping": {
                 "enabled": training_config.selection_patience is not None,
@@ -829,8 +983,15 @@ def checkpoint_manifest(
                 ),
             },
         },
-        "environment": env.manifest.to_dict(),
-        "environment_fingerprint": env.manifest.fingerprint,
+        "environment": primary_env.manifest.to_dict(),
+        "environment_fingerprint": primary_env.manifest.fingerprint,
+        "training_environments": [
+            environment.manifest.to_dict() for environment in environments
+        ],
+        "training_environment_fingerprints": {
+            environment.dataset.symbol: environment.manifest.fingerprint
+            for environment in environments
+        },
         "model": asdict(recurrent_config),
         "training": asdict(training_config),
         "metrics": metrics,
@@ -841,7 +1002,7 @@ def checkpoint_manifest(
 def save_checkpoint(
     path: Path,
     model,
-    env: OptionsEnv,
+    env: OptionsEnv | Sequence[OptionsEnv],
     recurrent_config: RecurrentConfig,
     training_config: TrainingConfig,
     metrics: list[dict[str, Any]],
@@ -888,6 +1049,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--symbol", default="AAPL")
+    parser.add_argument(
+        "--universe",
+        choices=("single", "top50"),
+        default="single",
+        help="train one ticker or one shared policy across the top-50 universe",
+    )
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
@@ -924,6 +1091,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--selection-drawdown-penalty", type=float, default=0.0)
     parser.add_argument("--selection-downside-penalty", type=float, default=0.0)
     parser.add_argument("--selection-turnover-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--selection-cross-ticker-std-penalty",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--selection-worst-ticker-weight",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--max-abs-delta", type=float)
     parser.add_argument("--max-abs-gamma", type=float)
@@ -933,28 +1110,43 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _symbols_from_args(args: argparse.Namespace) -> tuple[str, ...]:
+    return (
+        TOP_50_TICKERS
+        if args.universe == "top50"
+        else (args.symbol.upper(),)
+    )
+
+
 def main() -> None:
     args = _parser().parse_args()
-    env = OptionsEnv.from_directory(
-        args.data_dir,
-        args.symbol,
-        slot_count=args.slot_count,
-        max_quantity=args.max_quantity,
-        underlying_lot_size=args.underlying_lot_size,
-        max_abs_underlying_shares=args.max_abs_underlying_shares,
-        underlying_commission_per_share=args.underlying_commission_per_share,
-        underlying_slippage_bps=args.underlying_slippage_bps,
-        max_abs_delta=args.max_abs_delta,
-        max_abs_gamma=args.max_abs_gamma,
-        max_abs_theta=args.max_abs_theta,
-        max_abs_vega=args.max_abs_vega,
+    symbols = _symbols_from_args(args)
+    environments = tuple(
+        OptionsEnv.from_directory(
+            args.data_dir,
+            symbol,
+            slot_count=args.slot_count,
+            max_quantity=args.max_quantity,
+            underlying_lot_size=args.underlying_lot_size,
+            max_abs_underlying_shares=args.max_abs_underlying_shares,
+            underlying_commission_per_share=(
+                args.underlying_commission_per_share
+            ),
+            underlying_slippage_bps=args.underlying_slippage_bps,
+            max_abs_delta=args.max_abs_delta,
+            max_abs_gamma=args.max_abs_gamma,
+            max_abs_theta=args.max_abs_theta,
+            max_abs_vega=args.max_abs_vega,
+        )
+        for symbol in symbols
     )
-    observation, _ = env.reset(seed=args.seed)
+    primary_env = environments[0]
+    observation, _ = primary_env.reset(seed=args.seed)
     recurrent_config = RecurrentConfig(
         input_size=observation_vector(observation).shape[0],
-        slot_count=env.slot_count,
-        action_slot_count=env.action_shape[0],
-        action_count=env.action_shape[1],
+        slot_count=primary_env.slot_count,
+        action_slot_count=primary_env.action_shape[0],
+        action_count=primary_env.action_shape[1],
         hidden_size=args.hidden_size,
         kind=args.kind,
         encoder=args.encoder,
@@ -987,17 +1179,41 @@ def main() -> None:
         selection_drawdown_penalty=args.selection_drawdown_penalty,
         selection_downside_penalty=args.selection_downside_penalty,
         selection_turnover_penalty=args.selection_turnover_penalty,
+        selection_cross_ticker_std_penalty=(
+            args.selection_cross_ticker_std_penalty
+        ),
+        selection_worst_ticker_weight=args.selection_worst_ticker_weight,
         algorithm=args.algorithm,
     )
-    model, metrics = train_actor_critic(env, recurrent_config, training_config)
-    output = args.output or Path("data/models") / (
-        f"{env.dataset.symbol}-{args.encoder}-{args.kind}.pt"
+    training_env = environments[0] if len(environments) == 1 else environments
+    model, metrics = train_actor_critic(
+        training_env,
+        recurrent_config,
+        training_config,
     )
-    save_checkpoint(output, model, env, recurrent_config, training_config, metrics)
+    output_label = primary_env.dataset.symbol if len(environments) == 1 else "top50"
+    output = args.output or Path("data/models") / (
+        f"{output_label}-{args.encoder}-{args.kind}.pt"
+    )
+    save_checkpoint(
+        output,
+        model,
+        training_env,
+        recurrent_config,
+        training_config,
+        metrics,
+    )
     selected = next(item for item in metrics if item["selected_checkpoint"])
     print(
         json.dumps(
-            {"checkpoint": str(output), "selected_episode": selected},
+            {
+                "checkpoint": str(output),
+                "selected_episode": selected["episode"],
+                "selection_scope": selected["evaluation_scope"],
+                "selection_score": selected["evaluation_selection_score"],
+                "symbols": list(symbols),
+                "symbol_count": len(symbols),
+            },
             sort_keys=True,
         )
     )

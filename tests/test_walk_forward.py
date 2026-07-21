@@ -270,6 +270,8 @@ class WalkForwardTrainingTests(TestCase):
                 "drawdown_penalty": 0.0,
                 "downside_penalty": 0.0,
                 "turnover_penalty": 0.0,
+                "cross_ticker_std_penalty": 0.0,
+                "worst_ticker_weight": 0.0,
             },
         )
         self.assertEqual(selection["selected_model_id"], expected["model_id"])
