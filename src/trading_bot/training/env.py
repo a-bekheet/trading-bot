@@ -30,7 +30,9 @@ MARKET_FEATURES = ("underlyingPrice", "riskFreeRate", *MARKET_ENGINEERED_FEATURE
 GREEK_NAMES = ("delta", "gamma", "theta", "vega")
 PORTFOLIO_FEATURES = (
     "cash", "investedCost", "netAssetValue", *GREEK_NAMES,
+    "underlyingShares",
 )
+PORTFOLIO_GREEK_SLICE = slice(3, 7)
 
 
 @dataclass
@@ -41,7 +43,7 @@ class Position:
 
 
 class OptionsEnv:
-    """Long-only, fixed-slot environment over current CSV snapshots.
+    """Long-only options plus bounded underlying trades over CSV snapshots.
 
     This is explicitly a research demo. It is deterministic and useful for
     integration testing, not a historical-performance simulator.
@@ -57,6 +59,10 @@ class OptionsEnv:
         starting_cash: float = 100_000.0,
         commission_per_contract: float = 0.65,
         spread_multiplier: float = 1.0,
+        underlying_lot_size: int = 25,
+        max_abs_underlying_shares: int = 500,
+        underlying_commission_per_share: float = 0.005,
+        underlying_slippage_bps: float = 1.0,
         invalid_action_penalty: float = 0.001,
         max_abs_delta: float | None = None,
         max_abs_gamma: float | None = None,
@@ -65,8 +71,15 @@ class OptionsEnv:
     ):
         if slot_count < 1 or max_quantity < 1:
             raise ValueError("slot_count and max_quantity must be positive")
-        if commission_per_contract < 0 or spread_multiplier < 0:
+        if (
+            commission_per_contract < 0
+            or spread_multiplier < 0
+            or underlying_commission_per_share < 0
+            or underlying_slippage_bps < 0
+        ):
             raise ValueError("execution costs cannot be negative")
+        if underlying_lot_size < 1 or max_abs_underlying_shares < underlying_lot_size:
+            raise ValueError("underlying position limits and lot size are invalid")
         limits = {
             "delta": max_abs_delta,
             "gamma": max_abs_gamma,
@@ -83,6 +96,10 @@ class OptionsEnv:
         self.starting_cash = starting_cash
         self.commission_per_contract = commission_per_contract
         self.spread_multiplier = spread_multiplier
+        self.underlying_lot_size = underlying_lot_size
+        self.max_abs_underlying_shares = max_abs_underlying_shares
+        self.underlying_commission_per_share = underlying_commission_per_share
+        self.underlying_slippage_bps = underlying_slippage_bps
         self.invalid_action_penalty = invalid_action_penalty
         self.risk_limits = limits
         manifest_values = {
@@ -92,6 +109,10 @@ class OptionsEnv:
             "starting_cash": starting_cash,
             "commission_per_contract": commission_per_contract,
             "spread_multiplier": spread_multiplier,
+            "underlying_lot_size": underlying_lot_size,
+            "max_abs_underlying_shares": max_abs_underlying_shares,
+            "underlying_commission_per_share": underlying_commission_per_share,
+            "underlying_slippage_bps": underlying_slippage_bps,
             "invalid_action_penalty": invalid_action_penalty,
             "max_abs_delta": max_abs_delta,
             "max_abs_gamma": max_abs_gamma,
@@ -107,6 +128,7 @@ class OptionsEnv:
         self._index = 0
         self._cash = starting_cash
         self._positions: dict[str, Position] = {}
+        self._underlying_shares = 0
         self._cached_index = -1
         self._cached_observation: Observation | None = None
         self._cached_info: dict[str, Any] = {}
@@ -122,6 +144,9 @@ class OptionsEnv:
                 for key in (
                     "slot_count", "max_quantity", "starting_cash",
                     "commission_per_contract", "spread_multiplier",
+                    "underlying_lot_size", "max_abs_underlying_shares",
+                    "underlying_commission_per_share",
+                    "underlying_slippage_bps",
                     "invalid_action_penalty",
                     "max_abs_delta", "max_abs_gamma", "max_abs_theta",
                     "max_abs_vega",
@@ -132,12 +157,18 @@ class OptionsEnv:
 
     @property
     def action_shape(self) -> tuple[int, int]:
-        return self.slot_count, 2 * self.max_quantity + 1
+        return self.slot_count + 1, 2 * self.max_quantity + 1
+
+    @property
+    def underlying_action_quantities(self) -> np.ndarray:
+        positive = np.arange(1, self.max_quantity + 1) * self.underlying_lot_size
+        return np.concatenate((np.array([0]), positive, -positive)).astype(np.int64)
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         self._rng = np.random.default_rng(seed)
         self._cash = self.starting_cash
         self._positions = {}
+        self._underlying_shares = 0
         options = options or {}
         start = int(options.get("start_index", 0))
         if not 0 <= start < len(self.dataset):
@@ -153,8 +184,13 @@ class OptionsEnv:
     def step(self, action: Action | np.ndarray):
         action = action if isinstance(action, Action) else Action(np.asarray(action))
         orders = np.asarray(action.orders, dtype=int)
-        if orders.shape != (self.slot_count,):
-            raise ValueError(f"action must have shape {(self.slot_count,)}")
+        if orders.shape == (self.slot_count,):
+            orders = np.concatenate((orders, np.array([0], dtype=int)))
+        elif orders.shape != (self.slot_count + 1,):
+            raise ValueError(
+                f"action must have shape {(self.slot_count,)} or "
+                f"{(self.slot_count + 1,)}"
+            )
 
         if self._index >= len(self.dataset) - 1:
             frame = self._current_frame()
@@ -194,11 +230,59 @@ class OptionsEnv:
                 current_frame, current_slots
             )
         pre_nav = float(current_observation.portfolio[2])
-        running_exposures = current_observation.portfolio[3:].copy()
+        running_exposures = current_observation.portfolio[
+            PORTFOLIO_GREEK_SLICE
+        ].copy()
         invalid_actions = 0
         executions: list[dict[str, Any]] = []
         fees = 0.0
-        for slot, encoded in enumerate(orders):
+        underlying_encoded = int(orders[-1])
+        if underlying_encoded:
+            underlying_slot = self.slot_count
+            if (
+                underlying_encoded < 0
+                or underlying_encoded >= self.action_shape[1]
+                or not current_observation.action_mask[
+                    underlying_slot,
+                    underlying_encoded,
+                ]
+            ):
+                invalid_actions += 1
+            else:
+                signed_quantity = int(
+                    self.underlying_action_quantities[underlying_encoded]
+                )
+                greek_change = np.array(
+                    [signed_quantity, 0.0, 0.0, 0.0],
+                    dtype=np.float64,
+                )
+                if not self._risk_allowed(running_exposures, greek_change):
+                    invalid_actions += 1
+                else:
+                    side = "buy" if signed_quantity > 0 else "sell"
+                    quantity = abs(signed_quantity)
+                    spot = float(current_frame["underlyingPrice"].iloc[0])
+                    price = self._underlying_execution_price(spot, side)
+                    fee = quantity * self.underlying_commission_per_share
+                    cash_change = signed_quantity * price + fee
+                    if cash_change > self._cash:
+                        invalid_actions += 1
+                    else:
+                        self._cash -= cash_change
+                        self._underlying_shares += signed_quantity
+                        fees += fee
+                        running_exposures += greek_change
+                        executions.append({
+                            "instrument": "underlying",
+                            "side": side,
+                            "contract_symbol": self.dataset.symbol,
+                            "quantity": quantity,
+                            "price": price,
+                            "fee": fee,
+                            "multiplier": 1,
+                        })
+
+        for slot, encoded in enumerate(orders[:self.slot_count]):
             if encoded == 0:
                 continue
             if encoded < 0 or encoded > 2 * self.max_quantity:
@@ -228,7 +312,15 @@ class OptionsEnv:
                 continue
             fees += fee
             running_exposures += greek_change
-            executions.append({"side": side, "contract_symbol": contract["contractSymbol"], "quantity": quantity, "price": price, "fee": fee})
+            executions.append({
+                "instrument": "option",
+                "side": side,
+                "contract_symbol": contract["contractSymbol"],
+                "quantity": quantity,
+                "price": price,
+                "fee": fee,
+                "multiplier": 100,
+            })
 
         next_index = self._index + 1
         if next_index < len(self.dataset):
@@ -254,7 +346,10 @@ class OptionsEnv:
             **next_info,
             "pnl": pnl,
             "fees": fees,
-            "trade_notional": sum(item["price"] * item["quantity"] * 100 for item in executions),
+            "trade_notional": sum(
+                item["price"] * item["quantity"] * item["multiplier"]
+                for item in executions
+            ),
             "invalid_action_count": invalid_actions,
             "executions": executions,
             "greek_exposures": {
@@ -366,15 +461,43 @@ class OptionsEnv:
                     and bid > 0
                     and self._risk_allowed(exposures, -greek_change)
                 )
+        underlying_slot = self.slot_count
+        action_mask[underlying_slot, 0] = True
+        spot = float(frame["underlyingPrice"].iloc[0])
+        for encoded, signed_quantity in enumerate(
+            self.underlying_action_quantities[1:],
+            start=1,
+        ):
+            projected_position = self._underlying_shares + int(signed_quantity)
+            if abs(projected_position) > self.max_abs_underlying_shares:
+                continue
+            side = "buy" if signed_quantity > 0 else "sell"
+            price = self._underlying_execution_price(spot, side)
+            fee = abs(signed_quantity) * self.underlying_commission_per_share
+            affordable = (
+                signed_quantity < 0
+                or self._cash >= signed_quantity * price + fee
+            )
+            greek_change = np.array(
+                [signed_quantity, 0.0, 0.0, 0.0],
+                dtype=np.float64,
+            )
+            action_mask[underlying_slot, encoded] = (
+                affordable
+                and price > 0
+                and self._risk_allowed(exposures, greek_change)
+            )
         first = frame.iloc[0]
         market = np.array(
             [float(first.get(name, 0.0) or 0.0) for name in MARKET_FEATURES],
             dtype=np.float64,
         )
         invested = sum(position.quantity * position.average_price * 100 for position in self._positions.values())
-        portfolio = np.concatenate(
-            (np.array([self._cash, invested, nav], dtype=np.float64), exposures)
-        )
+        portfolio = np.concatenate((
+            np.array([self._cash, invested, nav], dtype=np.float64),
+            exposures,
+            np.array([self._underlying_shares], dtype=np.float64),
+        ))
         return Observation(
             self.dataset.snapshots[self._index].timestamp,
             market,
@@ -383,6 +506,7 @@ class OptionsEnv:
             valid,
             action_mask,
             tuple(ids),
+            underlying_action_quantities=self.underlying_action_quantities,
         ), {
             "index": self._index,
             "data_source": self.manifest.data_source,
@@ -406,6 +530,13 @@ class OptionsEnv:
         if side == "sell":
             return max(midpoint - self.spread_multiplier * half_spread, 0.0)
         raise AssertionError("unreachable side")
+
+    def _underlying_execution_price(self, spot: float, side: str) -> float:
+        """Apply the explicit synthetic spread assumed for underlying fills."""
+        if side not in {"buy", "sell"}:
+            raise ValueError("side must be 'buy' or 'sell'")
+        slippage = self.underlying_slippage_bps / 10_000
+        return spot * (1 + slippage if side == "buy" else 1 - slippage)
 
     @staticmethod
     def _contract_greeks(contract: pd.Series) -> np.ndarray:
@@ -464,8 +595,10 @@ class OptionsEnv:
 
     def _portfolio_metrics(self, frame: pd.DataFrame) -> tuple[float, np.ndarray]:
         quotes = frame.drop_duplicates("contractSymbol").set_index("contractSymbol")
-        value = 0.0
+        spot = float(frame["underlyingPrice"].iloc[0])
+        value = self._underlying_shares * spot
         exposures = np.zeros(len(GREEK_NAMES), dtype=np.float64)
+        exposures[0] = self._underlying_shares
         for symbol, position in self._positions.items():
             if symbol not in quotes.index:
                 value += position.quantity * position.average_price * 100

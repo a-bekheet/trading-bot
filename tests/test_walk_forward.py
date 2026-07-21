@@ -89,7 +89,10 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(len(summary["folds"]), 1)
         self.assertEqual(fold["selection"]["scope"], "validation_research_demo")
         self.assertEqual(fold["test"][0]["steps"], 1)
-        self.assertEqual(set(fold["baselines"]), {"no_op", "first_feasible"})
+        self.assertEqual(
+            set(fold["baselines"]),
+            {"no_op", "first_feasible", "buy_first_then_delta_hedge"},
+        )
         self.assertEqual(set(fold["cost_stress"]), {"base", "double_costs"})
         self.assertEqual(
             checkpoint_manifest["selection"]["scope"],

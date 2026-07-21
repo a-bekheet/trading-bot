@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 
 from trading_bot.training.baselines import first_feasible, no_op
-from trading_bot.training.evaluation import evaluate_cost_stress, evaluate_policy
+from trading_bot.training.evaluation import (
+    CostScenario,
+    cost_stressed_environment,
+    evaluate_cost_stress,
+    evaluate_policy,
+)
 from trading_bot.training.env import OptionsEnv
 
 
@@ -79,3 +84,53 @@ class EvaluationTests(TestCase):
         self.assertGreater(stressed.fees, base.fees)
         self.assertGreater(base.turnover, 0)
         self.assertGreater(base.max_abs_delta, 0)
+
+    def test_cost_scenario_stresses_underlying_slippage_and_commission(self):
+        rows = []
+        for timestamp in (
+            "2026-07-21T14:00:00Z",
+            "2026-07-21T14:01:00Z",
+        ):
+            rows.append({
+                "collectedAt": timestamp,
+                "contractSymbol": "TEST-C",
+                "symbol": "TEST",
+                "expiration": "2026-08-21",
+                "optionType": "call",
+                "strike": 100,
+                "bid": 1,
+                "ask": 1.2,
+                "lastPrice": 1.1,
+                "impliedVolatility": 0.2,
+                "underlyingPrice": 100,
+                "riskFreeRate": 0.04,
+            })
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "TEST.csv"
+            pd.DataFrame(rows).to_csv(path, index=False)
+            base = OptionsEnv.from_directory(
+                Path(directory),
+                "TEST",
+                slot_count=1,
+                max_quantity=1,
+                underlying_lot_size=25,
+                underlying_commission_per_share=0.01,
+                underlying_slippage_bps=10,
+            )
+            stressed = cost_stressed_environment(
+                base,
+                CostScenario(
+                    "double",
+                    spread_multiplier=2,
+                    commission_multiplier=2,
+                ),
+            )
+            base.reset()
+            stressed.reset()
+            _, _, _, _, base_info = base.step(np.array([0, 1]))
+            _, _, _, _, stressed_info = stressed.step(np.array([0, 1]))
+
+        self.assertAlmostEqual(base_info["executions"][0]["price"], 100.1)
+        self.assertAlmostEqual(stressed_info["executions"][0]["price"], 100.2)
+        self.assertAlmostEqual(base_info["fees"], 0.25)
+        self.assertAlmostEqual(stressed_info["fees"], 0.5)

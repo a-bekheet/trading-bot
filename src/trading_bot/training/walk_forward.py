@@ -8,7 +8,11 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from trading_bot.training.baselines import first_feasible, no_op
+from trading_bot.training.baselines import (
+    buy_first_then_delta_hedge,
+    first_feasible,
+    no_op,
+)
 from trading_bot.training.dataset import SnapshotDataset
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.evaluation import (
@@ -28,7 +32,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v1"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v2"
 
 
 @dataclass(frozen=True)
@@ -63,8 +67,9 @@ class ModelSpec:
         observation, _ = env.reset(seed=0)
         return RecurrentConfig(
             input_size=observation_vector(observation).shape[0],
-            slot_count=env.action_shape[0],
+            slot_count=env.slot_count,
             action_count=env.action_shape[1],
+            action_slot_count=env.action_shape[0],
             hidden_size=self.hidden_size,
             layers=self.layers,
             kind=self.kind,
@@ -147,6 +152,10 @@ def run_walk_forward_training(
             ],
             "first_feasible": [
                 run_episode(test_env, first_feasible, seed)
+                for seed in walk_forward_config.test_seeds
+            ],
+            "buy_first_then_delta_hedge": [
+                run_episode(test_env, buy_first_then_delta_hedge(), seed)
                 for seed in walk_forward_config.test_seeds
             ],
         }
@@ -241,6 +250,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument("--max-quantity", type=int, default=3)
+    parser.add_argument("--underlying-lot-size", type=int, default=25)
+    parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
+    parser.add_argument("--underlying-commission-per-share", type=float, default=0.005)
+    parser.add_argument("--underlying-slippage-bps", type=float, default=1.0)
+    parser.add_argument("--max-abs-delta", type=float)
+    parser.add_argument("--max-abs-gamma", type=float)
+    parser.add_argument("--max-abs-theta", type=float)
+    parser.add_argument("--max-abs-vega", type=float)
     parser.add_argument("--seed", type=int, default=7)
     return parser
 
@@ -273,6 +290,16 @@ def main() -> None:
             env_kwargs={
                 "slot_count": args.slot_count,
                 "max_quantity": args.max_quantity,
+                "underlying_lot_size": args.underlying_lot_size,
+                "max_abs_underlying_shares": args.max_abs_underlying_shares,
+                "underlying_commission_per_share": (
+                    args.underlying_commission_per_share
+                ),
+                "underlying_slippage_bps": args.underlying_slippage_bps,
+                "max_abs_delta": args.max_abs_delta,
+                "max_abs_gamma": args.max_abs_gamma,
+                "max_abs_theta": args.max_abs_theta,
+                "max_abs_vega": args.max_abs_vega,
             },
         )
     except ValueError as error:

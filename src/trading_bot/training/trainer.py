@@ -18,7 +18,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v5"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v6"
 
 
 @dataclass(frozen=True)
@@ -101,7 +101,7 @@ def evaluate_recurrent_policy(
     sequence_length: int,
     seeds: tuple[int, ...] = (101, 102, 103),
 ) -> list[EpisodeReport]:
-    """Evaluate deterministic actions; results are research-demo/in-sample only."""
+    """Evaluate deterministic actions on the explicitly supplied environment."""
     was_training = model.training
     model.eval()
     reports = [
@@ -162,7 +162,11 @@ def train_actor_critic(
         raise ValueError(
             f"model input_size={recurrent_config.input_size}, environment emits {actual_input_size}"
         )
-    if (recurrent_config.slot_count, recurrent_config.action_count) != env.action_shape:
+    model_action_shape = (
+        recurrent_config.action_slot_count or recurrent_config.slot_count,
+        recurrent_config.action_count,
+    )
+    if model_action_shape != env.action_shape:
         raise ValueError("model action dimensions do not match the environment")
     if recurrent_config.feature_vector_schema != FEATURE_VECTOR_SCHEMA_VERSION:
         raise ValueError("model feature-vector schema does not match the trainer")
@@ -467,6 +471,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument("--max-quantity", type=int, default=3)
+    parser.add_argument("--underlying-lot-size", type=int, default=25)
+    parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
+    parser.add_argument("--underlying-commission-per-share", type=float, default=0.005)
+    parser.add_argument("--underlying-slippage-bps", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--ppo-epochs", type=int, default=4)
@@ -489,6 +497,10 @@ def main() -> None:
         args.symbol,
         slot_count=args.slot_count,
         max_quantity=args.max_quantity,
+        underlying_lot_size=args.underlying_lot_size,
+        max_abs_underlying_shares=args.max_abs_underlying_shares,
+        underlying_commission_per_share=args.underlying_commission_per_share,
+        underlying_slippage_bps=args.underlying_slippage_bps,
         max_abs_delta=args.max_abs_delta,
         max_abs_gamma=args.max_abs_gamma,
         max_abs_theta=args.max_abs_theta,
@@ -497,7 +509,8 @@ def main() -> None:
     observation, _ = env.reset(seed=args.seed)
     recurrent_config = RecurrentConfig(
         input_size=observation_vector(observation).shape[0],
-        slot_count=env.action_shape[0],
+        slot_count=env.slot_count,
+        action_slot_count=env.action_shape[0],
         action_count=env.action_shape[1],
         hidden_size=args.hidden_size,
         kind=args.kind,

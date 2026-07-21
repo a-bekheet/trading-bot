@@ -24,6 +24,7 @@ class RecurrentConfig:
     contract_feature_count: int | None = None
     market_feature_count: int = 2
     portfolio_feature_count: int = 3
+    action_slot_count: int | None = None
     feature_vector_schema: str = FEATURE_VECTOR_SCHEMA_VERSION
     graph_hidden_size: int = 32
     graph_layers: int = 2
@@ -33,6 +34,8 @@ class RecurrentConfig:
     def __post_init__(self) -> None:
         if min(self.input_size, self.slot_count, self.action_count, self.hidden_size) < 1:
             raise ValueError("model dimensions must be positive")
+        if self.action_slot_count is not None and self.action_slot_count < 1:
+            raise ValueError("action_slot_count must be positive")
         if self.market_feature_count < 1 or self.portfolio_feature_count < 1:
             raise ValueError("market and portfolio feature counts must be positive")
         if self.layers < 1 or self.graph_layers < 1 or self.graph_hidden_size < 1:
@@ -62,6 +65,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         raise ValueError("graph_relation_indices are outside the contract feature layout")
 
     temporal_input_size = config.input_size
+    policy_slot_count = config.action_slot_count or config.slot_count
     if config.encoder == "graph":
         expected = (
             config.market_feature_count
@@ -116,7 +120,10 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             else:
                 self.recurrent = make_recurrent(config.kind)
                 output_size = config.hidden_size
-            self.policy = nn.Linear(output_size, config.slot_count * config.action_count)
+            self.policy = nn.Linear(
+                output_size,
+                policy_slot_count * config.action_count,
+            )
             self.value = nn.Linear(output_size, 1)
 
         def _graph_encode(self, sequence):
@@ -199,7 +206,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 encoded, hidden = self.recurrent(sequence)
                 final = encoded[:, -1]
             logits = self.policy(final).view(
-                sequence.shape[0], config.slot_count, config.action_count
+                sequence.shape[0], policy_slot_count, config.action_count
             )
             if action_mask is not None:
                 safe_mask = action_mask.bool().clone()

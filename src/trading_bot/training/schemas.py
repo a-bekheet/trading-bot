@@ -8,8 +8,8 @@ from typing import Any
 import numpy as np
 
 
-SCHEMA_VERSION = "research-demo.v4"
-FEATURE_VECTOR_SCHEMA_VERSION = "dimensionless.v2"
+SCHEMA_VERSION = "research-demo.v5"
+FEATURE_VECTOR_SCHEMA_VERSION = "dimensionless.v3"
 
 
 @dataclass(frozen=True)
@@ -24,11 +24,14 @@ class Observation:
     action_mask: np.ndarray
     contract_ids: tuple[str | None, ...]
     schema_version: str = SCHEMA_VERSION
+    underlying_action_quantities: np.ndarray = field(
+        default_factory=lambda: np.zeros(1, dtype=np.int64)
+    )
 
 
 @dataclass(frozen=True)
 class Action:
-    """Per-slot action: 0 hold, 1..Q buy, Q+1..2Q sell."""
+    """Option slots plus final underlying slot; 0 hold, then buy/sell buckets."""
 
     orders: np.ndarray
 

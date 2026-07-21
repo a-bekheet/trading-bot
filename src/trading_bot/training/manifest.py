@@ -25,6 +25,10 @@ class EnvManifest:
     starting_cash: float = 100_000.0
     commission_per_contract: float = 0.65
     spread_multiplier: float = 1.0
+    underlying_lot_size: int = 25
+    max_abs_underlying_shares: int = 500
+    underlying_commission_per_share: float = 0.005
+    underlying_slippage_bps: float = 1.0
     invalid_action_penalty: float = 0.001
     max_abs_delta: float | None = None
     max_abs_gamma: float | None = None

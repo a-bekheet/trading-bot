@@ -60,10 +60,16 @@ def _dimensionless_components(
             market[volatility_index] = np.log1p(
                 max(market[volatility_index], 0.0)
             )
-    if len(portfolio) == 7:
+    if len(portfolio) == 8:
         nav = float(portfolio[2])
         nav_scale = max(abs(nav), 1.0)
-        deployed_capital = max(abs(float(portfolio[0])) + abs(float(portfolio[1])), 1.0)
+        underlying_notional = abs(float(portfolio[7])) * spot_scale
+        deployed_capital = max(
+            abs(float(portfolio[0]))
+            + abs(float(portfolio[1]))
+            + underlying_notional,
+            1.0,
+        )
         portfolio = np.array(
             [
                 portfolio[0] / nav_scale,
@@ -73,6 +79,7 @@ def _dimensionless_components(
                 portfolio[4] * spot_scale**2 / nav_scale,
                 portfolio[5] / nav_scale,
                 portfolio[6] / nav_scale,
+                portfolio[7] * spot_scale / nav_scale,
             ],
             dtype=np.float64,
         )

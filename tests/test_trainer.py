@@ -33,6 +33,7 @@ class TrainerTests(TestCase):
             input_size=observation_vector(observation).shape[0],
             slot_count=2,
             action_count=7,
+            action_slot_count=env.action_shape[0],
             hidden_size=8,
             kind="hybrid",
             encoder="graph",
@@ -66,11 +67,12 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
         self.assertEqual(sidecar["model"]["encoder"], "graph")
-        self.assertEqual(sidecar["model"]["portfolio_feature_count"], 7)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v4")
+        self.assertEqual(sidecar["model"]["portfolio_feature_count"], 8)
+        self.assertEqual(sidecar["model"]["action_slot_count"], 3)
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v5")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v2")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v3")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
@@ -106,6 +108,7 @@ class TrainerTests(TestCase):
             input_size=observation_vector(observation).size,
             slot_count=2,
             action_count=7,
+            action_slot_count=train_env.action_shape[0],
             hidden_size=8,
         )
 

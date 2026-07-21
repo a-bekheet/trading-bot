@@ -29,7 +29,7 @@ Every candidate must eventually pass:
 | --- | --- | --- |
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Add causal realized-volatility horizons and a formal walk-forward runner. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, enforce realistic limits, compare against simple investments, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v2` and Greek budgets implement the state/risk lesson; bootstrap intervals remain an evaluation gate. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, enforce realistic limits, compare against simple investments, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v3` and Greek budgets implement the state/risk lesson; bootstrap intervals remain an evaluation gate. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
 
@@ -48,10 +48,11 @@ implementation has enough history for a valid walk-forward result.
 
 The executable walk-forward runner now trains each recurrent PPO model on the
 training range, selects checkpoints exclusively on validation reward, and only
-then evaluates the held-out test range against no-op, first-feasible, and
-doubled-cost scenarios. The next baseline gap is an implementable delta hedge;
-that requires adding an underlying-asset action rather than pretending an option
-order is an equivalent hedge.
+then evaluates the held-out test range against no-op, first-feasible,
+buy-first-then-Delta-hedge, and doubled-cost scenarios. The Delta comparator now
+uses a real bounded underlying-share action with explicit synthetic costs. It
+remains a research approximation until historical underlying bid/ask, borrow,
+margin, dividend, and funding data are available.
 
 ## Prioritized implementation sequence
 
@@ -68,14 +69,15 @@ order is an equivalent hedge.
 
 ### 2. Strengthen baselines
 
-- No trade and first-feasible policies already test environment mechanics.
-- Add a Black-Scholes delta hedge with the same action and risk constraints.
+- No trade and first-feasible policies test environment mechanics.
+- Retain the implemented Black-Scholes Delta hedge as a comparator and extend
+  it to explicit option-liability episodes when the historical dataset permits.
 - Add simple IV mean-reversion/carry rules that use only available quotes.
 - Add a Monte-Carlo policy-gradient trainer as an algorithmic comparator.
 
 ### 3. Improve the state without inflating latency
 
-- Keep the 25-field `dimensionless.v2` contract state as the minimum model.
+- Keep the 25-field `dimensionless.v3` contract state as the minimum model.
 - Extend the implemented realized-volatility state only through ablation-tested
   regime features.
 - Include explicit missingness/quote-quality masks instead of substituting

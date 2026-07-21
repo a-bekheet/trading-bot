@@ -52,6 +52,18 @@ def demo_dataset() -> SnapshotDataset:
     )
 
 
+def three_snapshot_dataset() -> SnapshotDataset:
+    source = demo_dataset()
+    final = source.snapshots[-1].frame.copy()
+    final["collectedAt"] = "2026-07-21T14:02:00Z"
+    final["bid"] = 1.6
+    final["ask"] = 1.8
+    return SnapshotDataset(
+        (*source.snapshots, Snapshot("2026-07-21T14:02:00+00:00", final)),
+        source.symbol,
+    )
+
+
 class OptionsEnvTests(TestCase):
     def test_reset_is_deterministic_and_step_has_no_lookahead(self):
         env = OptionsEnv(
@@ -78,10 +90,9 @@ class OptionsEnvTests(TestCase):
         self.assertTrue(truncated)
         self.assertGreater(reward, 0)
         self.assertAlmostEqual(sum(info["reward_components"].values()), reward)
-        self.assertEqual(next_observation.portfolio.shape, (7,))
+        self.assertEqual(next_observation.portfolio.shape, (8,))
         self.assertAlmostEqual(next_observation.portfolio[3], 50.0)
         self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
-
 
     def test_mask_rejects_aggregate_cash_violation(self):
         env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=130)
@@ -106,7 +117,7 @@ class OptionsEnvTests(TestCase):
         self.assertTrue(observation.action_mask[0, 1])
         self.assertFalse(observation.action_mask[0, 2])
         self.assertEqual(reset_info["risk_limits"]["delta"], 60)
-        self.assertEqual(reset_info["portfolio_features"][-4:], (
+        self.assertEqual(reset_info["portfolio_features"][3:7], (
             "delta", "gamma", "theta", "vega",
         ))
         _, _, _, _, info = env.step(np.array([1, 1]))
@@ -140,11 +151,47 @@ class OptionsEnvTests(TestCase):
         with self.assertRaisesRegex(ValueError, "execution costs"):
             OptionsEnv(demo_dataset(), spread_multiplier=-1)
 
+    def test_underlying_trade_updates_cash_nav_delta_and_position_limits(self):
+        env = OptionsEnv(
+            three_snapshot_dataset(),
+            slot_count=2,
+            max_quantity=2,
+            starting_cash=1_000,
+            underlying_lot_size=25,
+            max_abs_underlying_shares=50,
+            underlying_commission_per_share=0.01,
+            underlying_slippage_bps=10,
+        )
+        observation, _ = env.reset()
+
+        self.assertEqual(observation.action_mask.shape, (3, 5))
+        np.testing.assert_array_equal(
+            observation.underlying_action_quantities,
+            np.array([0, 25, 50, -25, -50]),
+        )
+        next_observation, _, _, truncated, info = env.step(
+            np.array([1, 0, 4])
+        )
+
+        self.assertFalse(truncated)
+        self.assertEqual([item["instrument"] for item in info["executions"]], [
+            "underlying",
+            "option",
+        ])
+        self.assertAlmostEqual(info["executions"][0]["price"], 329.67)
+        self.assertAlmostEqual(info["executions"][0]["fee"], 0.5)
+        self.assertEqual(next_observation.portfolio[7], -50)
+        self.assertAlmostEqual(next_observation.portfolio[3], 0)
+        self.assertAlmostEqual(info["greek_exposures"]["delta"], 0)
+        self.assertFalse(next_observation.action_mask[2, 3])
+        self.assertFalse(next_observation.action_mask[2, 4])
+        self.assertAlmostEqual(info["trade_notional"], 16_603.5)
+
     def test_rejects_stale_environment_manifest(self):
         with self.assertRaisesRegex(ValueError, "manifest schema"):
             OptionsEnv(
                 demo_dataset(),
-                manifest=EnvManifest(schema_version="research-demo.v3"),
+                manifest=EnvManifest(schema_version="research-demo.v4"),
             )
 
     def test_risk_reducing_sell_remains_allowed_after_greek_drift(self):

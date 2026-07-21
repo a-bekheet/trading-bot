@@ -7,7 +7,7 @@ from typing import Callable
 
 import numpy as np
 
-from trading_bot.training.env import OptionsEnv
+from trading_bot.training.env import OptionsEnv, PORTFOLIO_GREEK_SLICE
 from trading_bot.training.schemas import Observation
 
 
@@ -36,6 +36,10 @@ class EpisodeReport:
     max_abs_gamma: float
     max_abs_theta: float
     max_abs_vega: float
+    final_delta: float
+    final_gamma: float
+    final_theta: float
+    final_vega: float
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -47,7 +51,9 @@ def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport
     total_reward = fees = 0.0
     invalid_actions = executions = steps = 0
     trade_notional = 0.0
-    max_abs_greeks = np.abs(observation.portfolio[3:]).astype(float)
+    max_abs_greeks = np.abs(
+        observation.portfolio[PORTFOLIO_GREEK_SLICE]
+    ).astype(float)
     while True:
         observation, reward, terminated, truncated, info = env.step(policy(observation))
         total_reward += reward
@@ -57,7 +63,7 @@ def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport
         trade_notional += float(info["trade_notional"])
         max_abs_greeks = np.maximum(
             max_abs_greeks,
-            np.abs(observation.portfolio[3:]),
+            np.abs(observation.portfolio[PORTFOLIO_GREEK_SLICE]),
         )
         navs.append(float(observation.portfolio[2]))
         steps += 1
@@ -80,6 +86,7 @@ def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport
     downside = float(
         np.sqrt(np.square(np.minimum(step_returns, 0.0)).mean())
     ) if len(step_returns) else 0.0
+    final_greeks = observation.portfolio[PORTFOLIO_GREEK_SLICE]
     return EpisodeReport(
         seed=seed,
         steps=steps,
@@ -101,6 +108,10 @@ def run_episode(env: OptionsEnv, policy: Policy, seed: int = 0) -> EpisodeReport
         max_abs_gamma=float(max_abs_greeks[1]),
         max_abs_theta=float(max_abs_greeks[2]),
         max_abs_vega=float(max_abs_greeks[3]),
+        final_delta=float(final_greeks[0]),
+        final_gamma=float(final_greeks[1]),
+        final_theta=float(final_greeks[2]),
+        final_vega=float(final_greeks[3]),
     )
 
 
@@ -134,10 +145,18 @@ def cost_stressed_environment(
 ) -> OptionsEnv:
     commission = source.commission_per_contract * scenario.commission_multiplier
     spread = source.spread_multiplier * scenario.spread_multiplier
+    underlying_commission = (
+        source.underlying_commission_per_share * scenario.commission_multiplier
+    )
+    underlying_slippage = (
+        source.underlying_slippage_bps * scenario.spread_multiplier
+    )
     manifest = replace(
         source.manifest,
         commission_per_contract=commission,
         spread_multiplier=spread,
+        underlying_commission_per_share=underlying_commission,
+        underlying_slippage_bps=underlying_slippage,
     )
     return OptionsEnv(
         source.dataset,
@@ -147,6 +166,10 @@ def cost_stressed_environment(
         starting_cash=source.starting_cash,
         commission_per_contract=commission,
         spread_multiplier=spread,
+        underlying_lot_size=source.underlying_lot_size,
+        max_abs_underlying_shares=source.max_abs_underlying_shares,
+        underlying_commission_per_share=underlying_commission,
+        underlying_slippage_bps=underlying_slippage,
         invalid_action_penalty=source.invalid_action_penalty,
         max_abs_delta=source.risk_limits["delta"],
         max_abs_gamma=source.risk_limits["gamma"],

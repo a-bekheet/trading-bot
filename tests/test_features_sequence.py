@@ -124,6 +124,7 @@ class FeatureSequenceTests(TestCase):
                     1 / scale,
                     -10 * scale,
                     20 * scale,
+                    10,
                 ]),
                 np.ones(1, dtype=bool),
                 np.ones((1, 3), dtype=bool),
@@ -135,10 +136,13 @@ class FeatureSequenceTests(TestCase):
         contract_end = 2 + len(CONTRACT_FEATURES)
 
         np.testing.assert_allclose(first[:contract_end], second[:contract_end])
-        np.testing.assert_allclose(first[contract_end:contract_end + 7], second[contract_end:contract_end + 7])
+        np.testing.assert_allclose(
+            first[contract_end:contract_end + 8],
+            second[contract_end:contract_end + 8],
+        )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v2")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v3")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

@@ -119,13 +119,22 @@ small and stable:
 - `step(action)` returns `(Observation, reward, terminated, truncated, info)`.
 - `Observation.contracts` has fixed shape `(K, features)` and carries
   `contract_ids`, `valid_mask`, and `action_mask`.
-- `Observation.portfolio` contains cash, invested cost, NAV, and portfolio
-  Delta/Gamma/Theta/Vega in contract-multiplier-adjusted units.
-- Action `0` means hold; `1..Q` means buy `Q` buckets; `Q+1..2Q` means sell.
+- `Observation.portfolio` contains cash, invested cost, NAV, portfolio
+  Delta/Gamma/Theta/Vega, and the underlying-share position. Total Delta must
+  include the shares.
+- `Observation.action_mask` has `K+1` rows: `K` option slots and one final
+  underlying slot. Action `0` means hold; `1..Q` are buy buckets and
+  `Q+1..2Q` are sell buckets. Legacy length-`K` arrays imply underlying hold.
+- Option buckets represent contracts. Underlying buckets represent multiples
+  of `underlying_lot_size`, may open bounded shorts, and must obey cash, Delta,
+  and `max_abs_underlying_shares` constraints.
 - Masks are generated from the pre-step state and include quote validity,
   fee-adjusted affordability, held quantity, and optional absolute Greek limits.
 - Multiple orders in one action are revalidated sequentially so cash cannot go
   negative even when individual pre-step actions were affordable.
+- Execute the underlying leg first, then option slots in ascending order. Masks
+  describe the pre-step state; every leg must still be revalidated against the
+  running cash and Greek state.
 - `info` retains executions, invalid-action count, P&L, fees, trade notional,
   and reward components.
 - `reward_components` must sum to the returned scalar reward. Gross P&L includes
@@ -162,10 +171,11 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v2`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v3`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
-to NAV/deployed capital, DTE is expressed in years, and heavy-tailed fields are
-compressed and clipped. Raw volume and open interest
+to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
+is expressed in years, and heavy-tailed fields are compressed and clipped. Raw
+volume and open interest
 must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
 finite-value tests, and a checkpoint-schema bump; old weights must never be
@@ -196,7 +206,16 @@ return no folds when history is insufficient. Never relax requested sizes to
 manufacture a result. `evaluate_cost_stress` must run identical policy logic
 under each scenario; default stress doubles both executable spread and
 commission. Episode reports retain return, drawdown, volatility/downside,
-turnover, costs, execution quality, and peak Greek exposure diagnostics.
+turnover, costs, execution quality, and final/peak Greek exposure diagnostics.
+
+Underlying fills use the captured spot with explicit synthetic slippage and
+per-share commission because the current CSV has no underlying bid/ask. Keep
+the assumption visible. Short shares are capped but the demo does not model
+borrow, margin, dividends, or funding, so results remain research-only.
+
+The recurrent policy has `K+1` action slots but the graph encoder still has
+exactly `K` contract nodes. Keep `RecurrentConfig.slot_count` equal to
+`env.slot_count` and `action_slot_count` equal to `env.action_shape[0]`.
 
 `run_walk_forward_training` is the executable research boundary. For every
 fold, train only on `train`, choose and restore weights only from `validation`,

@@ -100,7 +100,7 @@ env = OptionsEnv.from_directory(Path("data"), "AAPL", slot_count=32)
 observation, info = env.reset(seed=7)
 env_action = np.zeros(env.action_shape[0], dtype=int)
 observation, reward, terminated, truncated, info = env.step(
-    env_action  # integer array: 0 hold, 1..Q buy, Q+1..2Q sell
+    env_action
 )
 ```
 
@@ -111,10 +111,18 @@ deterministic seeds, and decomposed rewards. Its manifest is marked
 performance. A licensed point-in-time all-expiry dataset is required before a
 historical RL environment is enabled.
 
-The portfolio state includes cash, invested cost, NAV, Delta, Gamma, Theta, and
-Vega. Exposure units are share-equivalent Delta, Delta change per $1 Gamma,
-dollars per calendar day Theta, and dollars per one-percentage-point IV Vega.
-Limits are optional; risk-reducing trades remain available after Greek drift:
+The action matrix has one row per option contract plus a final underlying-share
+row. In every row action `0` holds, `1..Q` buys, and `Q+1..2Q` sells. Option
+buckets contain 1..Q contracts. The underlying buckets contain multiples of the
+configured lot size—25, 50, and 75 shares by default—and may create bounded
+short positions. Passing the older option-only vector remains valid and implies
+an underlying hold.
+
+The portfolio state includes cash, invested cost, NAV, Delta, Gamma, Theta,
+Vega, and underlying shares. Total Delta includes the share position. Exposure
+units are share-equivalent Delta, Delta change per $1 Gamma, dollars per
+calendar day Theta, and dollars per one-percentage-point IV Vega. Limits are
+optional; risk-reducing trades remain available after Greek drift:
 
 ```python
 env = OptionsEnv.from_directory(
@@ -138,10 +146,11 @@ taking deeper strikes. Chronological windows are available through
 `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v2` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v3` transform. Prices and strikes are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
-portfolio values become ratios, DTE is in years, and heavy-tailed age/liquidity
-fields are compressed. Raw volume and
+the underlying position is scaled by its NAV weight, portfolio values become
+ratios, DTE is in years, and heavy-tailed age/liquidity fields are compressed.
+Raw volume and
 open interest are omitted because their causal log features contain the useful
 ordering at a much better numerical scale. The transform is fitted on no data,
 so it cannot leak future distribution statistics into a training window.
@@ -160,7 +169,8 @@ from trading_bot.training.sequence import observation_vector
 model = build_recurrent_actor_critic(
     RecurrentConfig(
         input_size=observation_vector(observation).size,
-        slot_count=env.action_shape[0],
+        slot_count=env.slot_count,
+        action_slot_count=env.action_shape[0],
         action_count=env.action_shape[1],
         kind="gru",
         market_feature_count=observation.market.size,
@@ -220,7 +230,7 @@ not import PyTorch.
 
 Evaluation reports include return, drawdown, step volatility/downside
 deviation, Sharpe/Sortino diagnostics, turnover, fees, invalid actions, fills,
-and peak absolute Greek exposures. Cost stress uses the same policy and quotes
+and final/peak absolute Greek exposures. Cost stress uses the same policy and quotes
 while widening executable spreads and commissions:
 
 ```python
@@ -260,9 +270,14 @@ Each fold trains only on its training range, selects and restores weights using
 validation reward, and touches the test range only afterward. It writes a safe
 checkpoint per fold plus a JSON summary with exact split boundaries, distinct
 train/validation/test fingerprints, held-out recurrent results, no-op and
-first-feasible baselines, and normal/doubled-cost reports. This improves the
-evaluation boundary; Yahoo snapshots and these simple baselines still do not
-establish alpha.
+first-feasible baselines, a buy-first-then-Delta-hedge comparator, and
+normal/doubled-cost reports. This improves the evaluation boundary; Yahoo
+snapshots and these simple baselines still do not establish alpha.
+
+Underlying fills use the saved underlying price plus/minus configurable
+synthetic slippage (one basis point by default) and a per-share commission.
+This enables a reproducible Delta hedge but is not a substitute for historical
+underlying bid/ask data, borrow availability, margin, dividends, or funding.
 
 The evidence and sequencing behind future alpha research—including
 walk-forward validation, benchmark hedges, realized-volatility state, GNNs,
