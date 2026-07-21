@@ -128,7 +128,7 @@ DEFAULT_COST_SCENARIOS = (
 )
 
 
-def _environment_for_scenario(
+def cost_stressed_environment(
     source: OptionsEnv,
     scenario: CostScenario,
 ) -> OptionsEnv:
@@ -167,7 +167,7 @@ def evaluate_cost_stress(
         raise ValueError("cost scenario names must be unique")
     return {
         scenario.name: [
-            run_episode(_environment_for_scenario(env, scenario), policy, seed)
+            run_episode(cost_stressed_environment(env, scenario), policy, seed)
             for seed in seeds
         ]
         for scenario in scenarios

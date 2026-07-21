@@ -71,6 +71,7 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
         self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v2")
+        self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
             env.manifest.fingerprint,
@@ -94,6 +95,28 @@ class TrainerTests(TestCase):
         recurrent = RecurrentConfig(input_size=1, slot_count=2, action_count=7)
         with self.assertRaisesRegex(ValueError, "environment emits"):
             train_actor_critic(env, recurrent, TrainingConfig(episodes=1))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_validation_environment_sets_selection_scope(self):
+        source = demo_dataset()
+        train_env = OptionsEnv(source, slot_count=2)
+        validation_env = OptionsEnv(source, slot_count=2)
+        observation, _ = train_env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            hidden_size=8,
+        )
+
+        _, metrics = train_actor_critic(
+            train_env,
+            recurrent,
+            TrainingConfig(episodes=1, sequence_length=2),
+            selection_env=validation_env,
+        )
+
+        self.assertEqual(metrics[0]["evaluation_scope"], "validation_research_demo")
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_checkpoint_with_incompatible_feature_transform(self):

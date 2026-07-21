@@ -4,6 +4,7 @@ from trading_bot.training.env import OptionsEnv
 from trading_bot.training.evaluation import (
     CostScenario,
     EpisodeReport,
+    cost_stressed_environment,
     evaluate_cost_stress,
     evaluate_policy,
     run_episode,
@@ -17,11 +18,17 @@ from trading_bot.training.trainer import (
     load_checkpoint,
     train_actor_critic,
 )
+from trading_bot.training.walk_forward import (
+    ModelSpec,
+    WalkForwardConfig,
+    run_walk_forward_training,
+)
 
 __all__ = [
     "Action", "CostScenario", "EpisodeReport", "EnvManifest", "Observation",
-    "OptionsEnv", "TrainingConfig", "Transition", "WalkForwardSplit",
-    "evaluate_cost_stress", "evaluate_policy",
+    "ModelSpec", "OptionsEnv", "TrainingConfig", "Transition",
+    "WalkForwardConfig", "WalkForwardSplit",
+    "cost_stressed_environment", "evaluate_cost_stress", "evaluate_policy",
     "evaluate_recurrent_policy", "load_checkpoint", "run_episode",
-    "train_actor_critic", "walk_forward_splits",
+    "run_walk_forward_training", "train_actor_critic", "walk_forward_splits",
 ]

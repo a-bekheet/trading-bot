@@ -28,8 +28,9 @@ does not place live trades.
   builds chronological windows. `recurrent.py` is an optional PyTorch GRU,
   LSTM, or hybrid actor-critic with flat or graph contract encoding. `trainer.py`
   owns factorized PPO/GAE optimization, deterministic evaluation, safe
-  checkpoint restoration, and provenance. Both stay outside ordinary collector
-  imports.
+  checkpoint restoration, and provenance. `walk_forward.py` owns validation-only
+  model selection, held-out test evaluation, fold artifacts, and its CLI. These
+  modules stay outside ordinary collector imports.
 - `tests/`: offline tests; market-data calls must be mocked here.
 - `data/`: generated append-only CSVs, one per ticker; intentionally git-ignored.
 
@@ -178,9 +179,11 @@ zero history cannot masquerade as zero volatility.
 
 The trainer uses factorized per-slot PPO ratios, GAE, policy/value clipping,
 minibatches, target-KL stopping, entropy regularization, and gradient clipping.
-Model selection is deterministic but currently in-sample and must remain labeled
-`in_sample_research_demo`. Checkpoints must load with PyTorch `weights_only=True`;
-never weaken this to unrestricted pickle loading.
+`train-demo` model selection is deterministic but in-sample and must remain
+labeled `in_sample_research_demo`. When `selection_env` is supplied, selection
+must use only that validation environment and be labeled
+`validation_research_demo`. Checkpoints must load with PyTorch
+`weights_only=True`; never weaken this to unrestricted pickle loading.
 
 The graph encoder uses only valid option slots, symmetric nearest-neighbor edges,
 and self edges. Padded contracts must neither send nor receive messages. Keep the
@@ -195,6 +198,14 @@ under each scenario; default stress doubles both executable spread and
 commission. Episode reports retain return, drawdown, volatility/downside,
 turnover, costs, execution quality, and peak Greek exposure diagnostics.
 
+`run_walk_forward_training` is the executable research boundary. For every
+fold, train only on `train`, choose and restore weights only from `validation`,
+then evaluate `test`. The test range may populate reports and provenance only
+after selection; it must never affect features, hyperparameters, early stopping,
+or checkpoint choice. Persist all three dataset fingerprints and exact split
+indices. An insufficient dataset is a hard failure, not permission to shrink
+partitions.
+
 ## Commands
 
 ```bash
@@ -208,6 +219,7 @@ collect-options
 streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
+train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8
 ```
 
 The collector defaults to three expirations per ticker, one cycle every 900

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,7 @@ class SnapshotDataset:
             raise ValueError("dataset contains no usable snapshots")
         self.snapshots = snapshots
         self.symbol = symbol
+        self._fingerprint: str | None = None
 
     @classmethod
     def from_directory(cls, data_dir: Path, symbol: str) -> "SnapshotDataset":
@@ -70,3 +72,21 @@ class SnapshotDataset:
         if not 0 <= start < stop <= len(self.snapshots):
             raise ValueError("subset bounds are outside the dataset")
         return SnapshotDataset(self.snapshots[start:stop], self.symbol)
+
+    @property
+    def fingerprint(self) -> str:
+        """Hash exact engineered snapshot contents for split provenance."""
+        if self._fingerprint is None:
+            digest = hashlib.sha256()
+            digest.update(self.symbol.encode())
+            for snapshot in self.snapshots:
+                digest.update(snapshot.timestamp.encode())
+                digest.update("\0".join(map(str, snapshot.frame.columns)).encode())
+                digest.update(
+                    pd.util.hash_pandas_object(
+                        snapshot.frame,
+                        index=True,
+                    ).to_numpy().tobytes()
+                )
+            self._fingerprint = digest.hexdigest()
+        return self._fingerprint

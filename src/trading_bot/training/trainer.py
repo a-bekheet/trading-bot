@@ -18,7 +18,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v4"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v5"
 
 
 @dataclass(frozen=True)
@@ -143,6 +143,8 @@ def train_actor_critic(
     env: OptionsEnv,
     recurrent_config: RecurrentConfig,
     training_config: TrainingConfig | None = None,
+    *,
+    selection_env: OptionsEnv | None = None,
 ):
     """Train one recurrent policy with clipped PPO and return model/metrics.
 
@@ -164,13 +166,24 @@ def train_actor_critic(
         raise ValueError("model action dimensions do not match the environment")
     if recurrent_config.feature_vector_schema != FEATURE_VECTOR_SCHEMA_VERSION:
         raise ValueError("model feature-vector schema does not match the trainer")
+    evaluation_env = env if selection_env is None else selection_env
+    selection_observation, _ = evaluation_env.reset(seed=config.seed)
+    if observation_vector(selection_observation).shape[0] != actual_input_size:
+        raise ValueError("selection environment feature layout does not match training")
+    if evaluation_env.action_shape != env.action_shape:
+        raise ValueError("selection environment action dimensions do not match training")
+    selection_scope = (
+        "in_sample_research_demo"
+        if selection_env is None
+        else "validation_research_demo"
+    )
 
     model = build_recurrent_actor_critic(recurrent_config)
     # PPO likelihood ratios require the same network behavior during rollout
     # and updates. Eval mode disables optional recurrent dropout but keeps grads.
     model.eval()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-    metrics: list[dict[str, float | int | None]] = []
+    metrics: list[dict[str, Any]] = []
     best_score = float("-inf")
     best_episode = 0
     best_state = None
@@ -320,7 +333,7 @@ def train_actor_critic(
         )
         if should_evaluate:
             report = evaluate_recurrent_policy(
-                env,
+                evaluation_env,
                 model,
                 config.sequence_length,
                 seeds=(config.seed + 10_000 + episode,),
@@ -339,6 +352,7 @@ def train_actor_critic(
                 "steps": steps,
                 "total_reward": float(sum(rewards)),
                 "evaluation_total_reward": evaluation_reward,
+                "evaluation_scope": selection_scope,
                 "loss": float(means[0]),
                 "policy_loss": float(means[1]),
                 "value_loss": float(means[2]),
@@ -368,10 +382,11 @@ def checkpoint_manifest(
     recurrent_config: RecurrentConfig,
     training_config: TrainingConfig,
     metrics: list[dict[str, Any]],
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    selected = next(
-        (item["episode"] for item in metrics if item.get("selected_checkpoint")),
-        len(metrics) - 1,
+    selected_metric = next(
+        (item for item in metrics if item.get("selected_checkpoint")),
+        metrics[-1],
     )
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
@@ -379,15 +394,19 @@ def checkpoint_manifest(
         "algorithm": "factorized_ppo",
         "feature_vector_schema": FEATURE_VECTOR_SCHEMA_VERSION,
         "selection": {
-            "scope": "in_sample_research_demo",
+            "scope": selected_metric.get(
+                "evaluation_scope",
+                "in_sample_research_demo",
+            ),
             "metric": "evaluation_total_reward",
-            "episode": selected,
+            "episode": selected_metric["episode"],
         },
         "environment": env.manifest.to_dict(),
         "environment_fingerprint": env.manifest.fingerprint,
         "model": asdict(recurrent_config),
         "training": asdict(training_config),
         "metrics": metrics,
+        "provenance": provenance or {},
     }
 
 
@@ -398,11 +417,19 @@ def save_checkpoint(
     recurrent_config: RecurrentConfig,
     training_config: TrainingConfig,
     metrics: list[dict[str, Any]],
+    *,
+    provenance: dict[str, Any] | None = None,
 ) -> Path:
     """Save model weights plus a human-readable provenance sidecar."""
     torch = _torch()
     path.parent.mkdir(parents=True, exist_ok=True)
-    manifest = checkpoint_manifest(env, recurrent_config, training_config, metrics)
+    manifest = checkpoint_manifest(
+        env,
+        recurrent_config,
+        training_config,
+        metrics,
+        provenance,
+    )
     torch.save({"state_dict": model.state_dict(), "manifest": manifest}, path)
     path.with_suffix(path.suffix + ".json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",

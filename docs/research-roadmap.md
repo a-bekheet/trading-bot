@@ -46,12 +46,19 @@ drawdown, risk, turnover, cost, and Greek-exposure diagnostics. These are
 evaluation tools, not evidence that the small local AAPL sample observed during
 implementation has enough history for a valid walk-forward result.
 
+The executable walk-forward runner now trains each recurrent PPO model on the
+training range, selects checkpoints exclusively on validation reward, and only
+then evaluates the held-out test range against no-op, first-feasible, and
+doubled-cost scenarios. The next baseline gap is an implementable delta hedge;
+that requires adding an underlying-asset action rather than pretending an option
+order is an equivalent hedge.
+
 ## Prioritized implementation sequence
 
 ### 1. Make evaluation credible
 
 - Store sufficient timestamped, point-in-time option and underlying history.
-- Use the implemented embargoed chronological folds in a full training runner.
+- Run the implemented full training runner after sufficient history is stored.
 - Retain the implemented backward-only realized-volatility horizons and
   explicit history-coverage masks.
 - Report NAV return, downside deviation, Sharpe/Sortino, maximum drawdown,

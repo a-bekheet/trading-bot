@@ -203,8 +203,8 @@ factorized per-contract PPO ratios, generalized advantage estimation, clipped
 policy and value updates, shuffled minibatches, target-KL early stopping,
 entropy regularization, and gradient clipping. It evaluates deterministic
 actions after each rollout and restores the best checkpoint. Selection is
-explicitly labeled `in_sample_research_demo`; it is integration evidence, not a
-backtest or an alpha claim.
+explicitly labeled `in_sample_research_demo` for `train-demo`; it is integration
+evidence, not a backtest or an alpha claim.
 
 Restore weights without enabling arbitrary pickle execution:
 
@@ -242,6 +242,27 @@ rolling training windows, and place an explicit embargo between train,
 validation, and test partitions. The current small Yahoo sample will return no
 folds for production-sized thresholds, which is preferable to silently
 pretending that it supports out-of-sample evidence.
+
+Run the complete recurrent PPO workflow once enough snapshots exist:
+
+```bash
+train-walk-forward \
+  --symbol AAPL \
+  --min-train-size 500 \
+  --validation-size 100 \
+  --test-size 100 \
+  --embargo 8 \
+  --encoder graph \
+  --kind hybrid
+```
+
+Each fold trains only on its training range, selects and restores weights using
+validation reward, and touches the test range only afterward. It writes a safe
+checkpoint per fold plus a JSON summary with exact split boundaries, distinct
+train/validation/test fingerprints, held-out recurrent results, no-op and
+first-feasible baselines, and normal/doubled-cost reports. This improves the
+evaluation boundary; Yahoo snapshots and these simple baselines still do not
+establish alpha.
 
 The evidence and sequencing behind future alpha research—including
 walk-forward validation, benchmark hedges, realized-volatility state, GNNs,

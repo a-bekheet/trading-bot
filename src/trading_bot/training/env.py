@@ -101,7 +101,7 @@ class OptionsEnv:
         self.manifest = (
             replace(manifest, **manifest_values)
             if manifest is not None
-            else EnvManifest(**manifest_values)
+            else EnvManifest(data_hash=dataset.fingerprint, **manifest_values)
         )
         self._rng = np.random.default_rng()
         self._index = 0

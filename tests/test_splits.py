@@ -47,6 +47,8 @@ class WalkForwardSplitTests(TestCase):
         self.assertEqual(len(train), 10)
         self.assertEqual(validation.snapshots[0].timestamp, "12")
         self.assertEqual(test.snapshots[0].timestamp, "18")
+        self.assertNotEqual(train.fingerprint, validation.fingerprint)
+        self.assertNotEqual(validation.fingerprint, test.fingerprint)
 
     def test_supports_bounded_rolling_training_window(self):
         folds = walk_forward_splits(
