@@ -140,13 +140,16 @@ forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs, IV
 change/skew, ATM term slope, put-call IV spread, and put-call parity residual.
 Underlying return and annualized realized volatility over 4- and 16-snapshot
 windows live once in the market vector rather than being repeated for every
-contract. Each volatility estimate has an explicit history-coverage feature.
+contract. Front-expiry ATM IV and its difference from both realized-volatility
+horizons provide a compact volatility-risk-premium regime signal. Each realized
+volatility estimate has an explicit history-coverage feature, and the IV-minus-
+realized signal stays neutral until some causal return history exists.
 Fixed policy slots are stratified across expiration and option type before
 taking deeper strikes. Chronological windows are available through
 `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v3` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v4` transform. Prices and strikes are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 the underlying position is scaled by its NAV weight, portfolio values become
 ratios, DTE is in years, and heavy-tailed age/liquidity fields are compressed.
@@ -184,6 +187,18 @@ Run the research-demo PPO trainer against collected snapshots:
 ```bash
 train-demo --symbol AAPL --kind hybrid --episodes 25 --sequence-length 8
 ```
+
+Training episodes default to reproducible random windows of at most 128
+transitions inside the supplied training partition. This exposes PPO to more
+market regimes and bounds update cost without touching validation or test data.
+Use `--max-steps` to change the window or `--no-random-start --max-steps ...`
+for a fixed prefix; passing the Python API `max_steps=None` trains on the entire
+partition from its first snapshot. In a local 500-snapshot, flat-GRU synthetic
+benchmark, the bounded default processed 128 rather than 499 transitions and
+reduced an otherwise default one-episode train-and-selection run from about
+5.67 seconds to 3.49 seconds (1.63x). Validation selection defaults to every
+five episodes rather than every rollout; use `--evaluation-interval` to change
+that cadence. These are machine-specific throughput choices, not alpha results.
 
 Add `--encoder graph` to run masked message passing over the option surface
 before temporal encoding:

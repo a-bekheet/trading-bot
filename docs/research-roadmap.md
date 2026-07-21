@@ -30,7 +30,7 @@ Every candidate must eventually pass:
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | Add CVaR or learned P&L-distribution objectives only after explicit short-option liability episodes and enough independent paths exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Add causal realized-volatility horizons and a formal walk-forward runner. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, enforce realistic limits, compare against simple investments, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v3` and Greek budgets implement the state/risk lesson; bootstrap intervals remain an evaluation gate. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v4`, compact ATM-IV-minus-realized-volatility state, and Greek budgets implement the state/risk lesson; bootstrap intervals remain an evaluation gate. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
 
@@ -61,6 +61,12 @@ the old policy state. This removes fictitious zero-padded history and avoids
 recomputing a full temporal window at every decision. It improves temporal
 correctness and latency; it is not evidence of alpha.
 
+The market state now includes front-expiry ATM IV and its difference from
+backward-only 4/16-snapshot realized volatility, each paired with the existing
+history coverage. PPO training samples seeded bounded windows across the
+training partition instead of replaying only its first regime. Both choices
+improve sample efficiency; their value still requires walk-forward ablation.
+
 ## Prioritized implementation sequence
 
 ### 1. Make evaluation credible
@@ -84,7 +90,8 @@ correctness and latency; it is not evidence of alpha.
 
 ### 3. Improve the state without inflating latency
 
-- Keep the 25-field `dimensionless.v3` contract state as the minimum model.
+- Keep the 25-field `dimensionless.v4` contract state as the minimum model;
+  volatility-regime state belongs once in the market vector.
 - Extend the implemented realized-volatility state only through ablation-tested
   regime features.
 - Include explicit missingness/quote-quality masks instead of substituting

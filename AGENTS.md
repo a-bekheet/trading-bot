@@ -80,7 +80,9 @@ append. Important model/input columns are:
 Training-time surface features include forward log-moneyness, extrinsic value,
 ATM IV/skew, ATM term slope, put-call IV spread, and parity residual. They are
 derived within a single captured timestamp and are not persisted into the raw
-CSV contract.
+CSV contract. The market vector also contains front-expiry ATM IV and its
+difference from causal 4/16-snapshot realized volatility. Keep those global
+regime features out of each contract node.
 
 Greek conventions:
 
@@ -171,7 +173,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v3`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v4`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
 is expressed in years, and heavy-tailed fields are compressed and clipped. Raw
@@ -195,6 +197,10 @@ truncated-backpropagation chunks initialized with the old policy's causal
 hidden state. `sequence_length` is the gradient chunk bound. Do not restore
 left-zero-padded sliding windows: they create fictitious history, discard
 state older than the window, and repeat recurrent work at every inference step.
+Training rollouts default to seeded, uniformly sampled windows of at most 128
+transitions inside the training dataset. Persist each start/end index in episode
+metrics. Random starts may never cross the supplied partition, affect validation
+or test evaluation, or replace the deterministic full-partition selection run.
 `train-demo` model selection is deterministic but in-sample and must remain
 labeled `in_sample_research_demo`. When `selection_env` is supplied, selection
 must use only that validation environment and be labeled

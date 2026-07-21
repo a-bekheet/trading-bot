@@ -17,7 +17,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v7"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v8"
 
 
 @dataclass(frozen=True)
@@ -36,8 +36,9 @@ class TrainingConfig:
     entropy_coefficient: float = 0.01
     gradient_clip: float = 0.5
     seed: int = 7
-    max_steps: int | None = None
-    evaluation_interval: int = 1
+    max_steps: int | None = 128
+    random_start: bool = True
+    evaluation_interval: int = 5
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
@@ -54,6 +55,8 @@ class TrainingConfig:
             raise ValueError("loss coefficients cannot be negative")
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError("max_steps must be positive when provided")
+        if not isinstance(self.random_start, bool):
+            raise ValueError("random_start must be a boolean")
         if self.evaluation_interval < 1:
             raise ValueError("evaluation_interval must be positive")
 
@@ -196,6 +199,30 @@ def _generalized_advantages(
     return advantages, advantages + values
 
 
+def _sample_rollout_bounds(
+    dataset_length: int,
+    max_steps: int | None,
+    random_start: bool,
+    rng: np.random.Generator,
+) -> tuple[int, int]:
+    """Choose a reproducible causal training segment inside one partition."""
+    if dataset_length < 2:
+        raise ValueError("recurrent training requires at least two snapshots")
+    available_steps = dataset_length - 1
+    rollout_steps = (
+        available_steps
+        if max_steps is None
+        else min(max_steps, available_steps)
+    )
+    latest_start = available_steps - rollout_steps
+    start = (
+        int(rng.integers(0, latest_start + 1))
+        if random_start and latest_start > 0
+        else 0
+    )
+    return start, rollout_steps
+
+
 def train_actor_critic(
     env: OptionsEnv,
     recurrent_config: RecurrentConfig,
@@ -212,6 +239,7 @@ def train_actor_critic(
     config = training_config or TrainingConfig()
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
+    rollout_rng = np.random.default_rng(config.seed)
 
     observation, _ = env.reset(seed=config.seed)
     actual_input_size = observation_vector(observation).shape[0]
@@ -233,6 +261,8 @@ def train_actor_critic(
         raise ValueError("selection environment feature layout does not match training")
     if evaluation_env.action_shape != env.action_shape:
         raise ValueError("selection environment action dimensions do not match training")
+    if len(evaluation_env.dataset) < 2:
+        raise ValueError("selection environment requires at least two snapshots")
     selection_scope = (
         "in_sample_research_demo"
         if selection_env is None
@@ -250,7 +280,16 @@ def train_actor_critic(
     best_state = None
 
     for episode in range(config.episodes):
-        observation, _ = env.reset(seed=config.seed + episode)
+        rollout_start, rollout_step_limit = _sample_rollout_bounds(
+            len(env.dataset),
+            config.max_steps,
+            config.random_start,
+            rollout_rng,
+        )
+        observation, _ = env.reset(
+            seed=config.seed + episode,
+            options={"start_index": rollout_start},
+        )
         sequences = []
         action_masks = []
         actions = []
@@ -289,7 +328,7 @@ def train_actor_critic(
             invalid_actions += int(info["invalid_action_count"])
             executions += len(info["executions"])
             steps += 1
-            reached_limit = config.max_steps is not None and steps >= config.max_steps
+            reached_limit = steps >= rollout_step_limit
             if terminated or truncated or reached_limit:
                 final_terminal = terminated or truncated
                 break
@@ -482,6 +521,8 @@ def train_actor_critic(
             {
                 "episode": episode,
                 "steps": steps,
+                "rollout_start_index": rollout_start,
+                "rollout_end_index": rollout_start + steps,
                 "total_reward": float(sum(rewards)),
                 "evaluation_total_reward": evaluation_reward,
                 "evaluation_scope": selection_scope,
@@ -610,12 +651,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--underlying-commission-per-share", type=float, default=0.005)
     parser.add_argument("--underlying-slippage-bps", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--max-steps", type=int, default=128)
+    parser.add_argument(
+        "--random-start",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=64)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-ratio", type=float, default=0.2)
     parser.add_argument("--target-kl", type=float, default=0.03)
+    parser.add_argument("--evaluation-interval", type=int, default=5)
     parser.add_argument("--max-abs-delta", type=float)
     parser.add_argument("--max-abs-gamma", type=float)
     parser.add_argument("--max-abs-theta", type=float)
@@ -662,11 +709,13 @@ def main() -> None:
         sequence_length=args.sequence_length,
         seed=args.seed,
         max_steps=args.max_steps,
+        random_start=args.random_start,
         ppo_epochs=args.ppo_epochs,
         minibatch_size=args.minibatch_size,
         gae_lambda=args.gae_lambda,
         clip_ratio=args.clip_ratio,
         target_kl=args.target_kl,
+        evaluation_interval=args.evaluation_interval,
     )
     model, metrics = train_actor_critic(env, recurrent_config, training_config)
     output = args.output or Path("data/models") / (

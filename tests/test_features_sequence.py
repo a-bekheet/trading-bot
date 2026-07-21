@@ -86,6 +86,8 @@ class FeatureSequenceTests(TestCase):
         self.assertTrue((front["atmTermSlope"] == 0).all())
         self.assertTrue(np.allclose(engineered["ivSkew"], 0))
         self.assertTrue(np.allclose(engineered["putCallIvSpread"], -0.02))
+        self.assertTrue(np.allclose(engineered["frontAtmIv"], 0.21))
+        self.assertTrue(np.allclose(engineered["atmIvMinusRealizedVol4"], 0))
         self.assertEqual(front["parityResidual"].nunique(), 1)
         self.assertTrue((engineered["extrinsicValuePct"] >= 0).all())
         self.assertTrue(np.isfinite(engineered[list(ENGINEERED_FEATURES)]).all().all())
@@ -142,10 +144,39 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v3")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v4")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
+
+    def test_volatility_regime_market_features_have_fixed_transform(self):
+        market = np.zeros(len(MARKET_FEATURES), dtype=float)
+        market[MARKET_FEATURES.index("underlyingPrice")] = 100
+        market[MARKET_FEATURES.index("riskFreeRate")] = 0.04
+        market[MARKET_FEATURES.index("realizedVol4")] = 0.2
+        market[MARKET_FEATURES.index("frontAtmIv")] = 0.25
+        market[MARKET_FEATURES.index("atmIvMinusRealizedVol4")] = 0.05
+        observation = Observation(
+            "now",
+            market,
+            np.zeros((1, len(CONTRACT_FEATURES))),
+            np.array([100_000, 0, 100_000, 0, 0, 0, 0, 0]),
+            np.ones(1, dtype=bool),
+            np.ones((2, 3), dtype=bool),
+            ("C1",),
+        )
+
+        vector = observation_vector(observation)
+
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("frontAtmIv")],
+            np.log1p(0.25),
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("atmIvMinusRealizedVol4")],
+            np.log1p(0.05),
+        )
+        self.assertTrue(np.isfinite(vector).all())
 
     def test_realized_volatility_is_backward_only_with_explicit_coverage(self):
         rows = []
@@ -185,10 +216,17 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(full.snapshots[4].frame.iloc[0]["realizedVol4Coverage"], 1)
         self.assertEqual(full.snapshots[16].frame.iloc[0]["realizedVol16Coverage"], 1)
         self.assertGreater(full.snapshots[16].frame.iloc[0]["realizedVol16"], 0)
+        fourth = full.snapshots[4].frame.iloc[0]
+        self.assertAlmostEqual(
+            fourth["atmIvMinusRealizedVol4"],
+            fourth["frontAtmIv"] - fourth["realizedVol4"],
+        )
 
         env = OptionsEnv(full, slot_count=1)
         observation, info = env.reset(options={"start_index": 16})
         self.assertEqual(observation.market.size, len(MARKET_FEATURES))
         self.assertEqual(info["market_features"], MARKET_FEATURES)
         self.assertNotIn("underlyingReturn", CONTRACT_FEATURES)
+        self.assertNotIn("frontAtmIv", CONTRACT_FEATURES)
+        self.assertIn("atmIvMinusRealizedVol16", MARKET_FEATURES)
         self.assertTrue(np.isfinite(observation_vector(observation)).all())

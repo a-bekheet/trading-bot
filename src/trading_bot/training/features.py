@@ -15,6 +15,9 @@ MARKET_ENGINEERED_FEATURES = (
     "realizedVol4Coverage",
     "realizedVol16",
     "realizedVol16Coverage",
+    "frontAtmIv",
+    "atmIvMinusRealizedVol4",
+    "atmIvMinusRealizedVol16",
 )
 ENGINEERED_FEATURES = (
     "midPrice", "spread", "spreadPct", "logMoneyness", "dteDays",
@@ -171,6 +174,41 @@ def _surface_features(result: pd.DataFrame) -> None:
     ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
+def _market_surface_features(result: pd.DataFrame) -> None:
+    """Add one snapshot-level volatility regime signal to every source row."""
+    result["frontAtmIv"] = 0.0
+    result["atmIvMinusRealizedVol4"] = 0.0
+    result["atmIvMinusRealizedVol16"] = 0.0
+    required = {"expiration", "optionType", "atmIv", "dteDays"}
+    if not required.issubset(result.columns):
+        return
+
+    groups = pd.DataFrame({
+        "expiration": result["expiration"].astype(str),
+        "optionType": result["optionType"].astype(str).str.lower(),
+        "atmIv": pd.to_numeric(result["atmIv"], errors="coerce"),
+        "dteDays": pd.to_numeric(result["dteDays"], errors="coerce"),
+    }).dropna()
+    groups = groups[(groups["atmIv"] > 0) & (groups["dteDays"] >= 0)]
+    if groups.empty:
+        return
+    groups = groups.groupby(
+        ["expiration", "optionType"], as_index=False, sort=False
+    ).first()
+    front_dte = float(groups["dteDays"].min())
+    front = groups[np.isclose(groups["dteDays"], front_dte)]
+    front_atm_iv = float(front["atmIv"].median())
+    if not np.isfinite(front_atm_iv) or front_atm_iv <= 0:
+        return
+    result["frontAtmIv"] = front_atm_iv
+    for window in REALIZED_VOL_WINDOWS:
+        coverage = float(result[f"realizedVol{window}Coverage"].iloc[0])
+        if coverage <= 0:
+            continue
+        realized = float(result[f"realizedVol{window}"].iloc[0])
+        result[f"atmIvMinusRealizedVol{window}"] = front_atm_iv - realized
+
+
 def engineer_snapshot(
     frame: pd.DataFrame,
     previous: pd.DataFrame | None = None,
@@ -212,6 +250,7 @@ def engineer_snapshot(
     for name, value in realized_volatility_features(spot_history).items():
         result[name] = value
     _surface_features(result)
+    _market_surface_features(result)
     result[list(ENGINEERED_FEATURES)] = result[list(ENGINEERED_FEATURES)].replace(
         [np.inf, -np.inf], np.nan
     ).fillna(0.0)

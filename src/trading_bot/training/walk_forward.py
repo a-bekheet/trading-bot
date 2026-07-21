@@ -32,7 +32,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v3"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v4"
 
 
 @dataclass(frozen=True)
@@ -248,6 +248,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
+    parser.add_argument("--max-steps", type=int, default=128)
+    parser.add_argument(
+        "--random-start",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--evaluation-interval", type=int, default=5)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument("--max-quantity", type=int, default=3)
     parser.add_argument("--underlying-lot-size", type=int, default=25)
@@ -284,6 +291,9 @@ def main() -> None:
             TrainingConfig(
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
+                max_steps=args.max_steps,
+                random_start=args.random_start,
+                evaluation_interval=args.evaluation_interval,
                 seed=args.seed,
             ),
             args.output_dir,

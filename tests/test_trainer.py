@@ -4,11 +4,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, skipUnless
 
+import numpy as np
+
 try:
     import torch
 except ImportError:
     torch = None
 
+from trading_bot.training.dataset import Snapshot, SnapshotDataset
 from trading_bot.training.env import OptionsEnv
 from trading_bot.training.recurrent import RecurrentConfig
 from trading_bot.training.sequence import observation_vector
@@ -16,6 +19,7 @@ from trading_bot.training.trainer import (
     CHECKPOINT_SCHEMA_VERSION,
     TrainingConfig,
     _generalized_advantages,
+    _sample_rollout_bounds,
     evaluate_recurrent_policy,
     load_checkpoint,
     save_checkpoint,
@@ -42,7 +46,12 @@ class TrainerTests(TestCase):
             portfolio_feature_count=observation.portfolio.size,
             graph_hidden_size=8,
         )
-        training = TrainingConfig(episodes=2, sequence_length=2, seed=11)
+        training = TrainingConfig(
+            episodes=2,
+            sequence_length=2,
+            evaluation_interval=1,
+            seed=11,
+        )
 
         model, metrics = train_actor_critic(env, recurrent, training)
 
@@ -77,10 +86,10 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["encoder"], "graph")
         self.assertEqual(sidecar["model"]["portfolio_feature_count"], 8)
         self.assertEqual(sidecar["model"]["action_slot_count"], 3)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v5")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v6")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v3")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v4")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
@@ -126,6 +135,55 @@ class TrainerTests(TestCase):
         self.assertEqual(metrics[0]["steps"], 2)
         self.assertEqual(metrics[0]["recurrent_chunks"], 2)
         self.assertEqual(metrics[0]["ppo_updates"], 2)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_training_integrates_seeded_random_regime_windows(self):
+        source = demo_dataset().snapshots[0].frame
+        snapshots = []
+        for index in range(10):
+            frame = source.copy()
+            timestamp = f"2026-07-21T14:{index:02d}:00+00:00"
+            frame["collectedAt"] = timestamp
+            snapshots.append(Snapshot(timestamp, frame))
+        env = OptionsEnv(
+            SnapshotDataset(tuple(snapshots), "AAPL"),
+            slot_count=2,
+        )
+        observation, _ = env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=8,
+        )
+        config = TrainingConfig(
+            episodes=5,
+            sequence_length=2,
+            max_steps=2,
+            random_start=True,
+            ppo_epochs=1,
+            evaluation_interval=5,
+            seed=41,
+        )
+
+        _, metrics = train_actor_critic(env, recurrent, config)
+        expected_rng = np.random.default_rng(config.seed)
+        expected_starts = [
+            _sample_rollout_bounds(10, 2, True, expected_rng)[0]
+            for _ in range(config.episodes)
+        ]
+
+        self.assertEqual(
+            [item["rollout_start_index"] for item in metrics],
+            expected_starts,
+        )
+        self.assertGreater(len(set(expected_starts)), 1)
+        self.assertTrue(all(item["steps"] == 2 for item in metrics))
+        self.assertTrue(all(
+            item["rollout_end_index"] - item["rollout_start_index"] == 2
+            for item in metrics
+        ))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_model_environment_shape_mismatch(self):
@@ -187,3 +245,28 @@ class TrainerTests(TestCase):
 
         torch.testing.assert_close(advantages, torch.tensor([1.5, 0.75]))
         torch.testing.assert_close(returns, torch.tensor([2.0, 1.0]))
+
+    def test_rollout_segments_are_seeded_bounded_and_regime_diverse(self):
+        first_rng = np.random.default_rng(31)
+        second_rng = np.random.default_rng(31)
+        first = [
+            _sample_rollout_bounds(100, 30, True, first_rng)
+            for _ in range(20)
+        ]
+        second = [
+            _sample_rollout_bounds(100, 30, True, second_rng)
+            for _ in range(20)
+        ]
+
+        self.assertEqual(first, second)
+        self.assertGreater(len({start for start, _ in first}), 1)
+        self.assertTrue(all(0 <= start <= 69 for start, _ in first))
+        self.assertTrue(all(steps == 30 for _, steps in first))
+        self.assertEqual(
+            _sample_rollout_bounds(100, None, True, first_rng),
+            (0, 99),
+        )
+        self.assertEqual(
+            _sample_rollout_bounds(100, 30, False, first_rng),
+            (0, 30),
+        )

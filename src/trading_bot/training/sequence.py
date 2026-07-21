@@ -57,6 +57,12 @@ def _dimensionless_components(
             market[volatility_index] = np.log1p(
                 max(market[volatility_index], 0.0)
             )
+        front_iv_index = market_indices["frontAtmIv"]
+        market[front_iv_index] = np.log1p(max(market[front_iv_index], 0.0))
+        for window in REALIZED_VOL_WINDOWS:
+            spread_index = market_indices[f"atmIvMinusRealizedVol{window}"]
+            spread = market[spread_index]
+            market[spread_index] = np.sign(spread) * np.log1p(abs(spread))
     if len(portfolio) == 8:
         nav = float(portfolio[2])
         nav_scale = max(abs(nav), 1.0)
