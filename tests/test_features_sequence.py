@@ -13,10 +13,35 @@ from trading_bot.training.features import (
 )
 from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES, OptionsEnv
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION, Observation
-from trading_bot.training.sequence import build_windows, observation_vector
+from trading_bot.training.sequence import (
+    FEATURE_ABLATION_GROUPS,
+    build_windows,
+    feature_ablation_indices,
+    observation_vector,
+)
 
 
 class FeatureSequenceTests(TestCase):
+    def test_feature_ablation_groups_map_to_stable_non_overlapping_inputs(self):
+        wing_indices = feature_ablation_indices(("surface_wings",), 2)
+        quality_indices = feature_ablation_indices(("data_quality",), 2)
+        contract_indices = feature_ablation_indices(
+            ("derived_contract_surface",),
+            2,
+        )
+
+        self.assertEqual(len(wing_indices), 3)
+        self.assertEqual(len(quality_indices), 2)
+        self.assertEqual(
+            len(contract_indices),
+            2 * len(FEATURE_ABLATION_GROUPS["derived_contract_surface"]),
+        )
+        self.assertFalse(set(wing_indices) & set(quality_indices))
+        self.assertTrue(all(index < len(MARKET_FEATURES) for index in wing_indices))
+        self.assertTrue(all(index >= len(MARKET_FEATURES) for index in contract_indices))
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            feature_ablation_indices(("future_leak",), 2)
+
     def test_features_are_finite_and_use_previous_snapshot_only(self):
         previous = pd.DataFrame([{
             "collectedAt": "2026-07-21T14:00:00Z", "contractSymbol": "C1",

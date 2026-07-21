@@ -23,6 +23,10 @@ from trading_bot.training.evaluation import (
 )
 from trading_bot.training.manifest import EnvManifest
 from trading_bot.training.schemas import Action, Observation, Transition
+from trading_bot.training.sequence import (
+    FEATURE_ABLATION_GROUPS,
+    feature_ablation_indices,
+)
 from trading_bot.training.splits import WalkForwardSplit, walk_forward_splits
 from trading_bot.training.trainer import (
     TrainingConfig,
@@ -38,13 +42,15 @@ from trading_bot.training.walk_forward import (
 
 __all__ = [
     "Action", "BootstrapComparison", "CostScenario", "EpisodeReport",
-    "EpisodeTrace", "EnvManifest", "LongVolatilityConfig", "Observation",
+    "EpisodeTrace", "EnvManifest", "FEATURE_ABLATION_GROUPS",
+    "LongVolatilityConfig", "Observation",
     "ModelSpec", "OptionsEnv", "TrainingConfig", "Transition",
     "WalkForwardConfig", "WalkForwardSplit",
     "buy_first_then_delta_hedge", "cost_stressed_environment",
     "delta_neutral", "evaluate_cost_stress", "evaluate_policy",
     "evaluate_recurrent_policy", "load_checkpoint",
-    "first_feasible", "long_volatility_delta_hedge", "no_op",
+    "feature_ablation_indices", "first_feasible",
+    "long_volatility_delta_hedge", "no_op",
     "paired_moving_block_bootstrap", "run_episode", "run_episode_trace",
     "run_walk_forward_training", "train_actor_critic", "walk_forward_splits",
 ]

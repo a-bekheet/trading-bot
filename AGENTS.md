@@ -265,16 +265,24 @@ exactly `K` contract nodes. Keep `RecurrentConfig.slot_count` equal to
 fold, train only on `train`, choose and restore weights only from `validation`,
 then evaluate `test`. Architecture tournaments must give candidates the same
 fold and seed, rank validation reward only, and break exact ties by parameter
-count then stable model ID. Instantiate the test environment only after the
-winner is fixed, save only the winning checkpoint, and never attach test metrics
-to losing candidates. The test range may populate reports and provenance only
-after selection; it must never affect features, hyperparameters, early stopping,
+count, active input count, then stable model ID. Instantiate the test environment
+only after the winner is fixed, save only the winning checkpoint, and never
+attach test metrics to losing candidates. The test range may populate reports
+and provenance only after selection; it must never affect features,
+hyperparameters, early stopping,
 or checkpoint choice. Persist all candidate configs, validation scores,
 parameter counts, all three dataset fingerprints, and exact split indices. An
 insufficient dataset is a hard failure, not permission to shrink partitions.
 Candidate episode budgets may end early through the same validation-only
 selection patience, and the comparison artifact must expose completed episodes
 so compute differences are auditable.
+
+Feature-removal candidates must use the named, non-overlapping groups in
+`sequence.FEATURE_ABLATION_GROUPS`. Apply masks inside the recurrent model after
+the versioned transform and persist exact flattened indices in
+`RecurrentConfig`; external preprocessing would make restored checkpoints
+ambiguous. CLI ablations retain a matched full-feature candidate, report
+validation reward lift versus it, and obey the same one-winner test boundary.
 
 ## Commands
 

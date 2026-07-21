@@ -315,19 +315,32 @@ train-walk-forward \
   --embargo 8 \
   --candidate flat:gru \
   --candidate flat:lstm \
-  --candidate graph:hybrid
+  --candidate graph:hybrid \
+  --ablation surface_wings \
+  --ablation volatility_regime
 ```
 
 Repeat `--candidate ENCODER:KIND` to run a leak-safe architecture tournament.
 Every GRU, LSTM, hybrid, flat, or graph candidate receives the same fold and
 training seed. Each candidate restores its best validation checkpoint; the
 highest validation reward wins, with fewer trainable parameters and then a
-stable model ID breaking ties. Only that winner is instantiated against the
+smaller active input set and stable model ID breaking ties. Only that winner is
+instantiated against the
 held-out test range and only its checkpoint is saved. The summary retains every
 candidate's configuration, parameter count, and validation score, but never a
 losing-candidate test result. It also records episodes completed and whether
 validation patience stopped each candidate before its requested budget. Omit
 `--candidate` to preserve the single-model `--encoder`/`--kind` workflow.
+
+Repeat `--ablation GROUP` to add one matched feature-removal candidate per
+architecture while retaining each full-feature candidate. Available groups are
+`surface_wings`, `volatility_regime`, `data_quality`, and
+`derived_contract_surface`. Masking happens inside the checkpointed model after
+the versioned transform, so training, restored inference, and graph/flat models
+use the same ablation. Artifacts report each ablated candidate's validation
+reward lift versus its full-feature counterpart plus active/masked input counts.
+Only the validation winner reaches test, preventing feature research from
+becoming repeated holdout peeking.
 
 Each fold trains only on its training range and touches the test range only
 after both architecture and checkpoint selection. It writes a safe checkpoint

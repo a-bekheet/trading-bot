@@ -11,11 +11,14 @@ except ImportError:
     torch = None
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
+from trading_bot.training.sequence import feature_ablation_indices
 from trading_bot.training.trainer import TrainingConfig, load_checkpoint
 from trading_bot.training.walk_forward import (
     ModelSpec,
     WALK_FORWARD_SCHEMA_VERSION,
     WalkForwardConfig,
+    _model_specs_from_args,
+    _parser,
     run_walk_forward_training,
 )
 
@@ -137,6 +140,12 @@ class WalkForwardTrainingTests(TestCase):
     def test_tournament_selects_one_candidate_before_held_out_evaluation(self):
         candidates = (
             ModelSpec(kind="gru", encoder="flat", hidden_size=8),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=8,
+                disabled_feature_groups=("surface_wings",),
+            ),
             ModelSpec(kind="lstm", encoder="flat", hidden_size=8),
             ModelSpec(
                 kind="hybrid",
@@ -176,6 +185,7 @@ class WalkForwardTrainingTests(TestCase):
                 key=lambda result: (
                     -result["selection"]["validation_total_reward"],
                     result["parameter_count"],
+                    result["active_input_count"],
                     result["model_id"],
                 ),
             )
@@ -183,14 +193,14 @@ class WalkForwardTrainingTests(TestCase):
             _, manifest = load_checkpoint(checkpoint_files[0])
 
         self.assertIsNone(summary["model"])
-        self.assertEqual(len(summary["candidate_models"]), 3)
-        self.assertEqual(len(candidate_results), 3)
+        self.assertEqual(len(summary["candidate_models"]), 4)
+        self.assertEqual(len(candidate_results), 4)
         self.assertEqual(len(checkpoint_files), 1)
         self.assertTrue(all(result["episodes_completed"] == 1 for result in candidate_results))
         self.assertTrue(all(not result["stopped_early"] for result in candidate_results))
         self.assertEqual(
             selection["tie_break"],
-            ["parameter_count", "model_id"],
+            ["parameter_count", "active_input_count", "model_id"],
         )
         self.assertEqual(selection["selected_model_id"], expected["model_id"])
         self.assertEqual(fold["selection"]["model_id"], expected["model_id"])
@@ -203,7 +213,53 @@ class WalkForwardTrainingTests(TestCase):
             manifest["model"]["encoder"],
             expected["model"]["encoder"],
         )
+        self.assertEqual(
+            tuple(manifest["model"]["masked_input_indices"]),
+            feature_ablation_indices(
+                tuple(expected["model"]["disabled_feature_groups"]),
+                1,
+            ),
+        )
+        ablated = next(
+            result
+            for result in candidate_results
+            if result["model"]["disabled_feature_groups"]
+        )
+        full = next(
+            result
+            for result in candidate_results
+            if result["model"]["kind"] == "gru"
+            and result["model"]["encoder"] == "flat"
+            and not result["model"]["disabled_feature_groups"]
+        )
+        self.assertAlmostEqual(
+            ablated["validation_reward_lift_vs_full"],
+            ablated["selection"]["validation_total_reward"]
+            - full["selection"]["validation_total_reward"],
+        )
+        self.assertEqual(
+            ablated["active_input_count"] + ablated["masked_input_count"],
+            full["active_input_count"],
+        )
         self.assertTrue(all("test" not in result for result in candidate_results))
+
+    def test_cli_expands_each_architecture_with_requested_ablation(self):
+        args = _parser().parse_args([
+            "--candidate",
+            "flat:gru",
+            "--candidate",
+            "graph:hybrid",
+            "--ablation",
+            "surface_wings",
+        ])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(len(specs), 4)
+        self.assertEqual(
+            sum(bool(spec.disabled_feature_groups) for spec in specs),
+            2,
+        )
 
     def test_model_candidates_have_stable_unique_identifiers(self):
         first = ModelSpec(kind="gru", encoder="flat", hidden_size=8)

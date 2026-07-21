@@ -135,7 +135,9 @@ a simple underpriced-volatility rule rather than a complete volatility book.
   regime features.
 - Retain the implemented ATM/wing, executable-quote, and Greek coverage instead
   of substituting plausible-looking market values.
-- Measure feature value with walk-forward permutation and removal ablations.
+- Use the implemented walk-forward removal candidates to measure named feature
+  groups on validation without exposing every ablation to test; add permutation
+  diagnostics only as post-selection sensitivity evidence.
 
 ### 4. Earn relational and surface complexity
 
@@ -156,6 +158,11 @@ Validation-patience stopping now avoids continuing stalled candidates through
 their entire requested budget and records completed episodes per architecture.
 This is a compute optimization, not evidence that shorter training improves
 returns; serious comparisons should also report equal-budget results.
+
+Named feature-removal candidates now mask surface wings, volatility regime,
+data quality, or derived contract-surface inputs inside the recurrent model.
+Each is paired with its full-feature architecture and records validation reward
+lift; only one validation winner reaches the held-out range.
 
 Do not add a graph framework while 32 dense slots remain faster and simpler.
 Do not train a VAE across a random split of surface days; that would leak future

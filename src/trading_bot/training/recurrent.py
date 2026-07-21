@@ -32,6 +32,7 @@ class RecurrentConfig:
     graph_neighbors: int = 3
     graph_relation_indices: tuple[int, ...] = ()
     initial_hold_bias: float = 5.0
+    masked_input_indices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if min(self.input_size, self.slot_count, self.action_count, self.hidden_size) < 1:
@@ -46,6 +47,13 @@ class RecurrentConfig:
             raise ValueError("graph_neighbors cannot be negative")
         if not math.isfinite(self.initial_hold_bias) or self.initial_hold_bias < 0:
             raise ValueError("initial_hold_bias must be finite and nonnegative")
+        if len(set(self.masked_input_indices)) != len(self.masked_input_indices):
+            raise ValueError("masked_input_indices must be unique")
+        if any(
+            index < 0 or index >= self.input_size
+            for index in self.masked_input_indices
+        ):
+            raise ValueError("masked_input_indices are outside the input layout")
 
 
 def build_recurrent_actor_critic(config: RecurrentConfig):
@@ -100,6 +108,11 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         def __init__(self):
             super().__init__()
             self.config = config
+            self.register_buffer(
+                "_masked_input_indices",
+                torch.tensor(config.masked_input_indices, dtype=torch.long),
+                persistent=False,
+            )
             self.input_norm = nn.LayerNorm(temporal_input_size)
             if config.encoder == "graph":
                 graph_dimensions = [
@@ -204,6 +217,9 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             return temporal.view(batch, steps, temporal_input_size)
 
         def _encode_sequence(self, sequence, hidden_state=None):
+            if self._masked_input_indices.numel():
+                sequence = sequence.clone()
+                sequence.index_fill_(-1, self._masked_input_indices, 0.0)
             if config.encoder == "graph":
                 sequence = self._graph_encode(sequence)
             sequence = self.input_norm(sequence)

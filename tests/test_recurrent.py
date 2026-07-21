@@ -19,6 +19,35 @@ class RecurrentTests(TestCase):
         with self.assertRaisesRegex(ValueError, "initial_hold_bias"):
             RecurrentConfig(5, 2, 3, initial_hold_bias=-1)
 
+    def test_rejects_invalid_masked_input_indices(self):
+        with self.assertRaisesRegex(ValueError, "masked_input_indices"):
+            RecurrentConfig(5, 2, 3, masked_input_indices=(5,))
+        with self.assertRaisesRegex(ValueError, "masked_input_indices"):
+            RecurrentConfig(5, 2, 3, masked_input_indices=(1, 1))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_checkpointed_feature_mask_makes_disabled_inputs_invariant(self):
+        torch.manual_seed(13)
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            2,
+            3,
+            hidden_size=8,
+            masked_input_indices=(1, 3),
+        ))
+        model.eval()
+        sequence = torch.randn(2, 4, 5)
+        changed = sequence.clone()
+        changed[..., 1] = 1_000_000
+        changed[..., 3] = -1_000_000
+        mask = torch.ones(2, 4, 2, 3, dtype=torch.bool)
+
+        first_logits, first_values, _ = model.forward_sequence(sequence, mask)
+        second_logits, second_values, _ = model.forward_sequence(changed, mask)
+
+        torch.testing.assert_close(first_logits, second_logits)
+        torch.testing.assert_close(first_values, second_values)
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_recurrent_variants_have_safe_masked_action_shapes(self):
         for kind in ("gru", "lstm", "hybrid"):

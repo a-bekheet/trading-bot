@@ -27,7 +27,11 @@ from trading_bot.training.evaluation import (
     run_episode_trace,
 )
 from trading_bot.training.recurrent import RecurrentConfig
-from trading_bot.training.sequence import observation_vector
+from trading_bot.training.sequence import (
+    FEATURE_ABLATION_GROUPS,
+    feature_ablation_indices,
+    observation_vector,
+)
 from trading_bot.training.splits import walk_forward_splits
 from trading_bot.training.trainer import (
     TrainingConfig,
@@ -37,7 +41,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v10"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v11"
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,7 @@ class ModelSpec:
     graph_layers: int = 2
     graph_neighbors: int = 3
     initial_hold_bias: float = 5.0
+    disabled_feature_groups: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid"}:
@@ -112,6 +117,7 @@ class ModelSpec:
             )
         if not 0 <= self.dropout < 1:
             raise ValueError("model dropout must be in [0, 1)")
+        feature_ablation_indices(self.disabled_feature_groups, 1)
 
     @property
     def identifier(self) -> str:
@@ -143,6 +149,10 @@ class ModelSpec:
             graph_layers=self.graph_layers,
             graph_neighbors=self.graph_neighbors,
             initial_hold_bias=self.initial_hold_bias,
+            masked_input_indices=feature_ablation_indices(
+                self.disabled_feature_groups,
+                env.slot_count,
+            ),
             graph_relation_indices=tuple(
                 CONTRACT_FEATURES.index(name)
                 for name in (
@@ -244,6 +254,13 @@ def run_walk_forward_training(
                 "parameter_count": sum(
                     parameter.numel() for parameter in model.parameters()
                 ),
+                "masked_input_count": len(
+                    recurrent_config.masked_input_indices
+                ),
+                "active_input_count": (
+                    recurrent_config.input_size
+                    - len(recurrent_config.masked_input_indices)
+                ),
                 "selected_episode": selected["episode"],
                 "validation_total_reward": float(
                     selected["evaluation_total_reward"]
@@ -251,6 +268,10 @@ def run_walk_forward_training(
                 "selection_scope": selected["evaluation_scope"],
                 "episodes_completed": len(metrics),
                 "stopped_early": bool(metrics[-1]["early_stop_selection"]),
+                "full_model_id": replace(
+                    candidate,
+                    disabled_feature_groups=(),
+                ).identifier,
             })
 
         winning_run = min(
@@ -258,6 +279,7 @@ def run_walk_forward_training(
             key=lambda run: (
                 -run["validation_total_reward"],
                 run["parameter_count"],
+                run["active_input_count"],
                 run["model_id"],
             ),
         )
@@ -266,8 +288,11 @@ def run_walk_forward_training(
                 "model_id": run["model_id"],
                 "model": asdict(run["model_spec"]),
                 "parameter_count": run["parameter_count"],
+                "masked_input_count": run["masked_input_count"],
+                "active_input_count": run["active_input_count"],
                 "episodes_completed": run["episodes_completed"],
                 "stopped_early": run["stopped_early"],
+                "validation_reward_lift_vs_full": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -278,6 +303,16 @@ def run_walk_forward_training(
             }
             for run in candidate_runs
         ]
+        validation_scores = {
+            run["model_id"]: run["validation_total_reward"]
+            for run in candidate_runs
+        }
+        for result, run in zip(candidate_results, candidate_runs, strict=True):
+            full_score = validation_scores.get(run["full_model_id"])
+            if run["model_spec"].disabled_feature_groups and full_score is not None:
+                result["validation_reward_lift_vs_full"] = (
+                    run["validation_total_reward"] - full_score
+                )
         model = winning_run["model"]
         metrics = winning_run["metrics"]
         recurrent_config = winning_run["recurrent_config"]
@@ -388,7 +423,11 @@ def run_walk_forward_training(
             "model_selection": {
                 "criterion": "validation_total_reward",
                 "direction": "maximize",
-                "tie_break": ["parameter_count", "model_id"],
+                "tie_break": [
+                    "parameter_count",
+                    "active_input_count",
+                    "model_id",
+                ],
                 "selected_model_id": winning_run["model_id"],
                 "candidates": candidate_results,
             },
@@ -483,6 +522,15 @@ def _parser() -> argparse.ArgumentParser:
             "for example --candidate flat:gru --candidate graph:hybrid"
         ),
     )
+    parser.add_argument(
+        "--ablation",
+        action="append",
+        choices=tuple(FEATURE_ABLATION_GROUPS),
+        help=(
+            "repeat to add a validation-only candidate with one named "
+            "feature group disabled"
+        ),
+    )
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--episodes", type=int, default=25)
@@ -531,6 +579,12 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 hidden_size=args.hidden_size,
                 initial_hold_bias=args.initial_hold_bias,
             )
+        )
+    full_specs = tuple(specs)
+    for group in args.ablation or ():
+        specs.extend(
+            replace(spec, disabled_feature_groups=(group,))
+            for spec in full_specs
         )
     return _normalize_model_specs(specs)
 

@@ -11,6 +11,68 @@ from trading_bot.training.features import REALIZED_VOL_WINDOWS
 from trading_bot.training.schemas import Observation
 
 
+FEATURE_ABLATION_GROUPS = {
+    "surface_wings": (
+        "front25DeltaRiskReversal",
+        "front25DeltaButterfly",
+        "front25DeltaCoverage",
+    ),
+    "volatility_regime": (
+        "realizedVol4",
+        "realizedVol4Coverage",
+        "realizedVol16",
+        "realizedVol16Coverage",
+        "frontAtmIv",
+        "frontAtmIvCoverage",
+        "atmIvMinusRealizedVol4",
+        "atmIvMinusRealizedVol16",
+    ),
+    "data_quality": (
+        "executableQuoteCoverage",
+        "greekCoverage",
+    ),
+    "derived_contract_surface": (
+        "forwardLogMoneyness",
+        "extrinsicValuePct",
+        "atmIv",
+        "ivSkew",
+        "atmTermSlope",
+        "putCallIvSpread",
+        "parityResidual",
+    ),
+}
+
+
+def feature_ablation_indices(
+    groups: tuple[str, ...],
+    slot_count: int,
+) -> tuple[int, ...]:
+    """Map named feature groups to stable flattened observation indices."""
+    if slot_count < 1:
+        raise ValueError("slot_count must be positive")
+    if len(set(groups)) != len(groups):
+        raise ValueError("feature ablation groups must be unique")
+    unknown = set(groups) - set(FEATURE_ABLATION_GROUPS)
+    if unknown:
+        raise ValueError(f"unknown feature ablation groups: {sorted(unknown)}")
+
+    indices = set()
+    contract_start = len(MARKET_FEATURES)
+    for group in groups:
+        for name in FEATURE_ABLATION_GROUPS[group]:
+            if name in MARKET_FEATURES:
+                indices.add(MARKET_FEATURES.index(name))
+                continue
+            contract_index = CONTRACT_FEATURES.index(name)
+            for slot in range(slot_count):
+                indices.add(
+                    contract_start
+                    + slot * len(CONTRACT_FEATURES)
+                    + contract_index
+                )
+    return tuple(sorted(indices))
+
+
 def _dimensionless_components(
     observation: Observation,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

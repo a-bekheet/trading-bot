@@ -47,6 +47,7 @@ class TrainerTests(TestCase):
             market_feature_count=observation.market.size,
             portfolio_feature_count=observation.portfolio.size,
             graph_hidden_size=8,
+            masked_input_indices=(0,),
         )
         training = TrainingConfig(
             episodes=2,
@@ -112,6 +113,7 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["portfolio_feature_count"], 8)
         self.assertEqual(sidecar["model"]["action_slot_count"], 3)
         self.assertEqual(sidecar["model"]["initial_hold_bias"], 5.0)
+        self.assertEqual(sidecar["model"]["masked_input_indices"], [0])
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
         self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v7")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
@@ -124,6 +126,7 @@ class TrainerTests(TestCase):
         )
         self.assertIn("state_dict", checkpoint)
         self.assertEqual(restored_manifest["schema_version"], CHECKPOINT_SCHEMA_VERSION)
+        self.assertEqual(tuple(restored.config.masked_input_indices), (0,))
         for expected, actual in zip(model.parameters(), restored.parameters()):
             torch.testing.assert_close(expected, actual)
 
