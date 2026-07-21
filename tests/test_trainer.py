@@ -21,7 +21,7 @@ from trading_bot.training.trainer import (
     save_checkpoint,
     train_actor_critic,
 )
-from tests.test_training_env import demo_dataset
+from tests.test_training_env import demo_dataset, three_snapshot_dataset
 
 
 class TrainerTests(TestCase):
@@ -63,7 +63,15 @@ class TrainerTests(TestCase):
 
         self.assertEqual(sidecar["schema_version"], CHECKPOINT_SCHEMA_VERSION)
         self.assertEqual(sidecar["mode"], "research_demo")
-        self.assertEqual(sidecar["algorithm"], "factorized_ppo")
+        self.assertEqual(sidecar["algorithm"], "stateful_factorized_ppo")
+        self.assertEqual(
+            sidecar["temporal_training"],
+            {
+                "mode": "stateful_tbptt",
+                "chunk_length": 2,
+                "padding": "right_only_ignored",
+            },
+        )
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
         self.assertEqual(sidecar["model"]["encoder"], "graph")
@@ -90,6 +98,34 @@ class TrainerTests(TestCase):
             seeds=(21, 21),
         )
         self.assertEqual(reports[0], reports[1])
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_stateful_ppo_trains_contiguous_recurrent_chunks(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=8,
+            kind="hybrid",
+        )
+
+        _, metrics = train_actor_critic(
+            env,
+            recurrent,
+            TrainingConfig(
+                episodes=1,
+                sequence_length=1,
+                ppo_epochs=2,
+                minibatch_size=2,
+            ),
+        )
+
+        self.assertEqual(metrics[0]["steps"], 2)
+        self.assertEqual(metrics[0]["recurrent_chunks"], 2)
+        self.assertEqual(metrics[0]["ppo_updates"], 2)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_model_environment_shape_mismatch(self):

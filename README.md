@@ -206,15 +206,25 @@ the default 32 slots it avoids a separate graph-framework dependency and its
 conversion overhead. Use the default `--encoder flat` when inference latency
 matters more than relational capacity.
 
+Recurrent state is carried causally from one snapshot to the next. PPO updates
+shuffle contiguous truncated-backpropagation chunks instead of independently
+shuffling zero-padded windows; `--sequence-length` is the maximum gradient
+chunk length, not a claim that earlier state is erased. Deterministic inference
+feeds one observation at a time and caches the GRU/LSTM hidden state. On the
+included AAPL layout (847 inputs, 33 action slots, graph-hybrid model), a local
+CPU benchmark reduced median policy time from about 0.68 ms to 0.27 ms per
+step. Treat that 2.5x result as a machine-specific engineering measurement,
+not a trading-performance result.
+
 It writes a safely loadable PyTorch checkpoint and a readable `.pt.json`
 provenance sidecar containing the environment fingerprint, model/training
-configuration, selection decision, and episode metrics. The trainer uses
-factorized per-contract PPO ratios, generalized advantage estimation, clipped
-policy and value updates, shuffled minibatches, target-KL early stopping,
-entropy regularization, and gradient clipping. It evaluates deterministic
-actions after each rollout and restores the best checkpoint. Selection is
-explicitly labeled `in_sample_research_demo` for `train-demo`; it is integration
-evidence, not a backtest or an alpha claim.
+configuration, selection decision, and episode metrics. The stateful trainer
+uses factorized per-contract PPO ratios, generalized advantage estimation,
+clipped policy and value updates, contiguous recurrent minibatches, target-KL
+early stopping, entropy regularization, and gradient clipping. It evaluates
+deterministic actions after each rollout and restores the best checkpoint.
+Selection is explicitly labeled `in_sample_research_demo` for `train-demo`; it
+is integration evidence, not a backtest or an alpha claim.
 
 Restore weights without enabling arbitrary pickle execution:
 

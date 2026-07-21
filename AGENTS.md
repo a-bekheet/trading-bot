@@ -187,8 +187,14 @@ slot. Realized volatility uses only timestamped prices at or before the current
 snapshot, annualizes by actual elapsed time, and carries a coverage fraction so
 zero history cannot masquerade as zero volatility.
 
-The trainer uses factorized per-slot PPO ratios, GAE, policy/value clipping,
-minibatches, target-KL stopping, entropy regularization, and gradient clipping.
+The trainer uses stateful factorized per-slot PPO ratios, GAE, policy/value
+clipping, target-KL stopping, entropy regularization, and gradient clipping.
+Rollouts and deterministic evaluation must carry the actual GRU/LSTM hidden
+state one snapshot at a time. PPO minibatches are composed from contiguous
+truncated-backpropagation chunks initialized with the old policy's causal
+hidden state. `sequence_length` is the gradient chunk bound. Do not restore
+left-zero-padded sliding windows: they create fictitious history, discard
+state older than the window, and repeat recurrent work at every inference step.
 `train-demo` model selection is deterministic but in-sample and must remain
 labeled `in_sample_research_demo`. When `selection_env` is supplied, selection
 must use only that validation environment and be labeled

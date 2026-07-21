@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v6"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v7"
 
 
 @dataclass(frozen=True)
@@ -67,28 +66,86 @@ def _torch():
     return torch
 
 
-def _sequence_tensor(history: deque[np.ndarray], length: int, torch):
-    feature_count = history[-1].shape[0]
-    padded = np.zeros((length, feature_count), dtype=np.float32)
-    available = list(history)[-length:]
-    padded[-len(available):] = np.stack(available)
-    return torch.from_numpy(padded).unsqueeze(0)
+def _detach_hidden(hidden_state):
+    """Detach a tensor, LSTM tuple, or hybrid recurrent-state mapping."""
+    if hidden_state is None:
+        return None
+    if isinstance(hidden_state, dict):
+        return {
+            name: _detach_hidden(value)
+            for name, value in hidden_state.items()
+        }
+    if isinstance(hidden_state, tuple):
+        return tuple(_detach_hidden(value) for value in hidden_state)
+    return hidden_state.detach()
+
+
+def _zero_hidden(config: RecurrentConfig, batch_size: int, torch, device):
+    shape = (config.layers, batch_size, config.hidden_size)
+
+    def gru():
+        return torch.zeros(shape, dtype=torch.float32, device=device)
+
+    def lstm():
+        return gru(), gru()
+
+    if config.kind == "gru":
+        return gru()
+    if config.kind == "lstm":
+        return lstm()
+    return {"gru": gru(), "lstm": lstm()}
+
+
+def _stack_hidden(states, config: RecurrentConfig, torch, device):
+    """Stack old-policy chunk states along the recurrent batch dimension."""
+    normalized = [
+        _zero_hidden(config, 1, torch, device) if state is None else state
+        for state in states
+    ]
+
+    def stack(items):
+        first = items[0]
+        if isinstance(first, dict):
+            return {name: stack([item[name] for item in items]) for name in first}
+        if isinstance(first, tuple):
+            return tuple(
+                stack([item[index] for item in items])
+                for index in range(len(first))
+            )
+        return torch.cat(items, dim=1).detach().to(device)
+
+    return stack(normalized)
+
+
+def _one_step_tensor(observation, torch):
+    return torch.from_numpy(observation_vector(observation)).view(1, 1, -1)
 
 
 def recurrent_policy(model, sequence_length: int):
-    """Create a deterministic, stateful policy for one evaluation episode."""
+    """Create a deterministic streaming policy for one evaluation episode.
+
+    ``sequence_length`` is retained as the checkpoint/training contract and is
+    validated here, while inference carries the recurrent state in constant
+    memory rather than rebuilding a padded window on every step.
+    """
+    if sequence_length < 1:
+        raise ValueError("sequence_length must be positive")
     torch = _torch()
-    history: deque[np.ndarray] = deque(maxlen=sequence_length)
+    device = next(model.parameters()).device
+    hidden_state = None
 
     def policy(observation):
-        history.append(observation_vector(observation))
-        sequence = _sequence_tensor(history, sequence_length, torch)
-        action_mask = torch.from_numpy(observation.action_mask).unsqueeze(0)
+        nonlocal hidden_state
+        sequence = _one_step_tensor(observation, torch).to(device)
+        action_mask = (
+            torch.from_numpy(observation.action_mask).unsqueeze(0).to(device)
+        )
         with torch.inference_mode():
-            action, _, _ = model.sample_action(
+            action, _, hidden_state = model.sample_action(
                 sequence,
                 action_mask,
                 deterministic=True,
+                hidden_state=hidden_state,
             )
         return action.squeeze(0).cpu().numpy()
 
@@ -194,29 +251,36 @@ def train_actor_critic(
 
     for episode in range(config.episodes):
         observation, _ = env.reset(seed=config.seed + episode)
-        history: deque[np.ndarray] = deque(maxlen=config.sequence_length)
         sequences = []
         action_masks = []
         actions = []
         rewards = []
         old_log_probabilities = []
         old_values = []
+        chunk_hidden_states = []
+        hidden_state = None
         invalid_actions = executions = steps = 0
         final_terminal = False
 
         while True:
-            history.append(observation_vector(observation))
-            sequence = _sequence_tensor(history, config.sequence_length, torch)
+            if steps % config.sequence_length == 0:
+                chunk_hidden_states.append(_detach_hidden(hidden_state))
+            sequence = _one_step_tensor(observation, torch)
             action_mask = torch.from_numpy(observation.action_mask).unsqueeze(0)
             with torch.no_grad():
-                logits, value, _ = model(sequence, action_mask)
+                logits, value, hidden_state = model(
+                    sequence,
+                    action_mask,
+                    hidden_state=hidden_state,
+                )
                 distribution = torch.distributions.Categorical(logits=logits)
                 action = distribution.sample()
+            hidden_state = _detach_hidden(hidden_state)
 
             observation, reward, terminated, truncated, info = env.step(
                 action.squeeze(0).detach().cpu().numpy()
             )
-            sequences.append(sequence.squeeze(0))
+            sequences.append(sequence.squeeze(0).squeeze(0))
             action_masks.append(action_mask.squeeze(0))
             actions.append(action.squeeze(0))
             rewards.append(float(reward))
@@ -232,14 +296,14 @@ def train_actor_critic(
 
         next_value = 0.0
         if not final_terminal:
-            bootstrap_history = deque(history, maxlen=config.sequence_length)
-            bootstrap_history.append(observation_vector(observation))
-            bootstrap_sequence = _sequence_tensor(
-                bootstrap_history, config.sequence_length, torch
-            )
+            bootstrap_sequence = _one_step_tensor(observation, torch)
             bootstrap_mask = torch.from_numpy(observation.action_mask).unsqueeze(0)
             with torch.no_grad():
-                _, bootstrap_value, _ = model(bootstrap_sequence, bootstrap_mask)
+                _, bootstrap_value, _ = model(
+                    bootstrap_sequence,
+                    bootstrap_mask,
+                    hidden_state=hidden_state,
+                )
             next_value = float(bootstrap_value.squeeze(0))
 
         sequences_tensor = torch.stack(sequences)
@@ -263,13 +327,77 @@ def train_actor_critic(
 
         update_metrics = []
         stop_early = False
+        chunks = [
+            (
+                start,
+                min(start + config.sequence_length, steps),
+                chunk_hidden_states[start // config.sequence_length],
+            )
+            for start in range(0, steps, config.sequence_length)
+        ]
+        device = next(model.parameters()).device
         for _ in range(config.ppo_epochs):
-            permutation = torch.randperm(steps)
-            for start in range(0, steps, config.minibatch_size):
-                batch = permutation[start:start + config.minibatch_size]
-                logits, predicted_values, _ = model(
-                    sequences_tensor[batch], masks_tensor[batch]
+            order = torch.randperm(len(chunks)).tolist()
+            cursor = 0
+            while cursor < len(order):
+                selected_chunks = []
+                selected_steps = 0
+                while cursor < len(order):
+                    candidate = chunks[order[cursor]]
+                    candidate_steps = candidate[1] - candidate[0]
+                    if (
+                        selected_chunks
+                        and selected_steps + candidate_steps > config.minibatch_size
+                    ):
+                        break
+                    selected_chunks.append(candidate)
+                    selected_steps += candidate_steps
+                    cursor += 1
+
+                batch_size = len(selected_chunks)
+                max_length = max(end - start for start, end, _ in selected_chunks)
+                batch_sequences = torch.zeros(
+                    batch_size,
+                    max_length,
+                    sequences_tensor.shape[-1],
+                    dtype=sequences_tensor.dtype,
+                    device=device,
                 )
+                batch_masks = torch.zeros(
+                    batch_size,
+                    max_length,
+                    *masks_tensor.shape[1:],
+                    dtype=torch.bool,
+                    device=device,
+                )
+                batch_masks[..., 0] = True
+                valid_steps = torch.zeros(
+                    batch_size,
+                    max_length,
+                    dtype=torch.bool,
+                    device=device,
+                )
+                source_indices = []
+                for row, (start, end, _) in enumerate(selected_chunks):
+                    length = end - start
+                    batch_sequences[row, :length] = sequences_tensor[start:end]
+                    batch_masks[row, :length] = masks_tensor[start:end]
+                    valid_steps[row, :length] = True
+                    source_indices.append(torch.arange(start, end))
+                batch = torch.cat(source_indices)
+                initial_hidden = _stack_hidden(
+                    [state for _, _, state in selected_chunks],
+                    recurrent_config,
+                    torch,
+                    device,
+                )
+                sequence_logits, sequence_values, _ = model.forward_sequence(
+                    batch_sequences,
+                    batch_masks,
+                    hidden_state=initial_hidden,
+                )
+                logits = sequence_logits[valid_steps]
+                predicted_values = sequence_values[valid_steps]
                 distribution = torch.distributions.Categorical(logits=logits)
                 new_log_probs = distribution.log_prob(actions_tensor[batch])
                 log_ratio = new_log_probs - old_log_probs_tensor[batch]
@@ -366,6 +494,7 @@ def train_actor_critic(
                 "clip_fraction": float(means[6]),
                 "explained_variance": explained_variance,
                 "ppo_updates": len(update_metrics),
+                "recurrent_chunks": len(chunks),
                 "early_stop_kl": int(stop_early),
                 "invalid_actions": invalid_actions,
                 "executions": executions,
@@ -395,7 +524,12 @@ def checkpoint_manifest(
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "mode": "research_demo",
-        "algorithm": "factorized_ppo",
+        "algorithm": "stateful_factorized_ppo",
+        "temporal_training": {
+            "mode": "stateful_tbptt",
+            "chunk_length": training_config.sequence_length,
+            "padding": "right_only_ignored",
+        },
         "feature_vector_schema": FEATURE_VECTOR_SCHEMA_VERSION,
         "selection": {
             "scope": selected_metric.get(

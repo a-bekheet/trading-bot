@@ -31,7 +31,10 @@ class EvaluationTests(TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "TEST.csv"
             pd.DataFrame(rows).to_csv(path, index=False)
-            factory = lambda: OptionsEnv.from_directory(Path(directory), "TEST", slot_count=2)
+            def factory():
+                return OptionsEnv.from_directory(
+                    Path(directory), "TEST", slot_count=2
+                )
             first = evaluate_policy(factory, no_op, seeds=(4,))[0].to_dict()
             second = evaluate_policy(factory, no_op, seeds=(4,))[0].to_dict()
 

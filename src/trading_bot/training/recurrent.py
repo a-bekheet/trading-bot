@@ -193,30 +193,78 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             )
             return temporal.view(batch, steps, temporal_input_size)
 
-        def forward(self, sequence, action_mask=None):
+        def _encode_sequence(self, sequence, hidden_state=None):
             if config.encoder == "graph":
                 sequence = self._graph_encode(sequence)
             sequence = self.input_norm(sequence)
             if config.kind == "hybrid":
-                gru_encoded, gru_hidden = self.recurrent["gru"](sequence)
-                lstm_encoded, lstm_hidden = self.recurrent["lstm"](sequence)
-                final = torch.cat((gru_encoded[:, -1], lstm_encoded[:, -1]), dim=-1)
+                gru_initial = None if hidden_state is None else hidden_state["gru"]
+                lstm_initial = None if hidden_state is None else hidden_state["lstm"]
+                gru_encoded, gru_hidden = self.recurrent["gru"](
+                    sequence, gru_initial
+                )
+                lstm_encoded, lstm_hidden = self.recurrent["lstm"](
+                    sequence, lstm_initial
+                )
+                encoded = torch.cat((gru_encoded, lstm_encoded), dim=-1)
                 hidden = {"gru": gru_hidden, "lstm": lstm_hidden}
             else:
-                encoded, hidden = self.recurrent(sequence)
-                final = encoded[:, -1]
-            logits = self.policy(final).view(
-                sequence.shape[0], policy_slot_count, config.action_count
+                encoded, hidden = self.recurrent(sequence, hidden_state)
+            return encoded, hidden
+
+        @staticmethod
+        def _safe_action_mask(action_mask):
+            safe_mask = action_mask.bool().clone()
+            empty_slots = ~safe_mask.any(dim=-1)
+            safe_mask[..., 0] |= empty_slots
+            return safe_mask
+
+        def forward_sequence(self, sequence, action_mask=None, hidden_state=None):
+            """Return actor and critic outputs for every causal time step."""
+            encoded, hidden = self._encode_sequence(sequence, hidden_state)
+            logits = self.policy(encoded).view(
+                sequence.shape[0],
+                sequence.shape[1],
+                policy_slot_count,
+                config.action_count,
             )
             if action_mask is not None:
-                safe_mask = action_mask.bool().clone()
-                empty_slots = ~safe_mask.any(dim=-1)
-                safe_mask[..., 0] |= empty_slots
+                if action_mask.ndim == 3:
+                    action_mask = action_mask.unsqueeze(1).expand(
+                        -1, sequence.shape[1], -1, -1
+                    )
+                if action_mask.shape != logits.shape:
+                    raise ValueError("action_mask does not match recurrent outputs")
+                safe_mask = self._safe_action_mask(action_mask)
                 logits = logits.masked_fill(~safe_mask, float("-inf"))
-            return logits, self.value(final).squeeze(-1), hidden
+            return logits, self.value(encoded).squeeze(-1), hidden
 
-        def sample_action(self, sequence, action_mask, deterministic=False):
-            logits, value, hidden = self(sequence, action_mask)
+        def forward(
+            self,
+            sequence,
+            action_mask=None,
+            hidden_state=None,
+        ):
+            """Return the final causal step, preserving the original API."""
+            logits, values, hidden = self.forward_sequence(
+                sequence,
+                action_mask,
+                hidden_state,
+            )
+            return logits[:, -1], values[:, -1], hidden
+
+        def sample_action(
+            self,
+            sequence,
+            action_mask,
+            deterministic=False,
+            hidden_state=None,
+        ):
+            logits, value, hidden = self(
+                sequence,
+                action_mask,
+                hidden_state,
+            )
             if deterministic:
                 action = logits.argmax(dim=-1)
             else:

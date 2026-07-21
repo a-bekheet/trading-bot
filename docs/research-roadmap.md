@@ -28,6 +28,7 @@ Every candidate must eventually pass:
 | Evidence | Useful idea for this repository | Decision |
 | --- | --- | --- |
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
+| [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | Add CVaR or learned P&L-distribution objectives only after explicit short-option liability episodes and enough independent paths exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Add causal realized-volatility horizons and a formal walk-forward runner. |
 | [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, enforce realistic limits, compare against simple investments, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v3` and Greek budgets implement the state/risk lesson; bootstrap intervals remain an evaluation gate. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
@@ -53,6 +54,12 @@ buy-first-then-Delta-hedge, and doubled-cost scenarios. The Delta comparator now
 uses a real bounded underlying-share action with explicit synthetic costs. It
 remains a research approximation until historical underlying bid/ask, borrow,
 margin, dividend, and funding data are available.
+
+Recurrent PPO now carries causal hidden state during rollouts and inference,
+then trains on contiguous truncated-backpropagation chunks initialized from
+the old policy state. This removes fictitious zero-padded history and avoids
+recomputing a full temporal window at every decision. It improves temporal
+correctness and latency; it is not evidence of alpha.
 
 ## Prioritized implementation sequence
 

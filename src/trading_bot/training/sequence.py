@@ -8,10 +8,7 @@ import numpy as np
 
 from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES
 from trading_bot.training.features import REALIZED_VOL_WINDOWS
-from trading_bot.training.schemas import (
-    FEATURE_VECTOR_SCHEMA_VERSION,
-    Observation,
-)
+from trading_bot.training.schemas import Observation
 
 
 def _dimensionless_components(

@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from trading_bot.training.dataset import Snapshot, SnapshotDataset
+from trading_bot.training.dataset import SnapshotDataset
 from trading_bot.training.features import (
     ENGINEERED_FEATURES,
     MARKET_ENGINEERED_FEATURES,

@@ -39,6 +39,44 @@ class RecurrentTests(TestCase):
             self.assertTrue((action[:, 1] == 0).all())
 
     @skipUnless(torch is not None, "install the optional ml extra")
+    def test_streaming_state_matches_causal_sequence_for_every_variant(self):
+        torch.manual_seed(19)
+        for kind in ("gru", "lstm", "hybrid"):
+            model = build_recurrent_actor_critic(RecurrentConfig(
+                5,
+                2,
+                3,
+                hidden_size=8,
+                kind=kind,
+            ))
+            model.eval()
+            sequence = torch.randn(2, 6, 5)
+            masks = torch.ones(2, 6, 2, 3, dtype=torch.bool)
+            masks[:, :, 0, 2] = False
+
+            full_logits, full_values, _ = model.forward_sequence(sequence, masks)
+            hidden = None
+            streamed_logits = []
+            streamed_values = []
+            for step in range(sequence.shape[1]):
+                logits, values, hidden = model(
+                    sequence[:, step:step + 1],
+                    masks[:, step],
+                    hidden_state=hidden,
+                )
+                streamed_logits.append(logits)
+                streamed_values.append(values)
+
+            torch.testing.assert_close(
+                torch.stack(streamed_logits, dim=1),
+                full_logits,
+            )
+            torch.testing.assert_close(
+                torch.stack(streamed_values, dim=1),
+                full_values,
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_encoder_masks_padded_contracts(self):
         # Layout: market(2), two contracts with three features, portfolio(3), valid(2).
         config = RecurrentConfig(
