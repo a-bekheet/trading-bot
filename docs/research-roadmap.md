@@ -31,6 +31,7 @@ Every candidate must eventually pass:
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | Add CVaR or learned P&L-distribution objectives only after explicit short-option liability episodes and enough independent paths exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Add causal realized-volatility horizons and a formal walk-forward runner. |
 | [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v4`, compact ATM-IV-minus-realized-volatility state, and Greek budgets implement the state/risk lesson; bootstrap intervals remain an evaluation gate. |
+| [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Use a sparse trainable hold prior now. Benchmark an autoregressive multi-leg option policy later; never post-process sampled rows in a way that breaks PPO likelihoods. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
 
@@ -66,6 +67,11 @@ backward-only 4/16-snapshot realized volatility, each paired with the existing
 history coverage. PPO training samples seeded bounded windows across the
 training partition instead of replaying only its first regime. Both choices
 improve sample efficiency; their value still requires walk-forward ablation.
+
+The policy head now has a trainable hold-logit prior and reward-scale entropy
+coefficient. This reduced untrained requested action density on the current
+AAPL surface without imposing a hard order cap or changing PPO likelihoods.
+Episode provenance reports requested option and hedge actions separately.
 
 ## Prioritized implementation sequence
 

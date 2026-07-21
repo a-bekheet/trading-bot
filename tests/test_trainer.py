@@ -61,6 +61,14 @@ class TrainerTests(TestCase):
         self.assertTrue(all(0 <= item["clip_fraction"] <= 1 for item in metrics))
         self.assertTrue(all(math.isfinite(item["approx_kl"]) for item in metrics))
         self.assertTrue(all(math.isfinite(item["evaluation_total_reward"]) for item in metrics))
+        self.assertTrue(all(0 <= item["requested_action_rate"] <= 1 for item in metrics))
+        self.assertTrue(all(
+            math.isclose(
+                item["entropy_bonus"],
+                training.entropy_coefficient * item["entropy"],
+            )
+            for item in metrics
+        ))
         self.assertEqual(sum(item["selected_checkpoint"] for item in metrics), 1)
         self.assertTrue(all(torch.isfinite(parameter).all() for parameter in model.parameters()))
         with TemporaryDirectory() as directory:
@@ -73,6 +81,11 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["schema_version"], CHECKPOINT_SCHEMA_VERSION)
         self.assertEqual(sidecar["mode"], "research_demo")
         self.assertEqual(sidecar["algorithm"], "stateful_factorized_ppo")
+        self.assertEqual(sidecar["action_policy"], {
+            "factorization": "independent_masked_rows",
+            "initial_hold_bias": 5.0,
+            "hard_order_cap": None,
+        })
         self.assertEqual(
             sidecar["temporal_training"],
             {
@@ -86,6 +99,8 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["encoder"], "graph")
         self.assertEqual(sidecar["model"]["portfolio_feature_count"], 8)
         self.assertEqual(sidecar["model"]["action_slot_count"], 3)
+        self.assertEqual(sidecar["model"]["initial_hold_bias"], 5.0)
+        self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
         self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v6")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
@@ -135,6 +150,7 @@ class TrainerTests(TestCase):
         self.assertEqual(metrics[0]["steps"], 2)
         self.assertEqual(metrics[0]["recurrent_chunks"], 2)
         self.assertEqual(metrics[0]["ppo_updates"], 2)
+        self.assertIn("mean_requested_orders_per_step", metrics[0])
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_training_integrates_seeded_random_regime_windows(self):

@@ -6,6 +6,7 @@ module out of the default import path keeps the collector lightweight.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
@@ -30,6 +31,7 @@ class RecurrentConfig:
     graph_layers: int = 2
     graph_neighbors: int = 3
     graph_relation_indices: tuple[int, ...] = ()
+    initial_hold_bias: float = 5.0
 
     def __post_init__(self) -> None:
         if min(self.input_size, self.slot_count, self.action_count, self.hidden_size) < 1:
@@ -42,6 +44,8 @@ class RecurrentConfig:
             raise ValueError("layer counts and graph_hidden_size must be positive")
         if self.graph_neighbors < 0:
             raise ValueError("graph_neighbors cannot be negative")
+        if not math.isfinite(self.initial_hold_bias) or self.initial_hold_bias < 0:
+            raise ValueError("initial_hold_bias must be finite and nonnegative")
 
 
 def build_recurrent_actor_critic(config: RecurrentConfig):
@@ -124,6 +128,12 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 output_size,
                 policy_slot_count * config.action_count,
             )
+            nn.init.zeros_(self.policy.bias)
+            with torch.no_grad():
+                self.policy.bias.view(
+                    policy_slot_count,
+                    config.action_count,
+                )[:, 0] = config.initial_hold_bias
             self.value = nn.Linear(output_size, 1)
 
         def _graph_encode(self, sequence):

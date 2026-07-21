@@ -13,6 +13,11 @@ class RecurrentTests(TestCase):
         config = RecurrentConfig(5, 2, 3, 8)
         self.assertEqual(config.hidden_size, 8)
         self.assertIsNone(config.action_slot_count)
+        self.assertEqual(config.initial_hold_bias, 5.0)
+
+    def test_rejects_invalid_sparse_policy_prior(self):
+        with self.assertRaisesRegex(ValueError, "initial_hold_bias"):
+            RecurrentConfig(5, 2, 3, initial_hold_bias=-1)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_recurrent_variants_have_safe_masked_action_shapes(self):
@@ -75,6 +80,39 @@ class RecurrentTests(TestCase):
                 torch.stack(streamed_values, dim=1),
                 full_values,
             )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_hold_bias_makes_untrained_large_policy_sparse(self):
+        torch.manual_seed(23)
+        sparse = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            32,
+            7,
+            action_slot_count=33,
+            hidden_size=8,
+            initial_hold_bias=5.0,
+        ))
+        dense = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            32,
+            7,
+            action_slot_count=33,
+            hidden_size=8,
+            initial_hold_bias=0.0,
+        ))
+        sequence = torch.zeros(1_024, 1, 5)
+        mask = torch.ones(1_024, 33, 7, dtype=torch.bool)
+
+        sparse_actions, _, _ = sparse.sample_action(sequence, mask)
+        dense_actions, _, _ = dense.sample_action(sequence, mask)
+        sparse_orders = (sparse_actions != 0).sum(dim=1).float().mean()
+        dense_orders = (dense_actions != 0).sum(dim=1).float().mean()
+        bias = sparse.policy.bias.view(33, 7)
+
+        self.assertLess(float(sparse_orders), 2.0)
+        self.assertGreater(float(dense_orders), 20.0)
+        torch.testing.assert_close(bias[:, 0], torch.full((33,), 5.0))
+        torch.testing.assert_close(bias[:, 1:], torch.zeros(33, 6))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_encoder_masks_padded_contracts(self):

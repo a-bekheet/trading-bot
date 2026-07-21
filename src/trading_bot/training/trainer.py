@@ -17,7 +17,7 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import observation_vector
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v8"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.ppo.v9"
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class TrainingConfig:
     minibatch_size: int = 64
     target_kl: float = 0.03
     value_coefficient: float = 0.5
-    entropy_coefficient: float = 0.01
+    entropy_coefficient: float = 1e-4
     gradient_clip: float = 0.5
     seed: int = 7
     max_steps: int | None = 128
@@ -299,6 +299,8 @@ def train_actor_critic(
         chunk_hidden_states = []
         hidden_state = None
         invalid_actions = executions = steps = 0
+        requested_option_orders = 0
+        requested_underlying_orders = 0
         final_terminal = False
 
         while True:
@@ -315,9 +317,14 @@ def train_actor_critic(
                 distribution = torch.distributions.Categorical(logits=logits)
                 action = distribution.sample()
             hidden_state = _detach_hidden(hidden_state)
+            action_array = action.squeeze(0).detach().cpu().numpy()
+            requested_option_orders += int(
+                np.count_nonzero(action_array[:env.slot_count])
+            )
+            requested_underlying_orders += int(action_array[-1] != 0)
 
             observation, reward, terminated, truncated, info = env.step(
-                action.squeeze(0).detach().cpu().numpy()
+                action_array
             )
             sequences.append(sequence.squeeze(0).squeeze(0))
             action_masks.append(action_mask.squeeze(0))
@@ -530,6 +537,7 @@ def train_actor_critic(
                 "policy_loss": float(means[1]),
                 "value_loss": float(means[2]),
                 "entropy": float(means[3]),
+                "entropy_bonus": float(config.entropy_coefficient * means[3]),
                 "gradient_norm": float(means[4]),
                 "approx_kl": float(means[5]),
                 "clip_fraction": float(means[6]),
@@ -539,6 +547,15 @@ def train_actor_critic(
                 "early_stop_kl": int(stop_early),
                 "invalid_actions": invalid_actions,
                 "executions": executions,
+                "requested_option_orders": requested_option_orders,
+                "requested_underlying_orders": requested_underlying_orders,
+                "mean_requested_orders_per_step": (
+                    (requested_option_orders + requested_underlying_orders) / steps
+                ),
+                "requested_action_rate": (
+                    (requested_option_orders + requested_underlying_orders)
+                    / (steps * env.action_shape[0])
+                ),
             }
         )
 
@@ -566,6 +583,11 @@ def checkpoint_manifest(
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "mode": "research_demo",
         "algorithm": "stateful_factorized_ppo",
+        "action_policy": {
+            "factorization": "independent_masked_rows",
+            "initial_hold_bias": recurrent_config.initial_hold_bias,
+            "hard_order_cap": None,
+        },
         "temporal_training": {
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
@@ -662,7 +684,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-ratio", type=float, default=0.2)
     parser.add_argument("--target-kl", type=float, default=0.03)
+    parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument("--evaluation-interval", type=int, default=5)
+    parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--max-abs-delta", type=float)
     parser.add_argument("--max-abs-gamma", type=float)
     parser.add_argument("--max-abs-theta", type=float)
@@ -699,6 +723,7 @@ def main() -> None:
         contract_feature_count=observation.contracts.shape[1],
         market_feature_count=observation.market.size,
         portfolio_feature_count=observation.portfolio.size,
+        initial_hold_bias=args.initial_hold_bias,
         graph_relation_indices=tuple(
             CONTRACT_FEATURES.index(name)
             for name in ("impliedVolatility", "delta", "logMoneyness", "dteDays")
@@ -715,6 +740,7 @@ def main() -> None:
         gae_lambda=args.gae_lambda,
         clip_ratio=args.clip_ratio,
         target_kl=args.target_kl,
+        entropy_coefficient=args.entropy_coefficient,
         evaluation_interval=args.evaluation_interval,
     )
     model, metrics = train_actor_critic(env, recurrent_config, training_config)

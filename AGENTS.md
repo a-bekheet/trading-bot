@@ -191,6 +191,12 @@ zero history cannot masquerade as zero volatility.
 
 The trainer uses stateful factorized per-slot PPO ratios, GAE, policy/value
 clipping, target-KL stopping, entropy regularization, and gradient clipping.
+Policy heads initialize with a trainable hold-logit prior because a near-uniform
+33-row categorical policy creates pathological turnover before learning begins.
+The default entropy coefficient is `1e-4`, calibrated to return-scale rewards.
+Do not hard-cap active rows or post-process sampled actions without deriving the
+matching joint likelihood; that would invalidate PPO ratios. Preserve requested
+option/underlying order counts and action-density metrics in every episode.
 Rollouts and deterministic evaluation must carry the actual GRU/LSTM hidden
 state one snapshot at a time. PPO minibatches are composed from contiguous
 truncated-backpropagation chunks initialized with the old policy's causal

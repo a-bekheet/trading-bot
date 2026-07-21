@@ -231,6 +231,17 @@ CPU benchmark reduced median policy time from about 0.68 ms to 0.27 ms per
 step. Treat that 2.5x result as a machine-specific engineering measurement,
 not a trading-performance result.
 
+The categorical policy head starts with a configurable `5.0` logit bias toward
+hold, while every feasible action remains sampleable and the bias remains fully
+trainable. On the real AAPL 33-row mask, 1,024 untrained graph-hybrid samples
+fell from 24.06 requested orders per snapshot with zero bias to 0.74 with the
+sparse prior; the 95th percentile was two orders. PPO entropy regularization
+defaults to `1e-4`, matching basis-point reward scale more closely than the old
+`0.01`. Override these with `--initial-hold-bias` and
+`--entropy-coefficient`. Episode metrics retain requested option orders,
+underlying orders, mean orders per step, and action density so sparsity is
+measured rather than assumed.
+
 It writes a safely loadable PyTorch checkpoint and a readable `.pt.json`
 provenance sidecar containing the environment fingerprint, model/training
 configuration, selection decision, and episode metrics. The stateful trainer

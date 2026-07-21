@@ -32,7 +32,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v4"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v5"
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,7 @@ class ModelSpec:
     graph_hidden_size: int = 32
     graph_layers: int = 2
     graph_neighbors: int = 3
+    initial_hold_bias: float = 5.0
 
     def build(self, env: OptionsEnv) -> RecurrentConfig:
         observation, _ = env.reset(seed=0)
@@ -81,6 +82,7 @@ class ModelSpec:
             graph_hidden_size=self.graph_hidden_size,
             graph_layers=self.graph_layers,
             graph_neighbors=self.graph_neighbors,
+            initial_hold_bias=self.initial_hold_bias,
             graph_relation_indices=tuple(
                 CONTRACT_FEATURES.index(name)
                 for name in (
@@ -246,6 +248,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
     parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
     parser.add_argument("--hidden-size", type=int, default=128)
+    parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=128)
@@ -255,6 +258,7 @@ def _parser() -> argparse.ArgumentParser:
         default=True,
     )
     parser.add_argument("--evaluation-interval", type=int, default=5)
+    parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument("--max-quantity", type=int, default=3)
     parser.add_argument("--underlying-lot-size", type=int, default=25)
@@ -287,6 +291,7 @@ def main() -> None:
                 kind=args.kind,
                 encoder=args.encoder,
                 hidden_size=args.hidden_size,
+                initial_hold_bias=args.initial_hold_bias,
             ),
             TrainingConfig(
                 episodes=args.episodes,
@@ -294,6 +299,7 @@ def main() -> None:
                 max_steps=args.max_steps,
                 random_start=args.random_start,
                 evaluation_interval=args.evaluation_interval,
+                entropy_coefficient=args.entropy_coefficient,
                 seed=args.seed,
             ),
             args.output_dir,
