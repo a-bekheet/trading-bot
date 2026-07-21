@@ -60,9 +60,14 @@ margin, dividend, and funding data are available.
 
 The runner can now compare flat/graph GRU, LSTM, and hybrid candidates within
 each fold. All candidates share the fold and seed, architecture selection uses
-validation reward with a deterministic simplicity tie-break, and only the
-winner reaches held-out evaluation. This supports disciplined recurrent/GNN
-ablation without turning the test partition into a model-selection leaderboard.
+the declared validation selection score with a deterministic simplicity
+tie-break, and only the winner reaches held-out evaluation. A common trainable
+parameter ceiling can now resolve the widest fitting recurrent state per
+candidate from the training layout alone, preventing a nominally equal hidden
+width from giving LSTM, hybrid, and graph models materially different capacity.
+Requested and resolved capacity, exact count, and headroom remain auditable.
+This supports disciplined recurrent/GNN ablation without turning the test
+partition into a model-selection leaderboard.
 The candidate count and search space must still be declared up front; repeatedly
 expanding them after seeing test results would invalidate the holdout.
 
@@ -165,9 +170,11 @@ the recurrent layer handles time. Next experiments should compare:
 - Raw normalized surface features versus causal PCA, then a compact VAE or
   neural-process surface latent only after the data volume supports it.
 
-The flat/graph and recurrent-family tournament plumbing is implemented. The
-next valid experiment needs sufficiently long point-in-time history and should
-match candidates on both parameter count and measured inference latency.
+The flat/graph and recurrent-family tournament plumbing and exact parameter-cap
+matching are implemented. The next valid experiment needs sufficiently long
+point-in-time history and should also match or report measured inference
+latency; equal parameter counts do not imply equal graph construction or
+recurrent execution cost.
 Validation-patience stopping now avoids continuing stalled candidates through
 their entire requested budget and records completed episodes per architecture.
 This is a compute optimization, not evidence that shorter training improves

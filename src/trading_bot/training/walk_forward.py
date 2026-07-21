@@ -26,7 +26,10 @@ from trading_bot.training.evaluation import (
     run_episode,
     run_episode_trace,
 )
-from trading_bot.training.recurrent import RecurrentConfig
+from trading_bot.training.recurrent import (
+    RecurrentConfig,
+    build_recurrent_actor_critic,
+)
 from trading_bot.training.sequence import (
     FEATURE_ABLATION_GROUPS,
     feature_ablation_indices,
@@ -41,7 +44,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v13"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v14"
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,7 @@ class ModelSpec:
     initial_hold_bias: float = 5.0
     disabled_feature_groups: tuple[str, ...] = ()
     algorithm: str = "ppo"
+    parameter_budget: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid"}:
@@ -120,6 +124,8 @@ class ModelSpec:
             raise ValueError("model dropout must be in [0, 1)")
         if self.algorithm not in {"ppo", "reinforce"}:
             raise ValueError("model algorithm must be ppo or reinforce")
+        if self.parameter_budget is not None and self.parameter_budget < 1:
+            raise ValueError("parameter_budget must be positive when provided")
         feature_ablation_indices(self.disabled_feature_groups, 1)
 
     @property
@@ -166,6 +172,45 @@ class ModelSpec:
                 )
             ),
         )
+
+
+def resolve_recurrent_config(
+    model_spec: ModelSpec,
+    env: OptionsEnv,
+) -> tuple[RecurrentConfig, int]:
+    """Resolve the widest recurrent state within a train-layout-only budget."""
+    requested = model_spec.build(env)
+
+    def parameter_count(config: RecurrentConfig) -> int:
+        model = build_recurrent_actor_critic(config)
+        return sum(parameter.numel() for parameter in model.parameters())
+
+    if model_spec.parameter_budget is None:
+        return requested, parameter_count(requested)
+
+    minimum = replace(requested, hidden_size=1)
+    minimum_count = parameter_count(minimum)
+    if minimum_count > model_spec.parameter_budget:
+        raise ValueError(
+            f"parameter_budget={model_spec.parameter_budget} is below the "
+            f"minimum {minimum_count} for {model_spec.encoder}:{model_spec.kind}"
+        )
+
+    low = 1
+    high = model_spec.hidden_size
+    best = minimum
+    best_count = minimum_count
+    while low <= high:
+        hidden_size = (low + high) // 2
+        candidate = replace(requested, hidden_size=hidden_size)
+        count = parameter_count(candidate)
+        if count <= model_spec.parameter_budget:
+            best = candidate
+            best_count = count
+            low = hidden_size + 1
+        else:
+            high = hidden_size - 1
+    return best, best_count
 
 
 def _reports_to_dict(reports) -> list[dict[str, Any]]:
@@ -230,6 +275,7 @@ def run_walk_forward_training(
         quantity=walk_forward_config.long_volatility_quantity,
     )
     fold_results = []
+    resolved_configs: dict[str, tuple[RecurrentConfig, int]] = {}
     for fold in folds:
         train_data, validation_data, test_data = fold.apply(dataset)
         train_env = OptionsEnv(train_data, **environment_options)
@@ -240,7 +286,11 @@ def run_walk_forward_training(
         )
         candidate_runs = []
         for candidate in model_specs:
-            recurrent_config = candidate.build(train_env)
+            resolved = resolved_configs.get(candidate.identifier)
+            if resolved is None:
+                resolved = resolve_recurrent_config(candidate, train_env)
+                resolved_configs[candidate.identifier] = resolved
+            recurrent_config, resolved_parameter_count = resolved
             candidate_training = replace(
                 fold_training,
                 algorithm=candidate.algorithm,
@@ -251,6 +301,14 @@ def run_walk_forward_training(
                 candidate_training,
                 selection_env=validation_env,
             )
+            actual_parameter_count = sum(
+                parameter.numel() for parameter in model.parameters()
+            )
+            if actual_parameter_count != resolved_parameter_count:
+                raise RuntimeError(
+                    "trained model parameter count does not match its "
+                    "resolved configuration"
+                )
             selected = _selected_metric(metrics)
             candidate_runs.append({
                 "model_id": candidate.identifier,
@@ -259,9 +317,7 @@ def run_walk_forward_training(
                 "model": model,
                 "metrics": metrics,
                 "training_config": candidate_training,
-                "parameter_count": sum(
-                    parameter.numel() for parameter in model.parameters()
-                ),
+                "parameter_count": resolved_parameter_count,
                 "masked_input_count": len(
                     recurrent_config.masked_input_indices
                 ),
@@ -311,7 +367,14 @@ def run_walk_forward_training(
             {
                 "model_id": run["model_id"],
                 "model": asdict(run["model_spec"]),
+                "resolved_model": asdict(run["recurrent_config"]),
                 "parameter_count": run["parameter_count"],
+                "parameter_budget_headroom": (
+                    run["model_spec"].parameter_budget
+                    - run["parameter_count"]
+                    if run["model_spec"].parameter_budget is not None
+                    else None
+                ),
                 "masked_input_count": run["masked_input_count"],
                 "active_input_count": run["active_input_count"],
                 "episodes_completed": run["episodes_completed"],
@@ -597,6 +660,11 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--hidden-size", type=int, default=128)
+    parser.add_argument(
+        "--parameter-budget",
+        type=int,
+        help="maximum trainable parameters; hidden-size becomes the search cap",
+    )
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
@@ -650,6 +718,7 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 hidden_size=args.hidden_size,
                 initial_hold_bias=args.initial_hold_bias,
                 algorithm=algorithm,
+                parameter_budget=args.parameter_budget,
             )
         )
     full_specs = tuple(specs)

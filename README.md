@@ -345,6 +345,8 @@ train-walk-forward \
   --candidate flat:gru:ppo \
   --candidate flat:lstm:reinforce \
   --candidate graph:hybrid:ppo \
+  --hidden-size 256 \
+  --parameter-budget 20000 \
   --ablation surface_wings \
   --ablation volatility_regime
 ```
@@ -354,7 +356,8 @@ and learning-algorithm tournament. The optional algorithm is `ppo` or
 `reinforce` and defaults to `--algorithm` when omitted. Every GRU, LSTM, hybrid,
 flat, or graph candidate receives the same fold and training seed. Each
 candidate restores its best validation checkpoint; the
-highest validation reward wins, with fewer trainable parameters and then a
+highest declared validation selection score wins, with fewer trainable
+parameters and then a
 smaller active input set, fewer optimizer updates, and stable model ID breaking
 ties. Only that winner is instantiated against the
 held-out test range and only its checkpoint is saved. The summary retains every
@@ -362,6 +365,18 @@ candidate's configuration, parameter count, and validation score, but never a
 losing-candidate test result. It also records episodes completed and whether
 validation patience stopped each candidate before its requested budget. Omit
 `--candidate` to preserve the single-model `--encoder`/`--kind` workflow.
+
+Use `--parameter-budget N` to compare recurrent and graph architectures under
+the same trainable-parameter ceiling. In this mode `--hidden-size` is a search
+cap: each candidate deterministically receives the widest recurrent state that
+fits `N`, while its encoder, recurrent family, graph shape, and input ablation
+remain fixed. Resolution reads only the training environment's observation and
+action layout, is cached across folds, and never inspects validation or test
+values. An impossible budget that cannot fit hidden size one fails rather than
+silently changing architecture. Artifacts retain both the requested model and
+resolved `RecurrentConfig`, exact parameter count, and unused budget headroom.
+This controls a major capacity confound; inference-latency matching remains a
+separate benchmark requirement.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are

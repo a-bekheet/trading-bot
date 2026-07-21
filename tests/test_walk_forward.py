@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, skipUnless
@@ -11,6 +12,8 @@ except ImportError:
     torch = None
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
+from trading_bot.training.env import OptionsEnv
+from trading_bot.training.recurrent import build_recurrent_actor_critic
 from trading_bot.training.sequence import feature_ablation_indices
 from trading_bot.training.trainer import TrainingConfig, load_checkpoint
 from trading_bot.training.walk_forward import (
@@ -19,6 +22,7 @@ from trading_bot.training.walk_forward import (
     WalkForwardConfig,
     _model_specs_from_args,
     _parser,
+    resolve_recurrent_config,
     run_walk_forward_training,
 )
 
@@ -70,6 +74,7 @@ class WalkForwardTrainingTests(TestCase):
                     graph_hidden_size=4,
                     graph_layers=1,
                     graph_neighbors=1,
+                    parameter_budget=5_000,
                 ),
                 TrainingConfig(
                     episodes=1,
@@ -92,6 +97,14 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(len(summary["folds"]), 1)
         self.assertEqual(fold["selection"]["scope"], "validation_research_demo")
         self.assertEqual(fold["test"][0]["steps"], 1)
+        candidate = fold["model_selection"]["candidates"][0]
+        self.assertLessEqual(candidate["parameter_count"], 5_000)
+        self.assertEqual(
+            candidate["parameter_budget_headroom"],
+            5_000 - candidate["parameter_count"],
+        )
+        self.assertEqual(candidate["model"]["hidden_size"], 8)
+        self.assertEqual(candidate["resolved_model"]["hidden_size"], 8)
         self.assertEqual(
             set(fold["baselines"]),
             {
@@ -203,8 +216,21 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(len(summary["candidate_models"]), 5)
         self.assertEqual(len(candidate_results), 5)
         self.assertEqual(len(checkpoint_files), 1)
-        self.assertTrue(all(result["episodes_completed"] == 1 for result in candidate_results))
-        self.assertTrue(all(not result["stopped_early"] for result in candidate_results))
+        self.assertTrue(
+            all(result["episodes_completed"] == 1 for result in candidate_results)
+        )
+        self.assertTrue(
+            all(not result["stopped_early"] for result in candidate_results)
+        )
+        self.assertTrue(
+            all(result["resolved_model"] for result in candidate_results)
+        )
+        self.assertTrue(
+            all(
+                result["parameter_budget_headroom"] is None
+                for result in candidate_results
+            )
+        )
         self.assertEqual(
             selection["tie_break"],
             [
@@ -291,6 +317,8 @@ class WalkForwardTrainingTests(TestCase):
             "graph:hybrid:reinforce",
             "--ablation",
             "surface_wings",
+            "--parameter-budget",
+            "5000",
         ])
 
         specs = _model_specs_from_args(args)
@@ -304,6 +332,67 @@ class WalkForwardTrainingTests(TestCase):
             {spec.algorithm for spec in specs},
             {"ppo", "reinforce"},
         )
+        self.assertEqual({spec.parameter_budget for spec in specs}, {5000})
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_parameter_budget_resolves_widest_fitting_recurrent_state(self):
+        env = OptionsEnv(walk_forward_dataset(), slot_count=1)
+        specs = (
+            ModelSpec("gru", "flat", hidden_size=32, parameter_budget=5_000),
+            ModelSpec("lstm", "flat", hidden_size=32, parameter_budget=5_000),
+            ModelSpec("hybrid", "flat", hidden_size=32, parameter_budget=5_000),
+            ModelSpec(
+                "gru",
+                "graph",
+                hidden_size=32,
+                graph_hidden_size=4,
+                graph_layers=1,
+                graph_neighbors=1,
+                parameter_budget=5_000,
+            ),
+            ModelSpec(
+                "hybrid",
+                "graph",
+                hidden_size=32,
+                graph_hidden_size=4,
+                graph_layers=1,
+                graph_neighbors=1,
+                parameter_budget=5_000,
+            ),
+        )
+
+        resolved_sizes = set()
+        for spec in specs:
+            config, count = resolve_recurrent_config(spec, env)
+            actual_count = sum(
+                parameter.numel()
+                for parameter in build_recurrent_actor_critic(
+                    config
+                ).parameters()
+            )
+            self.assertEqual(count, actual_count)
+            self.assertLessEqual(count, 5_000)
+            self.assertLessEqual(config.hidden_size, spec.hidden_size)
+            resolved_sizes.add(config.hidden_size)
+            if config.hidden_size < spec.hidden_size:
+                next_model = build_recurrent_actor_critic(
+                    replace(config, hidden_size=config.hidden_size + 1)
+                )
+                next_count = sum(
+                    parameter.numel() for parameter in next_model.parameters()
+                )
+                self.assertGreater(next_count, 5_000)
+
+        self.assertGreater(len(resolved_sizes), 1)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_rejects_parameter_budget_below_minimum_model(self):
+        env = OptionsEnv(walk_forward_dataset(), slot_count=1)
+        with self.assertRaisesRegex(ValueError, "below the minimum"):
+            resolve_recurrent_config(
+                ModelSpec(hidden_size=8, parameter_budget=1),
+                env,
+            )
 
     def test_model_candidates_have_stable_unique_identifiers(self):
         first = ModelSpec(kind="gru", encoder="flat", hidden_size=8)
@@ -327,6 +416,8 @@ class WalkForwardTrainingTests(TestCase):
             ModelSpec(kind="transformer")
         with self.assertRaisesRegex(ValueError, "algorithm"):
             ModelSpec(algorithm="q_learning")
+        with self.assertRaisesRegex(ValueError, "parameter_budget"):
+            ModelSpec(parameter_budget=0)
 
     def test_rejects_insufficient_history(self):
         with TemporaryDirectory() as directory:

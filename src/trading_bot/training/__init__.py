@@ -38,6 +38,7 @@ from trading_bot.training.trainer import (
 from trading_bot.training.walk_forward import (
     ModelSpec,
     WalkForwardConfig,
+    resolve_recurrent_config,
     run_walk_forward_training,
 )
 
@@ -53,6 +54,7 @@ __all__ = [
     "feature_ablation_indices", "first_feasible",
     "long_volatility_delta_hedge", "no_op",
     "paired_moving_block_bootstrap", "run_episode", "run_episode_trace",
-    "run_walk_forward_training", "selection_score", "train_actor_critic",
+    "resolve_recurrent_config", "run_walk_forward_training", "selection_score",
+    "train_actor_critic",
     "walk_forward_splits",
 ]

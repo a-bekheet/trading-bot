@@ -287,6 +287,15 @@ Candidate episode budgets may end early through the same validation-only
 selection patience, and the comparison artifact must expose completed episodes
 so compute differences are auditable.
 
+When architecture candidates declare a parameter budget, treat the requested
+recurrent hidden size as a cap and choose the widest size whose exact trainable
+parameter count does not exceed that budget. Resolve capacity from the training
+environment's observation/action layout only, cache the result across folds,
+and fail if even hidden size one is too large. Validation and test values must
+not participate in capacity resolution. Persist the requested spec, resolved
+recurrent config, exact parameter count, and budget headroom, and verify the
+trained model matches that count before selection.
+
 Feature-removal candidates must use the named, non-overlapping groups in
 `sequence.FEATURE_ABLATION_GROUPS`. Apply masks inside the recurrent model after
 the versioned transform and persist exact flattened indices in
