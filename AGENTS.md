@@ -426,8 +426,17 @@ negative-Delta legs, enter once, then hedge residual Delta on later snapshots.
 Persist its horizon, threshold, coverage, and quantity in each fold. Do not call
 it a straddle when the nearest feasible call and put have different strikes,
 and do not infer a short-volatility result merely because the opt-in liability
-surface exists. A declared collateralized carry baseline must use the same
-fills, collateral, lifecycle, and held-out evaluation as the agent.
+surface exists.
+
+The `cash_secured_short_put_delta_hedge` baseline is the required carry hurdle.
+Require covered realized-volatility and front-ATM-IV inputs, enter only when IV
+exceeds realized volatility by its declared edge, sell one feasible
+front-expiry ATM put, then reduce signed Delta with underlying actions. It must
+remain a no-op when collateralized shorts are disabled. Persist its horizon,
+coverage, edge, and quantity in every fold; include it in timestamp-paired
+held-out comparisons and run fresh policy state under both base and doubled
+costs. Never bypass the environment's fills, collateral, Greek limits, or
+assignment lifecycle.
 
 The underlying-trend baseline is also causal: require configured price-history
 coverage, derive direction from the selected 4/16-snapshot cumulative log
@@ -510,6 +519,7 @@ train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind mixture --episodes 25
 train-demo --symbol AAPL --allow-collateralized-option-shorts --episodes 25
 train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:0 --candidate graph_set:mixture:ppo:0
+train-walk-forward --symbol AAPL --allow-collateralized-option-shorts --short-volatility-min-edge 0.02 --min-train-size 500 --validation-size 100 --test-size 100
 ```
 
 The collector defaults to three expirations per ticker, one cycle every 900

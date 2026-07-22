@@ -14,8 +14,10 @@ import numpy as np
 from trading_bot.market_data.universe import TOP_50_TICKERS
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
+    ShortVolatilityConfig,
     UnderlyingTrendConfig,
     buy_first_then_delta_hedge,
+    cash_secured_short_put_delta_hedge,
     first_feasible,
     long_volatility_delta_hedge,
     no_op,
@@ -45,12 +47,13 @@ from trading_bot.training.walk_forward import (
     _normalize_model_specs,
     _parser as single_parser,
     _selected_metric,
+    _walk_forward_config_from_args,
     resolve_recurrent_config,
 )
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v16"
+    "research-demo.universe-walk-forward.v17"
 )
 
 
@@ -153,6 +156,7 @@ def _heldout_symbol_evidence(
     training_config: TrainingConfig,
     walk_forward_config: WalkForwardConfig,
     long_volatility_config: LongVolatilityConfig,
+    short_volatility_config: ShortVolatilityConfig,
     trend_config: UnderlyingTrendConfig,
     *,
     fold_index: int,
@@ -187,6 +191,16 @@ def _heldout_symbol_evidence(
             run_episode_trace(
                 environment,
                 long_volatility_delta_hedge(long_volatility_config),
+                seed,
+            )
+            for seed in walk_forward_config.test_seeds
+        ],
+        "cash_secured_short_put_delta_hedge": [
+            run_episode_trace(
+                environment,
+                cash_secured_short_put_delta_hedge(
+                    short_volatility_config
+                ),
                 seed,
             )
             for seed in walk_forward_config.test_seeds
@@ -249,6 +263,21 @@ def _heldout_symbol_evidence(
         ]
         for scenario in DEFAULT_COST_SCENARIOS
     }
+    baseline_cost_stress = {
+        "cash_secured_short_put_delta_hedge": {
+            scenario.name: [
+                run_episode(
+                    cost_stressed_environment(environment, scenario),
+                    cash_secured_short_put_delta_hedge(
+                        short_volatility_config
+                    ),
+                    seed,
+                ).to_dict()
+                for seed in walk_forward_config.test_seeds
+            ]
+            for scenario in DEFAULT_COST_SCENARIOS
+        }
+    }
     return {
         "agent": [trace.report.to_dict() for trace in test_traces],
         "baselines": {
@@ -257,6 +286,7 @@ def _heldout_symbol_evidence(
         },
         "statistical_comparisons": comparisons,
         "cost_stress": cost_stress,
+        "baseline_cost_stress": baseline_cost_stress,
     }
 
 
@@ -327,6 +357,12 @@ def run_universe_walk_forward_training(
         min_coverage=walk_forward_config.long_volatility_min_coverage,
         min_volatility_edge=walk_forward_config.long_volatility_min_edge,
         quantity=walk_forward_config.long_volatility_quantity,
+    )
+    short_volatility_config = ShortVolatilityConfig(
+        realized_window=walk_forward_config.short_volatility_window,
+        min_coverage=walk_forward_config.short_volatility_min_coverage,
+        min_volatility_edge=walk_forward_config.short_volatility_min_edge,
+        quantity=walk_forward_config.short_volatility_quantity,
     )
     trend_config = UnderlyingTrendConfig(
         return_window=walk_forward_config.trend_window,
@@ -647,6 +683,7 @@ def run_universe_walk_forward_training(
                 selected_training,
                 walk_forward_config,
                 long_volatility_config,
+                short_volatility_config,
                 trend_config,
                 fold_index=fold.fold,
                 symbol_index=index,
@@ -748,6 +785,9 @@ def run_universe_walk_forward_training(
                 "long_volatility_delta_hedge": asdict(
                     long_volatility_config
                 ),
+                "cash_secured_short_put_delta_hedge": asdict(
+                    short_volatility_config
+                ),
                 "underlying_trend": asdict(trend_config),
             },
         }
@@ -835,32 +875,7 @@ def main() -> None:
         )
         summary = run_universe_walk_forward_training(
             datasets,
-            WalkForwardConfig(
-                min_train_size=args.min_train_size,
-                validation_size=args.validation_size,
-                test_size=args.test_size,
-                embargo=args.embargo,
-                step_size=args.step_size,
-                max_train_size=args.max_train_size,
-                bootstrap_samples=args.bootstrap_samples,
-                bootstrap_block_length=args.bootstrap_block_length,
-                bootstrap_confidence=args.bootstrap_confidence,
-                bootstrap_min_observations=args.bootstrap_min_observations,
-                bootstrap_seed=args.bootstrap_seed,
-                long_volatility_window=args.long_volatility_window,
-                long_volatility_min_coverage=(
-                    args.long_volatility_min_coverage
-                ),
-                long_volatility_min_edge=args.long_volatility_min_edge,
-                long_volatility_quantity=args.long_volatility_quantity,
-                latency_warmup_iterations=args.latency_warmup_iterations,
-                latency_measured_iterations=(
-                    args.latency_measured_iterations
-                ),
-                max_median_inference_latency_us=(
-                    args.max_median_inference_latency_us
-                ),
-            ),
+            _walk_forward_config_from_args(args),
             _model_specs_from_args(args),
             TrainingConfig(
                 episodes=args.episodes,

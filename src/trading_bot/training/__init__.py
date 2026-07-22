@@ -2,7 +2,9 @@
 
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
+    ShortVolatilityConfig,
     buy_first_then_delta_hedge,
+    cash_secured_short_put_delta_hedge,
     delta_neutral,
     first_feasible,
     long_volatility_delta_hedge,
@@ -51,13 +53,14 @@ from trading_bot.training.walk_forward import (
 __all__ = [
     "Action", "BootstrapComparison", "CostScenario", "EpisodeReport",
     "EpisodeTrace", "EnvManifest", "FEATURE_ABLATION_GROUPS",
-    "LongVolatilityConfig", "Observation",
+    "LongVolatilityConfig", "ShortVolatilityConfig", "Observation",
     "ModelSpec", "OptionsEnv", "TrainingConfig", "Transition",
     "WalkForwardConfig", "WalkForwardSplit",
     "UNIVERSE_WALK_FORWARD_SCHEMA_VERSION",
     "benchmark_recurrent_inference",
     "aggregate_selection_scores",
-    "buy_first_then_delta_hedge", "cost_stressed_environment",
+    "buy_first_then_delta_hedge", "cash_secured_short_put_delta_hedge",
+    "cost_stressed_environment",
     "delta_neutral", "evaluate_cost_stress", "evaluate_policy",
     "evaluate_recurrent_policy", "load_checkpoint",
     "feature_ablation_indices", "first_feasible",

@@ -368,6 +368,24 @@ zero-neighbor graph-set mixture. A two-fold, width-eight AAPL walk-forward smoke
 loaded `research-demo.v15`/`dimensionless.v12` checkpoints with short mode
 enabled. These are machine-specific integration and latency checks, not alpha.
 
+v0.43 makes that liability surface answer to a deterministic comparator. The
+`cash_secured_short_put_delta_hedge` baseline waits until covered front-ATM IV
+exceeds backward-only realized volatility by a declared edge, sells one
+feasible front-expiry ATM put through the normal action mask, and reduces its
+signed Delta with the same underlying-share actions available to the agent. It
+is a no-op unless collateralized option shorts are explicitly enabled. Every
+single-ticker and universe held-out artifact now includes its configuration,
+timestamp-paired comparison, and separate normal/doubled-cost paths.
+
+A synthetic chronological fold proved one valid secured-put execution with no
+invalid actions: final NAV was 19,984.35 under base costs and 19,973.70 when
+spread and commission were doubled; fees rose from 0.65 to 1.30. This is an
+integration/stress result, not a profitable result. Replacing a per-call
+31-field market dictionary with fixed feature indices reduced the signal-read
+microbenchmark from 3.041 to 1.834 microseconds median over 100,000 calls (40%).
+The shared CLI configuration constructor also prevents single-ticker and
+universe baseline settings from silently diverging.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
 coverage bit; `dimensionless.v12` log-compresses the interval before it reaches
@@ -794,9 +812,18 @@ only when realized volatility exceeds ATM IV by a configured edge, and then
 hedges residual Delta with shares. Its defaults are a 16-snapshot horizon, 75%
 coverage, a 0.02 volatility edge, and one contract per leg; tune them with the
 `--long-volatility-*` flags. The rule is long-only and holds the pair for the
-episode, so it is a benchmark rather than a complete volatility strategy. This
-is joined by a causal underlying-trend comparator that targets a small long,
-flat, or short share position from the covered 4/16-snapshot cumulative return.
+episode, so it is a benchmark rather than a complete volatility strategy.
+
+The cash-secured short-put comparator uses the opposite IV edge with the same
+defaults and is configured through `--short-volatility-*`. It selects only a
+feasible front-expiry negative-Delta contract, then Delta-hedges on later
+snapshots. It holds through expiry, so assignment, spread, commission, and
+collateral are part of its realized path. This is a conservative carry hurdle,
+not evidence that selling volatility is profitable or safe.
+
+These are joined by a causal underlying-trend comparator that targets a small
+long, flat, or short share position from the covered 4/16-snapshot cumulative
+return.
 It rebalances toward the target rather than buying repeatedly, obeys the same
 action masks and synthetic underlying costs as the agent, and is configured by
 `--trend-window`, `--trend-min-coverage`,

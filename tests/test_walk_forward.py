@@ -23,6 +23,7 @@ from trading_bot.training.walk_forward import (
     WalkForwardConfig,
     _model_specs_from_args,
     _parser,
+    _walk_forward_config_from_args,
     resolve_recurrent_config,
     run_walk_forward_training,
 )
@@ -55,7 +56,109 @@ def walk_forward_dataset() -> SnapshotDataset:
     return SnapshotDataset(tuple(snapshots), "TEST")
 
 
+def short_volatility_walk_forward_dataset() -> SnapshotDataset:
+    snapshots = []
+    for index in range(7):
+        timestamp = f"2026-07-21T14:{index:02d}:00Z"
+        frame = pd.DataFrame([{
+            "collectedAt": timestamp,
+            "contractSymbol": "TEST-P",
+            "symbol": "TEST",
+            "expiration": "2026-08-21",
+            "optionType": "put",
+            "strike": 100,
+            "bid": 1.0 + index * 0.05,
+            "ask": 1.2 + index * 0.05,
+            "lastPrice": 1.1 + index * 0.05,
+            "impliedVolatility": 0.5,
+            "underlyingPrice": 100,
+            "riskFreeRate": 0.04,
+            "delta": -0.4,
+            "gamma": 0.01,
+            "theta": -0.1,
+            "vega": 0.2,
+            "dteDays": 30 - index / 1_440,
+            "logMoneyness": 0.0,
+            "spreadPct": 0.18,
+            "openInterestLog": 5.0,
+            "realizedVol16": 0.2,
+            "realizedVol16Coverage": 1.0,
+            "frontAtmIv": 0.5,
+            "frontAtmIvCoverage": 1.0,
+            "atmIvMinusRealizedVol16": 0.3,
+        }])
+        snapshots.append(Snapshot(timestamp, frame))
+    return SnapshotDataset(tuple(snapshots), "TEST")
+
+
 class WalkForwardTrainingTests(TestCase):
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_short_volatility_baseline_trades_and_is_cost_stressed(self):
+        with TemporaryDirectory() as directory:
+            summary = run_walk_forward_training(
+                short_volatility_walk_forward_dataset(),
+                WalkForwardConfig(
+                    min_train_size=3,
+                    validation_size=2,
+                    test_size=2,
+                    test_seeds=(37,),
+                    bootstrap_samples=100,
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=2,
+                ),
+                ModelSpec(kind="gru", encoder="flat", hidden_size=4),
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                ),
+                Path(directory),
+                env_kwargs={
+                    "slot_count": 1,
+                    "max_quantity": 1,
+                    "starting_cash": 20_000,
+                    "allow_collateralized_option_shorts": True,
+                },
+            )
+
+        fold = summary["folds"][0]
+        name = "cash_secured_short_put_delta_hedge"
+        report = fold["baselines"][name][0]
+        stress = fold["baseline_cost_stress"][name]
+
+        self.assertEqual(report["executions"], 1)
+        self.assertEqual(report["invalid_actions"], 0)
+        self.assertGreater(stress["double_costs"][0]["fees"], report["fees"])
+        self.assertLess(
+            stress["double_costs"][0]["final_nav"],
+            stress["base"][0]["final_nav"],
+        )
+        self.assertIn(name, fold["statistical_comparisons"])
+
+    def test_cli_maps_all_baseline_configuration(self):
+        args = _parser().parse_args([
+            "--short-volatility-window", "4",
+            "--short-volatility-min-coverage", "0.6",
+            "--short-volatility-min-edge", "0.03",
+            "--short-volatility-quantity", "2",
+            "--trend-window", "4",
+            "--trend-min-coverage", "0.5",
+            "--trend-min-abs-log-return", "0.01",
+            "--trend-quantity", "2",
+        ])
+
+        config = _walk_forward_config_from_args(args)
+
+        self.assertEqual(config.short_volatility_window, 4)
+        self.assertEqual(config.short_volatility_min_coverage, 0.6)
+        self.assertEqual(config.short_volatility_min_edge, 0.03)
+        self.assertEqual(config.short_volatility_quantity, 2)
+        self.assertEqual(config.trend_window, 4)
+        self.assertEqual(config.trend_min_coverage, 0.5)
+        self.assertEqual(config.trend_min_abs_log_return, 0.01)
+        self.assertEqual(config.trend_quantity, 2)
+
     def test_cli_makes_collateralized_option_shorts_explicitly_opt_in(self):
         self.assertFalse(
             _parser().parse_args([]).allow_collateralized_option_shorts
@@ -219,6 +322,7 @@ class WalkForwardTrainingTests(TestCase):
                 "first_feasible",
                 "buy_first_then_delta_hedge",
                 "long_volatility_delta_hedge",
+                "cash_secured_short_put_delta_hedge",
                 "underlying_trend",
             },
         )
@@ -230,11 +334,23 @@ class WalkForwardTrainingTests(TestCase):
                 "first_feasible",
                 "buy_first_then_delta_hedge",
                 "long_volatility_delta_hedge",
+                "cash_secured_short_put_delta_hedge",
                 "underlying_trend",
             },
         )
         self.assertEqual(
             fold["baseline_configuration"]["long_volatility_delta_hedge"],
+            {
+                "realized_window": 16,
+                "min_coverage": 0.75,
+                "min_volatility_edge": 0.02,
+                "quantity": 1,
+            },
+        )
+        self.assertEqual(
+            fold["baseline_configuration"][
+                "cash_secured_short_put_delta_hedge"
+            ],
             {
                 "realized_window": 16,
                 "min_coverage": 0.75,
@@ -250,6 +366,12 @@ class WalkForwardTrainingTests(TestCase):
                 "min_abs_log_return": 0.0,
                 "quantity": 1,
             },
+        )
+        self.assertEqual(
+            set(fold["baseline_cost_stress"][
+                "cash_secured_short_put_delta_hedge"
+            ]),
+            {"base", "double_costs"},
         )
         no_op_comparison = fold["statistical_comparisons"]["no_op"][0]
         self.assertEqual(no_op_comparison["status"], "insufficient_history")

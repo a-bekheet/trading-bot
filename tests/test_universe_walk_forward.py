@@ -18,7 +18,11 @@ from trading_bot.training.universe_walk_forward import (
     _symbols_from_args,
     run_universe_walk_forward_training,
 )
-from trading_bot.training.walk_forward import ModelSpec, WalkForwardConfig
+from trading_bot.training.walk_forward import (
+    ModelSpec,
+    WalkForwardConfig,
+    _walk_forward_config_from_args,
+)
 from tests.test_walk_forward import walk_forward_dataset
 
 
@@ -54,6 +58,13 @@ class UniverseWalkForwardTests(TestCase):
         self.assertEqual(len(_symbols_from_args(default)), 50)
         self.assertEqual(default.episodes, 100)
         self.assertEqual(_symbols_from_args(subset), ("AAPL", "MSFT"))
+        custom = _parser().parse_args([
+            "--short-volatility-min-edge", "0.04",
+            "--trend-window", "4",
+        ])
+        config = _walk_forward_config_from_args(custom)
+        self.assertEqual(config.short_volatility_min_edge, 0.04)
+        self.assertEqual(config.trend_window, 4)
         with self.assertRaisesRegex(ValueError, "at least two"):
             _symbols_from_args(
                 _parser().parse_args(["--universe-symbol", "AAPL"])
@@ -155,6 +166,19 @@ class UniverseWalkForwardTests(TestCase):
                 evidence["agent"][0]["steps"] == 1
                 for evidence in fold["heldout"]["per_symbol"].values()
             )
+        )
+        self.assertTrue(all(
+            "cash_secured_short_put_delta_hedge" in evidence["baselines"]
+            and set(evidence["baseline_cost_stress"][
+                "cash_secured_short_put_delta_hedge"
+            ]) == {"base", "double_costs"}
+            for evidence in fold["heldout"]["per_symbol"].values()
+        ))
+        self.assertEqual(
+            fold["baseline_configuration"][
+                "cash_secured_short_put_delta_hedge"
+            ]["min_volatility_edge"],
+            0.02,
         )
         self.assertTrue(
             all(

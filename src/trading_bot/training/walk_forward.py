@@ -12,8 +12,10 @@ from typing import Any, Sequence
 
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
+    ShortVolatilityConfig,
     UnderlyingTrendConfig,
     buy_first_then_delta_hedge,
+    cash_secured_short_put_delta_hedge,
     first_feasible,
     long_volatility_delta_hedge,
     no_op,
@@ -48,7 +50,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v32"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v33"
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,10 @@ class WalkForwardConfig:
     long_volatility_min_coverage: float = 0.75
     long_volatility_min_edge: float = 0.02
     long_volatility_quantity: int = 1
+    short_volatility_window: int = 16
+    short_volatility_min_coverage: float = 0.75
+    short_volatility_min_edge: float = 0.02
+    short_volatility_quantity: int = 1
     trend_window: int = 16
     trend_min_coverage: float = 0.75
     trend_min_abs_log_return: float = 0.0
@@ -109,6 +115,12 @@ class WalkForwardConfig:
             min_coverage=self.long_volatility_min_coverage,
             min_volatility_edge=self.long_volatility_min_edge,
             quantity=self.long_volatility_quantity,
+        )
+        ShortVolatilityConfig(
+            realized_window=self.short_volatility_window,
+            min_coverage=self.short_volatility_min_coverage,
+            min_volatility_edge=self.short_volatility_min_edge,
+            quantity=self.short_volatility_quantity,
         )
         UnderlyingTrendConfig(
             return_window=self.trend_window,
@@ -343,6 +355,12 @@ def run_walk_forward_training(
         min_coverage=walk_forward_config.long_volatility_min_coverage,
         min_volatility_edge=walk_forward_config.long_volatility_min_edge,
         quantity=walk_forward_config.long_volatility_quantity,
+    )
+    short_volatility_config = ShortVolatilityConfig(
+        realized_window=walk_forward_config.short_volatility_window,
+        min_coverage=walk_forward_config.short_volatility_min_coverage,
+        min_volatility_edge=walk_forward_config.short_volatility_min_edge,
+        quantity=walk_forward_config.short_volatility_quantity,
     )
     trend_config = UnderlyingTrendConfig(
         return_window=walk_forward_config.trend_window,
@@ -676,6 +694,16 @@ def run_walk_forward_training(
                 )
                 for seed in walk_forward_config.test_seeds
             ],
+            "cash_secured_short_put_delta_hedge": [
+                run_episode_trace(
+                    test_env,
+                    cash_secured_short_put_delta_hedge(
+                        short_volatility_config
+                    ),
+                    seed,
+                )
+                for seed in walk_forward_config.test_seeds
+            ],
             "underlying_trend": [
                 run_episode_trace(
                     test_env,
@@ -736,6 +764,21 @@ def run_walk_forward_training(
                 )
                 for seed in walk_forward_config.test_seeds
             ]
+        baseline_cost_stress = {
+            "cash_secured_short_put_delta_hedge": {
+                scenario.name: [
+                    run_episode(
+                        cost_stressed_environment(test_env, scenario),
+                        cash_secured_short_put_delta_hedge(
+                            short_volatility_config
+                        ),
+                        seed,
+                    )
+                    for seed in walk_forward_config.test_seeds
+                ]
+                for scenario in DEFAULT_COST_SCENARIOS
+            }
+        }
 
         fold_record = {
             "fold": fold.fold,
@@ -807,12 +850,22 @@ def run_walk_forward_training(
             },
             "baseline_configuration": {
                 "long_volatility_delta_hedge": asdict(long_volatility_config),
+                "cash_secured_short_put_delta_hedge": asdict(
+                    short_volatility_config
+                ),
                 "underlying_trend": asdict(trend_config),
             },
             "statistical_comparisons": statistical_comparisons,
             "cost_stress": {
                 name: _reports_to_dict(reports)
                 for name, reports in cost_stress.items()
+            },
+            "baseline_cost_stress": {
+                baseline: {
+                    name: _reports_to_dict(reports)
+                    for name, reports in scenarios.items()
+                }
+                for baseline, scenarios in baseline_cost_stress.items()
             },
         }
         checkpoint = output_dir / (
@@ -881,6 +934,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--long-volatility-min-edge", type=float, default=0.02)
     parser.add_argument("--long-volatility-quantity", type=int, default=1)
+    parser.add_argument("--short-volatility-window", type=int, default=16)
+    parser.add_argument(
+        "--short-volatility-min-coverage", type=float, default=0.75
+    )
+    parser.add_argument("--short-volatility-min-edge", type=float, default=0.02)
+    parser.add_argument("--short-volatility-quantity", type=int, default=1)
     parser.add_argument("--trend-window", type=int, choices=(4, 16), default=16)
     parser.add_argument("--trend-min-coverage", type=float, default=0.75)
     parser.add_argument("--trend-min-abs-log-return", type=float, default=0.0)
@@ -1041,6 +1100,42 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _walk_forward_config_from_args(
+    args: argparse.Namespace,
+) -> WalkForwardConfig:
+    """Build shared split/baseline settings for single and universe CLIs."""
+    return WalkForwardConfig(
+        min_train_size=args.min_train_size,
+        validation_size=args.validation_size,
+        test_size=args.test_size,
+        embargo=args.embargo,
+        step_size=args.step_size,
+        max_train_size=args.max_train_size,
+        bootstrap_samples=args.bootstrap_samples,
+        bootstrap_block_length=args.bootstrap_block_length,
+        bootstrap_confidence=args.bootstrap_confidence,
+        bootstrap_min_observations=args.bootstrap_min_observations,
+        bootstrap_seed=args.bootstrap_seed,
+        long_volatility_window=args.long_volatility_window,
+        long_volatility_min_coverage=args.long_volatility_min_coverage,
+        long_volatility_min_edge=args.long_volatility_min_edge,
+        long_volatility_quantity=args.long_volatility_quantity,
+        short_volatility_window=args.short_volatility_window,
+        short_volatility_min_coverage=args.short_volatility_min_coverage,
+        short_volatility_min_edge=args.short_volatility_min_edge,
+        short_volatility_quantity=args.short_volatility_quantity,
+        trend_window=args.trend_window,
+        trend_min_coverage=args.trend_min_coverage,
+        trend_min_abs_log_return=args.trend_min_abs_log_return,
+        trend_quantity=args.trend_quantity,
+        latency_warmup_iterations=args.latency_warmup_iterations,
+        latency_measured_iterations=args.latency_measured_iterations,
+        max_median_inference_latency_us=(
+            args.max_median_inference_latency_us
+        ),
+    )
+
+
 def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
     candidates = args.candidate or [f"{args.encoder}:{args.kind}"]
     auxiliary_horizons = tuple(args.auxiliary_horizon or (1,))
@@ -1127,32 +1222,7 @@ def main() -> None:
         model_specs = _model_specs_from_args(args)
         summary = run_walk_forward_training(
             dataset,
-            WalkForwardConfig(
-                min_train_size=args.min_train_size,
-                validation_size=args.validation_size,
-                test_size=args.test_size,
-                embargo=args.embargo,
-                step_size=args.step_size,
-                max_train_size=args.max_train_size,
-                bootstrap_samples=args.bootstrap_samples,
-                bootstrap_block_length=args.bootstrap_block_length,
-                bootstrap_confidence=args.bootstrap_confidence,
-                bootstrap_min_observations=args.bootstrap_min_observations,
-                bootstrap_seed=args.bootstrap_seed,
-                long_volatility_window=args.long_volatility_window,
-                long_volatility_min_coverage=args.long_volatility_min_coverage,
-                long_volatility_min_edge=args.long_volatility_min_edge,
-                long_volatility_quantity=args.long_volatility_quantity,
-                trend_window=args.trend_window,
-                trend_min_coverage=args.trend_min_coverage,
-                trend_min_abs_log_return=args.trend_min_abs_log_return,
-                trend_quantity=args.trend_quantity,
-                latency_warmup_iterations=args.latency_warmup_iterations,
-                latency_measured_iterations=args.latency_measured_iterations,
-                max_median_inference_latency_us=(
-                    args.max_median_inference_latency_us
-                ),
-            ),
+            _walk_forward_config_from_args(args),
             model_specs,
             TrainingConfig(
                 episodes=args.episodes,

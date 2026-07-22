@@ -10,6 +10,29 @@ from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES
 from trading_bot.training.schemas import Observation
 
 
+_CONTRACT_INDEX = {
+    name: CONTRACT_FEATURES.index(name)
+    for name in (
+        "delta",
+        "dteDays",
+        "logMoneyness",
+        "spreadPct",
+        "openInterestLog",
+    )
+}
+_MARKET_INDEX = {
+    name: MARKET_FEATURES.index(name)
+    for name in (
+        "frontAtmIv",
+        "frontAtmIvCoverage",
+        "realizedVol4",
+        "realizedVol4Coverage",
+        "realizedVol16",
+        "realizedVol16Coverage",
+    )
+}
+
+
 def no_op(observation: Observation) -> np.ndarray:
     """Always hold."""
     return np.zeros(observation.action_mask.shape[0], dtype=int)
@@ -77,8 +100,13 @@ class LongVolatilityConfig:
             raise ValueError("realized_window must be 4 or 16")
         if not 0 <= self.min_coverage <= 1:
             raise ValueError("min_coverage must be between zero and one")
-        if self.min_volatility_edge < 0:
-            raise ValueError("min_volatility_edge cannot be negative")
+        if (
+            not np.isfinite(self.min_volatility_edge)
+            or self.min_volatility_edge < 0
+        ):
+            raise ValueError(
+                "min_volatility_edge must be finite and nonnegative"
+            )
         if self.quantity < 1:
             raise ValueError("quantity must be positive")
 
@@ -91,76 +119,24 @@ class LongVolatilityThenDeltaHedge:
         self._opened = False
 
     def _signal_present(self, observation: Observation) -> bool:
-        if observation.market.size != len(MARKET_FEATURES):
-            return False
-        market = {
-            name: float(observation.market[index])
-            for index, name in enumerate(MARKET_FEATURES)
-        }
-        window = self.config.realized_window
-        coverage = market[f"realizedVol{window}Coverage"]
-        realized = market[f"realizedVol{window}"]
-        implied = market["frontAtmIv"]
+        edge = _implied_minus_realized(
+            observation,
+            self.config.realized_window,
+            self.config.min_coverage,
+        )
         return (
-            np.isfinite((coverage, realized, implied)).all()
-            and coverage >= self.config.min_coverage
-            and implied > 0
-            and realized - implied >= self.config.min_volatility_edge
+            edge is not None
+            and -edge >= self.config.min_volatility_edge
         )
 
     def _front_atm_pair(self, observation: Observation) -> tuple[int, int] | None:
-        if observation.contracts.shape[1] != len(CONTRACT_FEATURES):
-            return None
         quantity = self.config.quantity
-        if quantity >= observation.action_mask.shape[1]:
+        maximum_quantity = (observation.action_mask.shape[1] - 1) // 2
+        if quantity > maximum_quantity:
             return None
-        valid = np.flatnonzero(
-            observation.valid_mask
-            & observation.action_mask[:len(observation.contract_ids), quantity]
-        )
-        if not len(valid):
-            return None
-        feature = {
-            name: CONTRACT_FEATURES.index(name)
-            for name in (
-                "delta",
-                "dteDays",
-                "logMoneyness",
-                "spreadPct",
-                "openInterestLog",
-            )
-        }
-        contracts = observation.contracts
-        dte = contracts[valid, feature["dteDays"]]
-        finite_dte = np.isfinite(dte) & (dte >= 0)
-        if not finite_dte.any():
-            return None
-        valid = valid[finite_dte]
-        front_dte = float(np.min(contracts[valid, feature["dteDays"]]))
-        valid = valid[
-            np.isclose(
-                contracts[valid, feature["dteDays"]],
-                front_dte,
-            )
-        ]
-
-        def best(side: str) -> int | None:
-            delta = contracts[valid, feature["delta"]]
-            side_mask = delta > 0 if side == "call" else delta < 0
-            candidates = valid[side_mask]
-            if not len(candidates):
-                return None
-            ranks = np.lexsort(
-                (
-                    candidates,
-                    -contracts[candidates, feature["openInterestLog"]],
-                    contracts[candidates, feature["spreadPct"]],
-                    np.abs(contracts[candidates, feature["logMoneyness"]]),
-                )
-            )
-            return int(candidates[ranks[0]])
-
-        call_slot, put_slot = best("call"), best("put")
+        valid = _front_expiry_feasible_slots(observation, quantity)
+        call_slot = _best_atm_side(observation, valid, "call")
+        put_slot = _best_atm_side(observation, valid, "put")
         if call_slot is None or put_slot is None or call_slot == put_slot:
             return None
         return call_slot, put_slot
@@ -184,6 +160,152 @@ def long_volatility_delta_hedge(
 ) -> LongVolatilityThenDeltaHedge:
     """Return fresh long-volatility benchmark state for one episode."""
     return LongVolatilityThenDeltaHedge(config)
+
+
+def _implied_minus_realized(
+    observation: Observation,
+    realized_window: int,
+    min_coverage: float,
+) -> float | None:
+    """Return a current-snapshot IV edge only when both inputs are covered."""
+    if observation.market.size != len(MARKET_FEATURES):
+        return None
+    market = observation.market
+    realized = float(market[_MARKET_INDEX[f"realizedVol{realized_window}"]])
+    realized_coverage = float(
+        market[_MARKET_INDEX[f"realizedVol{realized_window}Coverage"]]
+    )
+    implied = float(market[_MARKET_INDEX["frontAtmIv"]])
+    implied_coverage = float(market[_MARKET_INDEX["frontAtmIvCoverage"]])
+    if (
+        not np.isfinite(
+            (realized, realized_coverage, implied, implied_coverage)
+        ).all()
+        or realized_coverage < min_coverage
+        or implied_coverage <= 0
+        or implied <= 0
+    ):
+        return None
+    return implied - realized
+
+
+def _front_expiry_feasible_slots(
+    observation: Observation,
+    action_index: int,
+) -> np.ndarray:
+    """Return feasible slots from the nearest valid expiration."""
+    if (
+        observation.contracts.ndim != 2
+        or observation.contracts.shape[1] != len(CONTRACT_FEATURES)
+        or action_index < 1
+        or action_index >= observation.action_mask.shape[1]
+    ):
+        return np.empty(0, dtype=int)
+    option_rows = len(observation.contract_ids)
+    valid = np.flatnonzero(
+        observation.valid_mask
+        & observation.action_mask[:option_rows, action_index]
+    )
+    if not len(valid):
+        return valid
+    dte = observation.contracts[valid, _CONTRACT_INDEX["dteDays"]]
+    finite = np.isfinite(dte) & (dte >= 0)
+    if not finite.any():
+        return np.empty(0, dtype=int)
+    valid = valid[finite]
+    front_dte = float(np.min(
+        observation.contracts[valid, _CONTRACT_INDEX["dteDays"]]
+    ))
+    return valid[np.isclose(
+        observation.contracts[valid, _CONTRACT_INDEX["dteDays"]],
+        front_dte,
+    )]
+
+
+def _best_atm_side(
+    observation: Observation,
+    valid: np.ndarray,
+    side: str,
+) -> int | None:
+    """Rank one call or put by ATM distance, spread, depth, then slot."""
+    if side not in {"call", "put"}:
+        raise ValueError("side must be call or put")
+    contracts = observation.contracts
+    delta = contracts[valid, _CONTRACT_INDEX["delta"]]
+    side_mask = delta > 0 if side == "call" else delta < 0
+    candidates = valid[side_mask]
+    if not len(candidates):
+        return None
+    ranks = np.lexsort((
+        candidates,
+        -contracts[candidates, _CONTRACT_INDEX["openInterestLog"]],
+        contracts[candidates, _CONTRACT_INDEX["spreadPct"]],
+        np.abs(contracts[candidates, _CONTRACT_INDEX["logMoneyness"]]),
+    ))
+    return int(candidates[ranks[0]])
+
+
+@dataclass(frozen=True)
+class ShortVolatilityConfig:
+    """Causal entry rule for a cash-secured short-put carry benchmark."""
+
+    realized_window: int = 16
+    min_coverage: float = 0.75
+    min_volatility_edge: float = 0.02
+    quantity: int = 1
+
+    def __post_init__(self) -> None:
+        if self.realized_window not in {4, 16}:
+            raise ValueError("realized_window must be 4 or 16")
+        if not 0 <= self.min_coverage <= 1:
+            raise ValueError("min_coverage must be between zero and one")
+        if (
+            not np.isfinite(self.min_volatility_edge)
+            or self.min_volatility_edge < 0
+        ):
+            raise ValueError(
+                "min_volatility_edge must be finite and nonnegative"
+            )
+        if self.quantity < 1:
+            raise ValueError("quantity must be positive")
+
+
+class CashSecuredShortPutThenDeltaHedge:
+    """Sell one rich front-ATM put, then reduce its Delta with shares."""
+
+    def __init__(self, config: ShortVolatilityConfig | None = None) -> None:
+        self.config = config or ShortVolatilityConfig()
+        self._opened = False
+
+    def __call__(self, observation: Observation) -> np.ndarray:
+        if self._opened:
+            return delta_neutral(observation)
+        action = no_op(observation)
+        edge = _implied_minus_realized(
+            observation,
+            self.config.realized_window,
+            self.config.min_coverage,
+        )
+        if edge is None or edge < self.config.min_volatility_edge:
+            return action
+        maximum_quantity = (observation.action_mask.shape[1] - 1) // 2
+        if self.config.quantity > maximum_quantity:
+            return action
+        sell_index = maximum_quantity + self.config.quantity
+        valid = _front_expiry_feasible_slots(observation, sell_index)
+        put_slot = _best_atm_side(observation, valid, "put")
+        if put_slot is None:
+            return action
+        action[put_slot] = sell_index
+        self._opened = True
+        return action
+
+
+def cash_secured_short_put_delta_hedge(
+    config: ShortVolatilityConfig | None = None,
+) -> CashSecuredShortPutThenDeltaHedge:
+    """Return a fresh collateralized short-volatility benchmark."""
+    return CashSecuredShortPutThenDeltaHedge(config)
 
 
 @dataclass(frozen=True)

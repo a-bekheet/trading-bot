@@ -39,7 +39,7 @@ Every candidate must eventually pass:
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | The collateralized liability foundation now exists. Add CVaR or learned P&L-distribution objectives only after enough independent paths and lifecycle validation exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Causal realized-volatility horizons, walk-forward evaluation, and explicit per-contract position quantity/cost/P&L state implement this lesson. |
 | [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v12`, compact ATM-IV-minus-realized-volatility and term/dynamics state, stable contract/position identity, Greek budgets, collateral state, and paired moving-block intervals implement the state/risk lesson. |
-| [Deep Hedging with Options Using the Implied Volatility Surface (revised 2025)](https://arxiv.org/abs/2504.06208) | Joint return/surface dynamics, multiple hedge instruments, variance-risk-premium state, and transaction costs can create useful state-dependent no-trade regions. | Keep whole-surface factors, option-plus-share actions, and sparse action priors; add a collateralized carry baseline before attributing any short-volatility behavior to RL. |
+| [Deep Hedging with Options Using the Implied Volatility Surface (revised 2025)](https://arxiv.org/abs/2504.06208) | Joint return/surface dynamics, multiple hedge instruments, variance-risk-premium state, and transaction costs can create useful state-dependent no-trade regions. | Keep whole-surface factors, option-plus-share actions, and sparse action priors. The collateralized short-put carry baseline now prevents attributing a simple IV-versus-realized rule to RL. |
 | [IV-surface feedback for deep option hedging (revised 2026)](https://arxiv.org/abs/2407.21138) | A compact surface factorization includes ATM level, maturity and moneyness slopes, smile attenuation, smirk, and their dynamics; bounded recurrent hybrids outperform standalone networks in its numerical study. | Executable 25-delta risk-reversal/butterfly, ATM term slope/curvature, and one-snapshot factor changes now have explicit coverage once per market snapshot; test them through named tournament ablations. |
 | [Shortfall-aware RL option hedging (2026)](https://arxiv.org/abs/2601.01709) | Better static IV fit need not produce better dynamic hedging; replication-error and shortfall objectives under costs are separate evidence. | Keep realized path diagnostics primary. The liability surface is implemented; defer shortfall/CVaR training until enough independent paths make tail estimates meaningful. |
 | [Autonomous AI Agents for Option Hedging (2026)](https://arxiv.org/abs/2603.06587) | Listed-option experiments emphasize realized path shortfall frequency and Expected Shortfall rather than static fit. | Preserve executable current position state now; add terminal shortfall distributions only after liability episodes and enough independent held-out paths make tail estimates meaningful. |
@@ -229,6 +229,15 @@ by a configured edge, then reduces residual Delta with shares. It remains
 long-only and has no lifecycle exit, so it tests whether the learned agent beats
 a simple underpriced-volatility rule rather than a complete volatility book.
 
+The matched short-side hurdle is now executable. It waits for covered ATM IV
+to exceed backward-only realized volatility, sells only a feasible cash-secured
+front-expiry ATM put, and hedges residual Delta with the existing underlying
+action. Single-ticker and universe folds persist its configuration, compare its
+arrival-aligned returns to the selected agent, and report fresh base and
+doubled-cost episodes. It deliberately holds through expiry so assignment is
+not hidden. This is a simple carry control with residual model limitations—not
+evidence of a variance-risk-premium alpha.
+
 Training targets now respect irregular transition duration. PPO/GAE and
 REINFORCE convert their configured per-reference-interval factors to
 `base ** (elapsed_seconds / reference_seconds)`, while inference stays
@@ -255,9 +264,9 @@ candidate. This corrects objective semantics; it is not evidence of alpha.
 - No trade and first-feasible policies test environment mechanics.
 - Retain the implemented Black-Scholes Delta hedge as a comparator and extend
   it to the new option-liability episodes when historical depth permits.
-- Retain the implemented long-volatility IV-versus-realized rule; next add a
-  deterministic collateralized short-volatility/carry comparator using the
-  same assignment, collateral, costs, and risk limits as the learned agent.
+- Retain the implemented long-volatility IV-versus-realized rule and the
+  deterministic collateralized short-put carry comparator using the same
+  assignment, collateral, costs, and risk limits as the learned agent.
 - Retain the implemented underlying-trend comparator so a recurrent policy
   cannot receive credit for reproducing a trivial covered-return rule.
 - Retain the implemented recurrent Monte-Carlo REINFORCE-with-value-baseline
