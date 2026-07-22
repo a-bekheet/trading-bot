@@ -386,6 +386,27 @@ microbenchmark from 3.041 to 1.834 microseconds median over 100,000 calls (40%).
 The shared CLI configuration constructor also prevents single-ticker and
 universe baseline settings from silently diverging.
 
+v0.44 makes risk part of the training objective instead of only a checkpoint
+selection diagnostic. Both PPO and REINFORCE can opt into path-causal shaping:
+
+```bash
+train-walk-forward \
+  --symbol AAPL \
+  --reward-drawdown-penalty 1.0 \
+  --reward-downside-penalty 1.0
+```
+
+At each transition, the downside component charges the negative part of the
+net P&L return. The drawdown component charges only the increase in the running
+maximum NAV drawdown. Consequently, its episode sum is exactly the coefficient
+times negative maximum drawdown; an unchanged underwater state is not charged
+again. Both components use only current and prior state, reset at every episode
+boundary, and are retained separately in rollout metrics and checkpoint
+manifests. Their coefficients default to zero, leave observations and inference
+unchanged, and preserve the previous raw-return objective. Validation selection
+penalties below are a separate layer; enabling both is an explicit choice to
+optimize path risk during training and rank checkpoints by validation risk.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
 coverage bit; `dimensionless.v12` log-compresses the interval before it reaches

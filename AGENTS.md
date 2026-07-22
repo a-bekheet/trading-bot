@@ -177,7 +177,16 @@ small and stable:
   reward components, and slot retention/churn diagnostics.
 - `reward_components` must sum to the returned scalar reward. Gross P&L includes
   spread/mark effects, while commission and invalid-action penalties are
-  separate components.
+  separate components. Optional downside shaping is the negative coefficient
+  times the negative part of the current net P&L return. Optional drawdown
+  shaping charges only the increase in running maximum NAV drawdown, not the
+  full current drawdown on every step. This keeps the signal path-causal and
+  makes its episode sum equal negative coefficient times maximum drawdown.
+- Reset peak NAV and maximum drawdown at every episode boundary. Persist both
+  reward coefficients in the environment manifest, expose current/maximum
+  drawdown and drawdown increase in `info.path_risk`, and retain all five reward
+  components in rollout metrics. Coefficients must be finite, non-negative, and
+  default to zero so old training behavior and policy inference remain intact.
 - A surviving contract keeps its exact slot unless a reappearing held position
   needs visibility to remain sellable. A missing contract vacates only its own
   slot; ordinary replacements never shift other identities. Currently visible
@@ -337,6 +346,10 @@ coefficients times maximum drawdown, downside deviation, and turnover. Use this
 one score consistently for best-episode restoration, patience, architecture,
 algorithm, and feature-ablation ranking. Persist raw reward, every component,
 and all coefficients. Defaults are zero; never tune coefficients from test.
+Training-time drawdown and downside reward coefficients are independent from
+these validation-selection coefficients. Experiments may enable either layer
+or both, but must declare and persist the choice; never silently treat selection
+penalties as training reward or hide intentional double risk penalization.
 `train-demo` model selection is deterministic but in-sample and must remain
 labeled `in_sample_research_demo`. When `selection_env` is supplied, selection
 must use only that validation environment and be labeled

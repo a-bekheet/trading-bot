@@ -43,6 +43,7 @@ from trading_bot.training.sequence import (
 from trading_bot.training.splits import walk_forward_splits
 from trading_bot.training.trainer import (
     TrainingConfig,
+    _environment_kwargs_from_args,
     benchmark_recurrent_inference,
     recurrent_policy,
     save_checkpoint,
@@ -50,7 +51,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v33"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v34"
 
 
 @dataclass(frozen=True)
@@ -1088,6 +1089,8 @@ def _parser() -> argparse.ArgumentParser:
             "forbidden"
         ),
     )
+    parser.add_argument("--reward-drawdown-penalty", type=float, default=0.0)
+    parser.add_argument("--reward-downside-penalty", type=float, default=0.0)
     parser.add_argument("--underlying-lot-size", type=int, default=25)
     parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
     parser.add_argument("--underlying-commission-per-share", type=float, default=0.005)
@@ -1258,24 +1261,7 @@ def main() -> None:
                 seed=args.seed,
             ),
             args.output_dir,
-            env_kwargs={
-                "slot_count": args.slot_count,
-                "slot_assignment": args.slot_assignment,
-                "max_quantity": args.max_quantity,
-                "allow_collateralized_option_shorts": (
-                    args.allow_collateralized_option_shorts
-                ),
-                "underlying_lot_size": args.underlying_lot_size,
-                "max_abs_underlying_shares": args.max_abs_underlying_shares,
-                "underlying_commission_per_share": (
-                    args.underlying_commission_per_share
-                ),
-                "underlying_slippage_bps": args.underlying_slippage_bps,
-                "max_abs_delta": args.max_abs_delta,
-                "max_abs_gamma": args.max_abs_gamma,
-                "max_abs_theta": args.max_abs_theta,
-                "max_abs_vega": args.max_abs_vega,
-            },
+            env_kwargs=_environment_kwargs_from_args(args),
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error

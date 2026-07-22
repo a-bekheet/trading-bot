@@ -35,6 +35,7 @@ from trading_bot.training.evaluation import (
 from trading_bot.training.splits import walk_forward_splits
 from trading_bot.training.trainer import (
     TrainingConfig,
+    _environment_kwargs_from_args,
     benchmark_recurrent_inference,
     recurrent_policy,
     save_checkpoint,
@@ -53,7 +54,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v17"
+    "research-demo.universe-walk-forward.v18"
 )
 
 
@@ -915,26 +916,7 @@ def main() -> None:
                 seed=args.seed,
             ),
             args.output_dir,
-            env_kwargs={
-                "slot_count": args.slot_count,
-                "slot_assignment": args.slot_assignment,
-                "max_quantity": args.max_quantity,
-                "allow_collateralized_option_shorts": (
-                    args.allow_collateralized_option_shorts
-                ),
-                "underlying_lot_size": args.underlying_lot_size,
-                "max_abs_underlying_shares": (
-                    args.max_abs_underlying_shares
-                ),
-                "underlying_commission_per_share": (
-                    args.underlying_commission_per_share
-                ),
-                "underlying_slippage_bps": args.underlying_slippage_bps,
-                "max_abs_delta": args.max_abs_delta,
-                "max_abs_gamma": args.max_abs_gamma,
-                "max_abs_theta": args.max_abs_theta,
-                "max_abs_vega": args.max_abs_vega,
-            },
+            env_kwargs=_environment_kwargs_from_args(args),
         )
     except (FileNotFoundError, ValueError) as error:
         raise SystemExit(str(error)) from error

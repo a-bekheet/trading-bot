@@ -303,6 +303,8 @@ def cost_stressed_environment(
         underlying_commission_per_share=underlying_commission,
         underlying_slippage_bps=underlying_slippage,
         invalid_action_penalty=source.invalid_action_penalty,
+        reward_drawdown_penalty=source.reward_drawdown_penalty,
+        reward_downside_penalty=source.reward_downside_penalty,
         max_abs_delta=source.risk_limits["delta"],
         max_abs_gamma=source.risk_limits["gamma"],
         max_abs_theta=source.risk_limits["theta"],

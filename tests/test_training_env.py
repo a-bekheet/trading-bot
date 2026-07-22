@@ -6,6 +6,7 @@ import pandas as pd
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.manifest import EnvManifest
+from trading_bot.training.sequence import observation_vector
 
 
 def demo_dataset() -> SnapshotDataset:
@@ -138,7 +139,129 @@ def option_lifecycle_dataset(
     return SnapshotDataset(tuple(snapshots), "TEST")
 
 
+def drawdown_dataset() -> SnapshotDataset:
+    source = demo_dataset().snapshots[0].frame
+    snapshots = []
+    for timestamp, bid, ask in (
+        ("2026-07-21T14:00:00Z", 2.0, 2.2),
+        ("2026-07-21T14:01:00Z", 1.5, 1.7),
+        ("2026-07-21T14:02:00Z", 2.0, 2.2),
+        ("2026-07-21T14:03:00Z", 1.6, 1.8),
+    ):
+        frame = source.copy()
+        frame["collectedAt"] = timestamp
+        frame["bid"] = bid
+        frame["ask"] = ask
+        frame["lastPrice"] = (bid + ask) / 2
+        snapshots.append(Snapshot(timestamp, frame))
+    return SnapshotDataset(tuple(snapshots), "AAPL")
+
+
 class OptionsEnvTests(TestCase):
+    def test_path_causal_reward_penalizes_downside_and_new_max_drawdown(self):
+        env = OptionsEnv(
+            drawdown_dataset(),
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=1_000,
+            reward_drawdown_penalty=3.0,
+            reward_downside_penalty=2.0,
+        )
+        observation, reset_info = env.reset(seed=11)
+        self.assertEqual(reset_info["reward_objective"], {
+            "invalid_action_penalty": 0.001,
+            "drawdown_penalty": 3.0,
+            "downside_penalty": 2.0,
+        })
+
+        observation, first_reward, _, _, first = env.step(np.array([1, 0]))
+
+        first_net = (
+            first["reward_components"]["gross_pnl_return"]
+            + first["reward_components"]["fees"]
+        )
+        self.assertAlmostEqual(first_net, -0.06065)
+        self.assertAlmostEqual(first["path_risk"]["maximum_drawdown"], 0.06065)
+        self.assertAlmostEqual(first["reward_components"]["drawdown"], -0.18195)
+        self.assertAlmostEqual(first["reward_components"]["downside"], -0.1213)
+        self.assertAlmostEqual(sum(first["reward_components"].values()), first_reward)
+
+        observation, recovery_reward, _, _, recovery = env.step(
+            np.array([0, 0])
+        )
+
+        self.assertGreater(recovery_reward, 0)
+        self.assertEqual(recovery["path_risk"]["drawdown_increase"], 0)
+        self.assertEqual(recovery["reward_components"]["drawdown"], 0)
+        self.assertEqual(recovery["reward_components"]["downside"], 0)
+
+        _, relapse_reward, _, truncated, relapse = env.step(np.array([0, 0]))
+
+        self.assertTrue(truncated)
+        relapse_net = (
+            relapse["reward_components"]["gross_pnl_return"]
+            + relapse["reward_components"]["fees"]
+        )
+        self.assertLess(relapse_reward, relapse_net)
+        self.assertEqual(relapse["path_risk"]["drawdown_increase"], 0)
+        self.assertEqual(relapse["reward_components"]["drawdown"], 0)
+        self.assertAlmostEqual(
+            relapse["reward_components"]["downside"],
+            -2 * max(-relapse_net, 0),
+        )
+
+        env.reset(seed=11)
+        _, repeated_reward, _, _, repeated = env.step(np.array([1, 0]))
+        self.assertAlmostEqual(repeated_reward, first_reward)
+        self.assertAlmostEqual(
+            repeated["path_risk"]["drawdown_increase"],
+            first["path_risk"]["drawdown_increase"],
+        )
+
+    def test_default_reward_objective_is_unchanged(self):
+        default = OptionsEnv(
+            drawdown_dataset(),
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=1_000,
+        )
+        shaped = OptionsEnv(
+            drawdown_dataset(),
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=1_000,
+            reward_drawdown_penalty=1.0,
+            reward_downside_penalty=1.0,
+        )
+        default_observation, _ = default.reset()
+        shaped_observation, _ = shaped.reset()
+
+        np.testing.assert_array_equal(
+            observation_vector(default_observation),
+            observation_vector(shaped_observation),
+        )
+        np.testing.assert_array_equal(
+            default_observation.action_mask,
+            shaped_observation.action_mask,
+        )
+
+        default_next, default_reward, _, _, default_info = default.step(
+            np.array([1, 0])
+        )
+        shaped_next, shaped_reward, _, _, _ = shaped.step(np.array([1, 0]))
+
+        np.testing.assert_array_equal(
+            observation_vector(default_next),
+            observation_vector(shaped_next),
+        )
+        self.assertAlmostEqual(
+            default_reward,
+            default_info["pnl"] / 1_000,
+        )
+        self.assertEqual(default_info["reward_components"]["drawdown"], 0)
+        self.assertEqual(default_info["reward_components"]["downside"], 0)
+        self.assertLess(shaped_reward, default_reward)
+
     def test_collateralized_short_put_can_close_or_cross_without_reusing_cash(self):
         dataset = option_lifecycle_dataset(
             "put",
@@ -594,6 +717,16 @@ class OptionsEnvTests(TestCase):
     def test_rejects_negative_execution_costs(self):
         with self.assertRaisesRegex(ValueError, "execution costs"):
             OptionsEnv(demo_dataset(), spread_multiplier=-1)
+        for kwargs in (
+            {"invalid_action_penalty": -1},
+            {"reward_drawdown_penalty": -1},
+            {"reward_downside_penalty": float("nan")},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+                ValueError,
+                "reward penalties",
+            ):
+                OptionsEnv(demo_dataset(), **kwargs)
 
     def test_underlying_trade_updates_cash_nav_delta_and_position_limits(self):
         env = OptionsEnv(

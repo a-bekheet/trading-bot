@@ -178,6 +178,8 @@ class EvaluationTests(TestCase):
                 slot_assignment="ranked",
                 max_quantity=1,
                 allow_collateralized_option_shorts=True,
+                reward_drawdown_penalty=2.0,
+                reward_downside_penalty=3.0,
                 underlying_lot_size=25,
                 underlying_commission_per_share=0.01,
                 underlying_slippage_bps=10,
@@ -203,5 +205,9 @@ class EvaluationTests(TestCase):
         self.assertTrue(
             stressed.manifest.allow_collateralized_option_shorts
         )
+        self.assertEqual(stressed.reward_drawdown_penalty, 2.0)
+        self.assertEqual(stressed.reward_downside_penalty, 3.0)
+        self.assertEqual(stressed.manifest.reward_drawdown_penalty, 2.0)
+        self.assertEqual(stressed.manifest.reward_downside_penalty, 3.0)
         self.assertAlmostEqual(base_info["fees"], 0.25)
         self.assertAlmostEqual(stressed_info["fees"], 0.5)

@@ -76,6 +76,8 @@ class OptionsEnv:
         underlying_commission_per_share: float = 0.005,
         underlying_slippage_bps: float = 1.0,
         invalid_action_penalty: float = 0.001,
+        reward_drawdown_penalty: float = 0.0,
+        reward_downside_penalty: float = 0.0,
         max_abs_delta: float | None = None,
         max_abs_gamma: float | None = None,
         max_abs_theta: float | None = None,
@@ -92,6 +94,16 @@ class OptionsEnv:
             or underlying_slippage_bps < 0
         ):
             raise ValueError("execution costs cannot be negative")
+        reward_penalties = {
+            "invalid_action": invalid_action_penalty,
+            "drawdown": reward_drawdown_penalty,
+            "downside": reward_downside_penalty,
+        }
+        if any(
+            not math.isfinite(penalty) or penalty < 0
+            for penalty in reward_penalties.values()
+        ):
+            raise ValueError("reward penalties must be finite and nonnegative")
         if underlying_lot_size < 1 or max_abs_underlying_shares < underlying_lot_size:
             raise ValueError("underlying position limits and lot size are invalid")
         limits = {
@@ -119,6 +131,8 @@ class OptionsEnv:
         self.underlying_commission_per_share = underlying_commission_per_share
         self.underlying_slippage_bps = underlying_slippage_bps
         self.invalid_action_penalty = invalid_action_penalty
+        self.reward_drawdown_penalty = reward_drawdown_penalty
+        self.reward_downside_penalty = reward_downside_penalty
         self.risk_limits = limits
         manifest_values = {
             "symbol": dataset.symbol,
@@ -136,6 +150,8 @@ class OptionsEnv:
             "underlying_commission_per_share": underlying_commission_per_share,
             "underlying_slippage_bps": underlying_slippage_bps,
             "invalid_action_penalty": invalid_action_penalty,
+            "reward_drawdown_penalty": reward_drawdown_penalty,
+            "reward_downside_penalty": reward_downside_penalty,
             "max_abs_delta": max_abs_delta,
             "max_abs_gamma": max_abs_gamma,
             "max_abs_theta": max_abs_theta,
@@ -156,6 +172,8 @@ class OptionsEnv:
         self._cached_info: dict[str, Any] = {}
         self._cached_slots: list[pd.Series | None] = []
         self._contract_home_slots: dict[str, int] = {}
+        self._peak_nav = starting_cash
+        self._max_drawdown = 0.0
 
     @classmethod
     def from_directory(cls, data_dir: Path, symbol: str, **kwargs: Any) -> "OptionsEnv":
@@ -172,6 +190,8 @@ class OptionsEnv:
                     "underlying_commission_per_share",
                     "underlying_slippage_bps",
                     "invalid_action_penalty",
+                    "reward_drawdown_penalty",
+                    "reward_downside_penalty",
                     "max_abs_delta", "max_abs_gamma", "max_abs_theta",
                     "max_abs_vega",
                 )
@@ -206,6 +226,8 @@ class OptionsEnv:
         frame = self._current_frame()
         slots = self._slots(frame)
         observation, info = self._observation(frame, slots)
+        self._peak_nav = float(observation.portfolio[2])
+        self._max_drawdown = 0.0
         self._cache_state(observation, info, slots)
         info.update({"seed": seed, "manifest_fingerprint": self.manifest.fingerprint})
         return observation, info
@@ -242,10 +264,23 @@ class OptionsEnv:
                     name: float(observation.portfolio[3 + index])
                     for index, name in enumerate(GREEK_NAMES)
                 },
+                "path_risk": {
+                    "current_drawdown": (
+                        (self._peak_nav - float(observation.portfolio[2]))
+                        / self._peak_nav
+                        if self._peak_nav > 0
+                        else 1.0
+                    ),
+                    "maximum_drawdown": self._max_drawdown,
+                    "drawdown_increase": 0.0,
+                    "downside_return": 0.0,
+                },
                 "reward_components": {
                     "gross_pnl_return": 0.0,
                     "fees": 0.0,
                     "invalid_action": 0.0,
+                    "drawdown": 0.0,
+                    "downside": 0.0,
                 },
             }
 
@@ -381,7 +416,28 @@ class OptionsEnv:
             gross_pnl_return = -1.0
             fee_return = 0.0
         invalid_return = -invalid_actions * self.invalid_action_penalty
-        reward = gross_pnl_return + fee_return + invalid_return
+        net_pnl_return = gross_pnl_return + fee_return
+        self._peak_nav = max(self._peak_nav, post_nav)
+        current_drawdown = (
+            (self._peak_nav - post_nav) / self._peak_nav
+            if self._peak_nav > 0
+            else 1.0
+        )
+        next_max_drawdown = max(self._max_drawdown, current_drawdown)
+        drawdown_increase = next_max_drawdown - self._max_drawdown
+        self._max_drawdown = next_max_drawdown
+        drawdown_return = (
+            -self.reward_drawdown_penalty * drawdown_increase
+        )
+        downside_return = (
+            -self.reward_downside_penalty * max(-net_pnl_return, 0.0)
+        )
+        reward = (
+            net_pnl_return
+            + invalid_return
+            + drawdown_return
+            + downside_return
+        )
         terminated = post_nav <= 0
         info = {
             **pre_info,
@@ -399,10 +455,18 @@ class OptionsEnv:
                 name: float(next_observation.portfolio[3 + index])
                 for index, name in enumerate(GREEK_NAMES)
             },
+            "path_risk": {
+                "current_drawdown": current_drawdown,
+                "maximum_drawdown": self._max_drawdown,
+                "drawdown_increase": drawdown_increase,
+                "downside_return": max(-net_pnl_return, 0.0),
+            },
             "reward_components": {
                 "gross_pnl_return": gross_pnl_return,
                 "fees": fee_return,
                 "invalid_action": invalid_return,
+                "drawdown": drawdown_return,
+                "downside": downside_return,
             },
         }
         return next_observation, float(reward), terminated, truncated, info
@@ -734,6 +798,11 @@ class OptionsEnv:
             "portfolio_features": PORTFOLIO_FEATURES,
             "market_features": MARKET_FEATURES,
             "risk_limits": self.risk_limits.copy(),
+            "reward_objective": {
+                "invalid_action_penalty": self.invalid_action_penalty,
+                "drawdown_penalty": self.reward_drawdown_penalty,
+                "downside_penalty": self.reward_downside_penalty,
+            },
             "allow_collateralized_option_shorts": (
                 self.allow_collateralized_option_shorts
             ),

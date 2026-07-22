@@ -27,7 +27,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v30"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v31"
 
 
 @dataclass(frozen=True)
@@ -651,6 +651,13 @@ def train_actor_critic(
         invalid_actions = executions = steps = 0
         requested_option_orders = 0
         requested_underlying_orders = 0
+        reward_component_totals = {
+            "gross_pnl_return": 0.0,
+            "fees": 0.0,
+            "invalid_action": 0.0,
+            "drawdown": 0.0,
+            "downside": 0.0,
+        }
         slot_changed_count = 0
         slot_comparable_count = 0
         final_terminal = False
@@ -693,6 +700,8 @@ def train_actor_critic(
             old_values.append(value.squeeze(0))
             invalid_actions += int(info["invalid_action_count"])
             executions += len(info["executions"])
+            for name, value in info["reward_components"].items():
+                reward_component_totals[name] += float(value)
             slot_changed_count += int(info.get("slot_changed_count", 0))
             slot_comparable_count += int(info.get("slot_comparable_count", 0))
             steps += 1
@@ -1034,6 +1043,7 @@ def train_actor_critic(
                 "rollout_start_index": rollout_start,
                 "rollout_end_index": rollout_start + steps,
                 "total_reward": float(sum(rewards)),
+                "reward_components": reward_component_totals.copy(),
                 "transition_seconds_mean": float(np.mean(transition_seconds)),
                 "transition_seconds_min": float(np.min(transition_seconds)),
                 "transition_seconds_max": float(np.max(transition_seconds)),
@@ -1390,6 +1400,8 @@ def _parser() -> argparse.ArgumentParser:
             "forbidden"
         ),
     )
+    parser.add_argument("--reward-drawdown-penalty", type=float, default=0.0)
+    parser.add_argument("--reward-downside-penalty", type=float, default=0.0)
     parser.add_argument("--underlying-lot-size", type=int, default=25)
     parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
     parser.add_argument("--underlying-commission-per-share", type=float, default=0.005)
@@ -1477,30 +1489,42 @@ def _symbols_from_args(args: argparse.Namespace) -> tuple[str, ...]:
     )
 
 
+def _environment_kwargs_from_args(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Return the shared environment contract for every training CLI."""
+    return {
+        "slot_count": args.slot_count,
+        "slot_assignment": args.slot_assignment,
+        "max_quantity": args.max_quantity,
+        "allow_collateralized_option_shorts": (
+            args.allow_collateralized_option_shorts
+        ),
+        "reward_drawdown_penalty": args.reward_drawdown_penalty,
+        "reward_downside_penalty": args.reward_downside_penalty,
+        "underlying_lot_size": args.underlying_lot_size,
+        "max_abs_underlying_shares": args.max_abs_underlying_shares,
+        "underlying_commission_per_share": (
+            args.underlying_commission_per_share
+        ),
+        "underlying_slippage_bps": args.underlying_slippage_bps,
+        "max_abs_delta": args.max_abs_delta,
+        "max_abs_gamma": args.max_abs_gamma,
+        "max_abs_theta": args.max_abs_theta,
+        "max_abs_vega": args.max_abs_vega,
+    }
+
+
 def main() -> None:
     args = _parser().parse_args()
     auxiliary_horizons = tuple(args.auxiliary_horizon or (1,))
     symbols = _symbols_from_args(args)
+    environment_kwargs = _environment_kwargs_from_args(args)
     environments = tuple(
         OptionsEnv.from_directory(
             args.data_dir,
             symbol,
-            slot_count=args.slot_count,
-            slot_assignment=args.slot_assignment,
-            max_quantity=args.max_quantity,
-            allow_collateralized_option_shorts=(
-                args.allow_collateralized_option_shorts
-            ),
-            underlying_lot_size=args.underlying_lot_size,
-            max_abs_underlying_shares=args.max_abs_underlying_shares,
-            underlying_commission_per_share=(
-                args.underlying_commission_per_share
-            ),
-            underlying_slippage_bps=args.underlying_slippage_bps,
-            max_abs_delta=args.max_abs_delta,
-            max_abs_gamma=args.max_abs_gamma,
-            max_abs_theta=args.max_abs_theta,
-            max_abs_vega=args.max_abs_vega,
+            **environment_kwargs,
         )
         for symbol in symbols
     )

@@ -129,6 +129,16 @@ architectures, and feature ablations consistently while retaining every raw
 component. Coefficients remain zero by default and must be fixed without test
 feedback.
 
+Training can now independently use path-causal downside and incremental
+maximum-drawdown reward components. The former penalizes only negative net
+transition returns; the latter telescopes to negative maximum drawdown over an
+episode instead of repeatedly charging an underwater policy. This is a small,
+auditable bridge from mean-return training toward the shortfall-aware literature:
+it does not estimate tail distributions, CVaR, or Expected Shortfall. Those
+claims remain deferred until substantially more independent paths are available.
+Zero coefficients preserve the original objective and leave inference inputs
+and latency unchanged.
+
 The market state now includes front-expiry ATM IV and its difference from
 backward-only 4/16-snapshot realized volatility, each paired with the existing
 history coverage. PPO training samples seeded bounded windows across the

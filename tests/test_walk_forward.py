@@ -16,7 +16,11 @@ from trading_bot.training.dataset import Snapshot, SnapshotDataset
 from trading_bot.training.env import OptionsEnv
 from trading_bot.training.recurrent import build_recurrent_actor_critic
 from trading_bot.training.sequence import feature_ablation_indices
-from trading_bot.training.trainer import TrainingConfig, load_checkpoint
+from trading_bot.training.trainer import (
+    TrainingConfig,
+    _environment_kwargs_from_args,
+    load_checkpoint,
+)
 from trading_bot.training.walk_forward import (
     ModelSpec,
     WALK_FORWARD_SCHEMA_VERSION,
@@ -146,6 +150,8 @@ class WalkForwardTrainingTests(TestCase):
             "--trend-min-coverage", "0.5",
             "--trend-min-abs-log-return", "0.01",
             "--trend-quantity", "2",
+            "--reward-drawdown-penalty", "3",
+            "--reward-downside-penalty", "4",
         ])
 
         config = _walk_forward_config_from_args(args)
@@ -158,6 +164,9 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(config.trend_min_coverage, 0.5)
         self.assertEqual(config.trend_min_abs_log_return, 0.01)
         self.assertEqual(config.trend_quantity, 2)
+        environment = _environment_kwargs_from_args(args)
+        self.assertEqual(environment["reward_drawdown_penalty"], 3)
+        self.assertEqual(environment["reward_downside_penalty"], 4)
 
     def test_cli_makes_collateralized_option_shorts_explicitly_opt_in(self):
         self.assertFalse(

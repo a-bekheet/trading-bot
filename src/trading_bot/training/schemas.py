@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 
-SCHEMA_VERSION = "research-demo.v15"
+SCHEMA_VERSION = "research-demo.v16"
 FEATURE_VECTOR_SCHEMA_VERSION = "dimensionless.v12"
 
 

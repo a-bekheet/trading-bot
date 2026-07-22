@@ -25,6 +25,7 @@ from trading_bot.training.trainer import (
     TrainingConfig,
     _discounted_returns,
     _duration_adjusted_factors,
+    _environment_kwargs_from_args,
     _elapsed_seconds,
     _generalized_advantages,
     _parser,
@@ -96,6 +97,19 @@ class TrainerTests(TestCase):
         self.assertEqual(single.slot_assignment, "stable")
         self.assertEqual(single.action_decoder, "factorized")
         self.assertFalse(single.allow_collateralized_option_shorts)
+        self.assertEqual(
+            _environment_kwargs_from_args(single)[
+                "reward_drawdown_penalty"
+            ],
+            0.0,
+        )
+        risk_args = _parser().parse_args([
+            "--reward-drawdown-penalty", "2.5",
+            "--reward-downside-penalty", "1.5",
+        ])
+        risk_environment = _environment_kwargs_from_args(risk_args)
+        self.assertEqual(risk_environment["reward_drawdown_penalty"], 2.5)
+        self.assertEqual(risk_environment["reward_downside_penalty"], 1.5)
         self.assertTrue(
             _parser().parse_args([
                 "--allow-collateralized-option-shorts",
@@ -160,7 +174,13 @@ class TrainerTests(TestCase):
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_train_and_save_auditable_checkpoint(self):
-        env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=1_000)
+        env = OptionsEnv(
+            demo_dataset(),
+            slot_count=2,
+            starting_cash=1_000,
+            reward_drawdown_penalty=2.0,
+            reward_downside_penalty=1.0,
+        )
         observation, _ = env.reset(seed=11)
         recurrent = RecurrentConfig(
             input_size=observation_vector(observation).shape[0],
@@ -195,6 +215,18 @@ class TrainerTests(TestCase):
 
         self.assertEqual(len(metrics), 2)
         self.assertTrue(all(math.isfinite(item["loss"]) for item in metrics))
+        self.assertTrue(all(
+            math.isclose(
+                sum(item["reward_components"].values()),
+                item["total_reward"],
+            )
+            for item in metrics
+        ))
+        self.assertTrue(all(
+            item["reward_components"]["drawdown"] <= 0
+            and item["reward_components"]["downside"] <= 0
+            for item in metrics
+        ))
         self.assertTrue(all(item["ppo_updates"] >= 1 for item in metrics))
         self.assertTrue(all(0 <= item["clip_fraction"] <= 1 for item in metrics))
         self.assertTrue(all(math.isfinite(item["approx_kl"]) for item in metrics))
@@ -294,10 +326,18 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["initial_hold_bias"], 5.0)
         self.assertEqual(sidecar["model"]["masked_input_indices"], [0])
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v15")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v16")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
+        self.assertEqual(
+            sidecar["environment"]["reward_drawdown_penalty"],
+            2.0,
+        )
+        self.assertEqual(
+            sidecar["environment"]["reward_downside_penalty"],
+            1.0,
+        )
         self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v12")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(

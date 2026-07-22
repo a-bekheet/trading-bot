@@ -32,6 +32,8 @@ class EnvManifest:
     underlying_commission_per_share: float = 0.005
     underlying_slippage_bps: float = 1.0
     invalid_action_penalty: float = 0.001
+    reward_drawdown_penalty: float = 0.0
+    reward_downside_penalty: float = 0.0
     max_abs_delta: float | None = None
     max_abs_gamma: float | None = None
     max_abs_theta: float | None = None
