@@ -17,11 +17,15 @@ from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.evaluation import EpisodeReport, run_episode
 from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_actor_critic
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
-from trading_bot.training.sequence import observation_vector
+from trading_bot.training.sequence import (
+    AUXILIARY_TARGET_FEATURES,
+    auxiliary_market_targets,
+    observation_vector,
+)
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v16"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v17"
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,7 @@ class TrainingConfig:
     selection_turnover_penalty: float = 0.0
     selection_cross_ticker_std_penalty: float = 0.0
     selection_worst_ticker_weight: float = 0.0
+    auxiliary_coefficient: float = 0.0
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
@@ -65,6 +70,11 @@ class TrainingConfig:
             raise ValueError("ppo_epochs and minibatch_size must be positive")
         if self.value_coefficient < 0 or self.entropy_coefficient < 0:
             raise ValueError("loss coefficients cannot be negative")
+        if (
+            not math.isfinite(self.auxiliary_coefficient)
+            or self.auxiliary_coefficient < 0
+        ):
+            raise ValueError("auxiliary_coefficient must be finite and non-negative")
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError("max_steps must be positive when provided")
         if not isinstance(self.random_start, bool):
@@ -451,6 +461,19 @@ def train_actor_critic(
         raise ValueError("model action dimensions do not match the environment")
     if recurrent_config.feature_vector_schema != FEATURE_VECTOR_SCHEMA_VERSION:
         raise ValueError("model feature-vector schema does not match the trainer")
+    auxiliary_enabled = config.auxiliary_coefficient > 0
+    auxiliary_target_contract = (
+        recurrent_config.auxiliary_target_count == len(AUXILIARY_TARGET_FEATURES)
+    )
+    if recurrent_config.auxiliary_target_count not in {
+        0,
+        len(AUXILIARY_TARGET_FEATURES),
+    }:
+        raise ValueError("model auxiliary target layout does not match the trainer")
+    if auxiliary_enabled and not auxiliary_target_contract:
+        raise ValueError(
+            "enabled auxiliary loss requires one model output per auxiliary target"
+        )
     for pool_name, environments in (
         ("training", training_envs),
         ("selection", evaluation_envs),
@@ -522,6 +545,8 @@ def train_actor_critic(
         rewards = []
         old_log_probabilities = []
         old_values = []
+        auxiliary_targets = []
+        auxiliary_masks = []
         chunk_hidden_states = []
         hidden_state = None
         invalid_actions = executions = steps = 0
@@ -552,6 +577,10 @@ def train_actor_critic(
             observation, reward, terminated, truncated, info = episode_env.step(
                 action_array
             )
+            if auxiliary_target_contract:
+                target, target_mask = auxiliary_market_targets(observation)
+                auxiliary_targets.append(torch.from_numpy(target))
+                auxiliary_masks.append(torch.from_numpy(target_mask))
             sequences.append(sequence.squeeze(0).squeeze(0))
             action_masks.append(action_mask.squeeze(0))
             actions.append(action.squeeze(0))
@@ -584,6 +613,12 @@ def train_actor_critic(
         old_log_probs_tensor = torch.stack(old_log_probabilities)
         old_values_tensor = torch.stack(old_values)
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
+        auxiliary_targets_tensor = (
+            torch.stack(auxiliary_targets) if auxiliary_target_contract else None
+        )
+        auxiliary_masks_tensor = (
+            torch.stack(auxiliary_masks) if auxiliary_target_contract else None
+        )
         if config.algorithm == "ppo":
             advantages, returns_tensor = _generalized_advantages(
                 rewards_tensor,
@@ -674,11 +709,25 @@ def train_actor_critic(
                     torch,
                     device,
                 )
-                sequence_logits, sequence_values, _ = model.forward_sequence(
-                    batch_sequences,
-                    batch_masks,
-                    hidden_state=initial_hidden,
-                )
+                if auxiliary_enabled:
+                    (
+                        sequence_logits,
+                        sequence_values,
+                        sequence_auxiliary,
+                        _,
+                    ) = model.forward_sequence_with_auxiliary(
+                        batch_sequences,
+                        batch_masks,
+                        hidden_state=initial_hidden,
+                    )
+                    predicted_auxiliary = sequence_auxiliary[valid_steps]
+                else:
+                    sequence_logits, sequence_values, _ = model.forward_sequence(
+                        batch_sequences,
+                        batch_masks,
+                        hidden_state=initial_hidden,
+                    )
+                    predicted_auxiliary = None
                 logits = sequence_logits[valid_steps]
                 predicted_values = sequence_values[valid_steps]
                 distribution = torch.distributions.Categorical(logits=logits)
@@ -714,10 +763,32 @@ def train_actor_critic(
                         predicted_values - returns_tensor[batch]
                     ).square().mean()
                 entropy = distribution.entropy().mean()
+                auxiliary_loss = predicted_values.sum() * 0.0
+                auxiliary_mae = predicted_values.sum() * 0.0
+                if auxiliary_enabled:
+                    target_values = auxiliary_targets_tensor[batch].to(device)
+                    target_mask = auxiliary_masks_tensor[batch].to(device)
+                    available_count = target_mask.sum()
+                    if float(available_count) > 0:
+                        absolute_error = (
+                            predicted_auxiliary - target_values
+                        ).abs()
+                        element_loss = torch.nn.functional.smooth_l1_loss(
+                            predicted_auxiliary,
+                            target_values,
+                            reduction="none",
+                        )
+                        auxiliary_loss = (
+                            element_loss * target_mask
+                        ).sum() / available_count
+                        auxiliary_mae = (
+                            absolute_error * target_mask
+                        ).sum() / available_count
                 loss = (
                     policy_loss
                     + config.value_coefficient * value_loss
                     - config.entropy_coefficient * entropy
+                    + config.auxiliary_coefficient * auxiliary_loss
                 )
 
                 optimizer.zero_grad(set_to_none=True)
@@ -744,6 +815,8 @@ def train_actor_critic(
                             if config.algorithm == "ppo"
                             else 0.0
                         ),
+                        float(auxiliary_loss.detach()),
+                        float(auxiliary_mae.detach()),
                     )
                 )
                 if config.algorithm == "ppo" and approx_kl > config.target_kl:
@@ -877,6 +950,23 @@ def train_actor_critic(
                 "gradient_norm": float(means[4]),
                 "approx_kl": float(means[5]),
                 "clip_fraction": float(means[6]),
+                "auxiliary_loss": float(means[7]),
+                "auxiliary_weighted_loss": float(
+                    config.auxiliary_coefficient * means[7]
+                ),
+                "auxiliary_mae": float(means[8]),
+                "auxiliary_target_coverage": (
+                    {
+                        name: float(coverage)
+                        for name, coverage in zip(
+                            AUXILIARY_TARGET_FEATURES,
+                            auxiliary_masks_tensor.mean(dim=0).tolist(),
+                            strict=True,
+                        )
+                    }
+                    if auxiliary_target_contract
+                    else {name: 0.0 for name in AUXILIARY_TARGET_FEATURES}
+                ),
                 "explained_variance": explained_variance,
                 "algorithm": config.algorithm,
                 "optimizer_updates": len(update_metrics),
@@ -945,6 +1035,13 @@ def checkpoint_manifest(
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
             "padding": "right_only_ignored",
+        },
+        "auxiliary_prediction": {
+            "enabled": training_config.auxiliary_coefficient > 0,
+            "coefficient": training_config.auxiliary_coefficient,
+            "targets": list(AUXILIARY_TARGET_FEATURES),
+            "availability": "point_in_time_coverage_mask",
+            "inference_path": "excluded_from_policy_inference",
         },
         "feature_vector_schema": FEATURE_VECTOR_SCHEMA_VERSION,
         "selection": {
@@ -1080,6 +1177,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--clip-ratio", type=float, default=0.2)
     parser.add_argument("--target-kl", type=float, default=0.03)
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
+    parser.add_argument(
+        "--auxiliary-coefficient",
+        type=float,
+        default=0.0,
+        help=(
+            "weight for train-only next-market prediction loss; zero disables"
+        ),
+    )
     parser.add_argument("--evaluation-interval", type=int, default=5)
     parser.add_argument(
         "--selection-patience",
@@ -1158,6 +1263,7 @@ def main() -> None:
             CONTRACT_FEATURES.index(name)
             for name in ("impliedVolatility", "delta", "logMoneyness", "dteDays")
         ),
+        auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
     )
     training_config = TrainingConfig(
         episodes=args.episodes,
@@ -1171,6 +1277,7 @@ def main() -> None:
         clip_ratio=args.clip_ratio,
         target_kl=args.target_kl,
         entropy_coefficient=args.entropy_coefficient,
+        auxiliary_coefficient=args.auxiliary_coefficient,
         evaluation_interval=args.evaluation_interval,
         selection_patience=(
             None if args.selection_patience == 0 else args.selection_patience

@@ -58,6 +58,22 @@ FEATURE_ABLATION_GROUPS = {
 }
 
 
+AUXILIARY_TARGET_FEATURES = (
+    "underlyingReturn",
+    "frontAtmIvChange",
+    "front25DeltaRiskReversalChange",
+    "front25DeltaButterflyChange",
+    "atmTermStructureSlopeChange",
+)
+
+_AUXILIARY_TARGET_COVERAGE = {
+    "frontAtmIvChange": ("frontAtmIvChangeCoverage", 0.0),
+    "front25DeltaRiskReversalChange": ("frontWingChangeCoverage", 1.0),
+    "front25DeltaButterflyChange": ("frontWingChangeCoverage", 1.0),
+    "atmTermStructureSlopeChange": ("atmTermSlopeChangeCoverage", 1.0),
+}
+
+
 def feature_ablation_indices(
     groups: tuple[str, ...],
     slot_count: int,
@@ -198,6 +214,42 @@ def observation_vector(observation: Observation) -> np.ndarray:
             observation.valid_mask.astype(np.float64).ravel(),
         )
     ).astype(np.float32)
+
+
+def auxiliary_market_targets(
+    observation: Observation,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return bounded next-market targets and explicit availability masks.
+
+    The caller supplies the observation *after* a training transition. Its
+    values supervise the recurrent representation that encoded the preceding
+    observation; they are never appended to the policy input at that step.
+    """
+    market, _, _ = _dimensionless_components(observation)
+    if len(market) != len(MARKET_FEATURES):
+        raise ValueError("observation market layout does not match auxiliary targets")
+    raw_market = np.asarray(observation.market, dtype=np.float64)
+    indices = {name: index for index, name in enumerate(MARKET_FEATURES)}
+    values = np.asarray(
+        [market[indices[name]] for name in AUXILIARY_TARGET_FEATURES],
+        dtype=np.float32,
+    )
+    available = np.ones(len(AUXILIARY_TARGET_FEATURES), dtype=np.float32)
+    return_index = indices["underlyingReturn"]
+    available[0] = float(
+        np.isfinite(raw_market[0])
+        and raw_market[0] > 0
+        and np.isfinite(raw_market[return_index])
+    )
+    for target_index, name in enumerate(AUXILIARY_TARGET_FEATURES[1:], start=1):
+        coverage_name, threshold = _AUXILIARY_TARGET_COVERAGE[name]
+        coverage = raw_market[indices[coverage_name]]
+        meets_threshold = coverage > 0 if threshold == 0 else coverage >= threshold
+        available[target_index] = float(
+            np.isfinite(coverage) and meets_threshold
+        )
+    values = np.nan_to_num(values, nan=0.0, posinf=10.0, neginf=-10.0)
+    return values, available
 
 
 @dataclass(frozen=True)

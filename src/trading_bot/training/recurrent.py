@@ -33,6 +33,7 @@ class RecurrentConfig:
     graph_relation_indices: tuple[int, ...] = ()
     initial_hold_bias: float = 5.0
     masked_input_indices: tuple[int, ...] = ()
+    auxiliary_target_count: int = 0
 
     def __post_init__(self) -> None:
         if min(self.input_size, self.slot_count, self.action_count, self.hidden_size) < 1:
@@ -54,6 +55,8 @@ class RecurrentConfig:
             for index in self.masked_input_indices
         ):
             raise ValueError("masked_input_indices are outside the input layout")
+        if self.auxiliary_target_count < 0:
+            raise ValueError("auxiliary_target_count cannot be negative")
 
 
 def build_recurrent_actor_critic(config: RecurrentConfig):
@@ -148,6 +151,11 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                     config.action_count,
                 )[:, 0] = config.initial_hold_bias
             self.value = nn.Linear(output_size, 1)
+            self.auxiliary = (
+                nn.Linear(output_size, config.auxiliary_target_count)
+                if config.auxiliary_target_count
+                else None
+            )
 
         def _graph_encode(self, sequence):
             batch, steps, _ = sequence.shape
@@ -245,9 +253,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             safe_mask[..., 0] |= empty_slots
             return safe_mask
 
-        def forward_sequence(self, sequence, action_mask=None, hidden_state=None):
-            """Return actor and critic outputs for every causal time step."""
-            encoded, hidden = self._encode_sequence(sequence, hidden_state)
+        def _actor_critic_outputs(self, encoded, sequence, action_mask):
             logits = self.policy(encoded).view(
                 sequence.shape[0],
                 sequence.shape[1],
@@ -263,7 +269,39 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                     raise ValueError("action_mask does not match recurrent outputs")
                 safe_mask = self._safe_action_mask(action_mask)
                 logits = logits.masked_fill(~safe_mask, float("-inf"))
-            return logits, self.value(encoded).squeeze(-1), hidden
+            return logits, self.value(encoded).squeeze(-1)
+
+        def forward_sequence(self, sequence, action_mask=None, hidden_state=None):
+            """Return actor and critic outputs for every causal time step."""
+            encoded, hidden = self._encode_sequence(sequence, hidden_state)
+            logits, values = self._actor_critic_outputs(
+                encoded,
+                sequence,
+                action_mask,
+            )
+            return logits, values, hidden
+
+        def forward_sequence_with_auxiliary(
+            self,
+            sequence,
+            action_mask=None,
+            hidden_state=None,
+        ):
+            """Return PPO outputs plus train-only next-market predictions."""
+            if self.auxiliary is None:
+                raise RuntimeError("model has no auxiliary prediction head")
+            encoded, hidden = self._encode_sequence(sequence, hidden_state)
+            logits, values = self._actor_critic_outputs(
+                encoded,
+                sequence,
+                action_mask,
+            )
+            return (
+                logits,
+                values,
+                self.auxiliary(encoded),
+                hidden,
+            )
 
         def forward(
             self,

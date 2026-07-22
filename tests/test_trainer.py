@@ -19,7 +19,7 @@ from trading_bot.training.recurrent import (
     RecurrentConfig,
     build_recurrent_actor_critic,
 )
-from trading_bot.training.sequence import observation_vector
+from trading_bot.training.sequence import AUXILIARY_TARGET_FEATURES, observation_vector
 from trading_bot.training.trainer import (
     CHECKPOINT_SCHEMA_VERSION,
     TrainingConfig,
@@ -114,12 +114,20 @@ class TrainerTests(TestCase):
             portfolio_feature_count=observation.portfolio.size,
             graph_hidden_size=8,
             masked_input_indices=(0,),
+            auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
         )
         training = TrainingConfig(
             episodes=2,
             sequence_length=2,
             evaluation_interval=1,
             seed=11,
+            auxiliary_coefficient=0.05,
+        )
+
+        torch.manual_seed(training.seed)
+        initial_auxiliary_weight = (
+            build_recurrent_actor_critic(recurrent)
+            .auxiliary.weight.detach().clone()
         )
 
         model, metrics = train_actor_critic(env, recurrent, training)
@@ -129,6 +137,12 @@ class TrainerTests(TestCase):
         self.assertTrue(all(item["ppo_updates"] >= 1 for item in metrics))
         self.assertTrue(all(0 <= item["clip_fraction"] <= 1 for item in metrics))
         self.assertTrue(all(math.isfinite(item["approx_kl"]) for item in metrics))
+        self.assertTrue(all(math.isfinite(item["auxiliary_loss"]) for item in metrics))
+        self.assertTrue(all(item["auxiliary_loss"] >= 0 for item in metrics))
+        self.assertTrue(all(
+            item["auxiliary_target_coverage"]["underlyingReturn"] == 1
+            for item in metrics
+        ))
         self.assertTrue(all(math.isfinite(item["evaluation_total_reward"]) for item in metrics))
         self.assertTrue(all(math.isfinite(item["evaluation_selection_score"]) for item in metrics))
         self.assertTrue(all(0 <= item["requested_action_rate"] <= 1 for item in metrics))
@@ -141,6 +155,10 @@ class TrainerTests(TestCase):
         ))
         self.assertEqual(sum(item["selected_checkpoint"] for item in metrics), 1)
         self.assertTrue(all(torch.isfinite(parameter).all() for parameter in model.parameters()))
+        self.assertFalse(torch.equal(
+            initial_auxiliary_weight,
+            model.auxiliary.weight.detach(),
+        ))
         with TemporaryDirectory() as directory:
             path = Path(directory) / "model.pt"
             save_checkpoint(path, model, env, recurrent, training, metrics)
@@ -164,6 +182,13 @@ class TrainerTests(TestCase):
                 "padding": "right_only_ignored",
             },
         )
+        self.assertEqual(sidecar["auxiliary_prediction"], {
+            "enabled": True,
+            "coefficient": 0.05,
+            "targets": list(AUXILIARY_TARGET_FEATURES),
+            "availability": "point_in_time_coverage_mask",
+            "inference_path": "excluded_from_policy_inference",
+        })
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
         self.assertEqual(sidecar["selection"]["metric"], "evaluation_selection_score")
         self.assertEqual(
@@ -378,6 +403,8 @@ class TrainerTests(TestCase):
             TrainingConfig(selection_patience=0)
         with self.assertRaisesRegex(ValueError, "selection_min_delta"):
             TrainingConfig(selection_min_delta=float("nan"))
+        with self.assertRaisesRegex(ValueError, "auxiliary_coefficient"):
+            TrainingConfig(auxiliary_coefficient=-0.1)
         with self.assertRaisesRegex(ValueError, "risk penalties"):
             TrainingConfig(selection_drawdown_penalty=-1)
         with self.assertRaisesRegex(ValueError, "risk penalties"):
@@ -524,6 +551,39 @@ class TrainerTests(TestCase):
             train_actor_critic(
                 envs,
                 recurrent,
+                TrainingConfig(episodes=1),
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_auxiliary_training_rejects_missing_prediction_head(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "auxiliary loss"):
+            train_actor_critic(
+                env,
+                recurrent,
+                TrainingConfig(episodes=1, auxiliary_coefficient=0.05),
+            )
+        incompatible = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+            auxiliary_target_count=1,
+        )
+        with self.assertRaisesRegex(ValueError, "auxiliary target layout"):
+            train_actor_critic(
+                env,
+                incompatible,
                 TrainingConfig(episodes=1),
             )
 

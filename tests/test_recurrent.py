@@ -24,6 +24,41 @@ class RecurrentTests(TestCase):
             RecurrentConfig(5, 2, 3, masked_input_indices=(5,))
         with self.assertRaisesRegex(ValueError, "masked_input_indices"):
             RecurrentConfig(5, 2, 3, masked_input_indices=(1, 1))
+        with self.assertRaisesRegex(ValueError, "auxiliary_target_count"):
+            RecurrentConfig(5, 2, 3, auxiliary_target_count=-1)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_auxiliary_head_is_train_only_and_preserves_policy_outputs(self):
+        torch.manual_seed(17)
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            2,
+            3,
+            hidden_size=8,
+            auxiliary_target_count=5,
+        ))
+        model.eval()
+        sequence = torch.randn(2, 4, 5)
+        mask = torch.ones(2, 4, 2, 3, dtype=torch.bool)
+        auxiliary_calls = []
+        handle = model.auxiliary.register_forward_hook(
+            lambda *args: auxiliary_calls.append(1)
+        )
+
+        inference_logits, inference_values, _ = model.forward_sequence(
+            sequence,
+            mask,
+        )
+        self.assertEqual(auxiliary_calls, [])
+        train_logits, train_values, predictions, _ = (
+            model.forward_sequence_with_auxiliary(sequence, mask)
+        )
+        handle.remove()
+
+        self.assertEqual(auxiliary_calls, [1])
+        self.assertEqual(tuple(predictions.shape), (2, 4, 5))
+        torch.testing.assert_close(inference_logits, train_logits)
+        torch.testing.assert_close(inference_values, train_values)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_checkpointed_feature_mask_makes_disabled_inputs_invariant(self):

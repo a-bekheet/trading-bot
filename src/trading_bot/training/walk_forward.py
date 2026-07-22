@@ -31,6 +31,7 @@ from trading_bot.training.recurrent import (
     build_recurrent_actor_critic,
 )
 from trading_bot.training.sequence import (
+    AUXILIARY_TARGET_FEATURES,
     FEATURE_ABLATION_GROUPS,
     feature_ablation_indices,
     observation_vector,
@@ -45,7 +46,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v18"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v19"
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ class ModelSpec:
     disabled_feature_groups: tuple[str, ...] = ()
     algorithm: str = "ppo"
     parameter_budget: int | None = None
+    auxiliary_coefficient: float | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid"}:
@@ -141,6 +143,13 @@ class ModelSpec:
             raise ValueError("model algorithm must be ppo or reinforce")
         if self.parameter_budget is not None and self.parameter_budget < 1:
             raise ValueError("parameter_budget must be positive when provided")
+        if self.auxiliary_coefficient is not None and (
+            not math.isfinite(self.auxiliary_coefficient)
+            or self.auxiliary_coefficient < 0
+        ):
+            raise ValueError(
+                "model auxiliary_coefficient must be finite and non-negative"
+            )
         feature_ablation_indices(self.disabled_feature_groups, 1)
 
     @property
@@ -173,6 +182,7 @@ class ModelSpec:
             graph_layers=self.graph_layers,
             graph_neighbors=self.graph_neighbors,
             initial_hold_bias=self.initial_hold_bias,
+            auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
             masked_input_indices=feature_ablation_indices(
                 self.disabled_feature_groups,
                 env.slot_count,
@@ -310,6 +320,11 @@ def run_walk_forward_training(
             candidate_training = replace(
                 fold_training,
                 algorithm=candidate.algorithm,
+                auxiliary_coefficient=(
+                    fold_training.auxiliary_coefficient
+                    if candidate.auxiliary_coefficient is None
+                    else candidate.auxiliary_coefficient
+                ),
             )
             model, metrics = train_actor_critic(
                 train_env,
@@ -385,6 +400,10 @@ def run_walk_forward_training(
                     candidate,
                     disabled_feature_groups=(),
                 ).identifier,
+                "auxiliary_reference_model_id": replace(
+                    candidate,
+                    auxiliary_coefficient=None,
+                ).identifier,
             })
 
         eligible_runs = [
@@ -415,6 +434,9 @@ def run_walk_forward_training(
                 "model_id": run["model_id"],
                 "model": asdict(run["model_spec"]),
                 "resolved_model": asdict(run["recurrent_config"]),
+                "effective_auxiliary_coefficient": run[
+                    "training_config"
+                ].auxiliary_coefficient,
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": run["latency_eligible"],
@@ -436,6 +458,8 @@ def run_walk_forward_training(
                 "optimizer_updates": run["optimizer_updates"],
                 "validation_reward_lift_vs_full": None,
                 "validation_score_lift_vs_full": None,
+                "validation_reward_lift_vs_auxiliary_enabled": None,
+                "validation_score_lift_vs_auxiliary_enabled": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -471,6 +495,20 @@ def run_walk_forward_training(
                 result["validation_reward_lift_vs_full"] = (
                     run["validation_total_reward"]
                     - validation_rewards[run["full_model_id"]]
+                )
+            auxiliary_reference = validation_scores.get(
+                run["auxiliary_reference_model_id"]
+            )
+            if (
+                run["model_spec"].auxiliary_coefficient == 0.0
+                and auxiliary_reference is not None
+            ):
+                result["validation_score_lift_vs_auxiliary_enabled"] = (
+                    run["validation_selection_score"] - auxiliary_reference
+                )
+                result["validation_reward_lift_vs_auxiliary_enabled"] = (
+                    run["validation_total_reward"]
+                    - validation_rewards[run["auxiliary_reference_model_id"]]
                 )
         model = winning_run["model"]
         metrics = winning_run["metrics"]
@@ -769,6 +807,21 @@ def _parser() -> argparse.ArgumentParser:
         default=0.0,
     )
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
+    parser.add_argument(
+        "--auxiliary-coefficient",
+        type=float,
+        default=0.0,
+        help=(
+            "weight for train-only next-market prediction loss; zero disables"
+        ),
+    )
+    parser.add_argument(
+        "--auxiliary-ablation",
+        action="store_true",
+        help=(
+            "add a matched validation candidate with auxiliary loss disabled"
+        ),
+    )
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument("--max-quantity", type=int, default=3)
     parser.add_argument("--underlying-lot-size", type=int, default=25)
@@ -808,6 +861,15 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
     for group in args.ablation or ():
         specs.extend(
             replace(spec, disabled_feature_groups=(group,))
+            for spec in full_specs
+        )
+    if args.auxiliary_ablation:
+        if args.auxiliary_coefficient <= 0:
+            raise ValueError(
+                "--auxiliary-ablation requires --auxiliary-coefficient > 0"
+            )
+        specs.extend(
+            replace(spec, auxiliary_coefficient=0.0)
             for spec in full_specs
         )
     return _normalize_model_specs(specs)
@@ -867,6 +929,7 @@ def main() -> None:
                     args.selection_worst_ticker_weight
                 ),
                 entropy_coefficient=args.entropy_coefficient,
+                auxiliary_coefficient=args.auxiliary_coefficient,
                 algorithm=args.algorithm,
                 seed=args.seed,
             ),

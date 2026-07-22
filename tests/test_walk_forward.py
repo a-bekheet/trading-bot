@@ -56,6 +56,25 @@ def walk_forward_dataset() -> SnapshotDataset:
 
 
 class WalkForwardTrainingTests(TestCase):
+    def test_cli_builds_matched_auxiliary_loss_ablation(self):
+        args = _parser().parse_args([
+            "--auxiliary-coefficient",
+            "0.05",
+            "--auxiliary-ablation",
+        ])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(len(specs), 2)
+        self.assertIsNone(specs[0].auxiliary_coefficient)
+        self.assertEqual(specs[1].auxiliary_coefficient, 0.0)
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--auxiliary-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "auxiliary_coefficient"):
+            ModelSpec(auxiliary_coefficient=float("nan"))
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_runner_selects_on_validation_then_reports_held_out_test(self):
         with TemporaryDirectory() as directory:
@@ -332,6 +351,60 @@ class WalkForwardTrainingTests(TestCase):
             full["active_input_count"],
         )
         self.assertTrue(all("test" not in result for result in candidate_results))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_auxiliary_ablation_reports_validation_only_lift(self):
+        candidates = (
+            ModelSpec(kind="gru", encoder="flat", hidden_size=4),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                auxiliary_coefficient=0.0,
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            summary = run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    min_train_size=3,
+                    validation_size=2,
+                    test_size=2,
+                    test_seeds=(51,),
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=2,
+                ),
+                candidates,
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                    evaluation_interval=1,
+                    auxiliary_coefficient=0.05,
+                    seed=29,
+                ),
+                Path(directory),
+                env_kwargs={"slot_count": 1, "starting_cash": 1_000},
+            )
+
+        results = summary["folds"][0]["model_selection"]["candidates"]
+        enabled, disabled = results
+        self.assertEqual(enabled["effective_auxiliary_coefficient"], 0.05)
+        self.assertEqual(disabled["effective_auxiliary_coefficient"], 0.0)
+        self.assertIsNone(
+            enabled["validation_score_lift_vs_auxiliary_enabled"]
+        )
+        self.assertAlmostEqual(
+            disabled["validation_score_lift_vs_auxiliary_enabled"],
+            disabled["selection"]["validation_selection_score"]
+            - enabled["selection"]["validation_selection_score"],
+        )
+        self.assertAlmostEqual(
+            disabled["validation_reward_lift_vs_auxiliary_enabled"],
+            disabled["selection"]["validation_total_reward"]
+            - enabled["selection"]["validation_total_reward"],
+        )
 
     def test_cli_expands_each_architecture_with_requested_ablation(self):
         args = _parser().parse_args([

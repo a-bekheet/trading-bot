@@ -217,6 +217,33 @@ on-policy optimizer pass through contiguous recurrent chunks. PPO remains the
 default and retains clipped multi-epoch updates. Metrics distinguish PPO,
 REINFORCE, and total optimizer updates so their compute is auditable.
 
+Sparse portfolio reward does not have to be the recurrent encoder's only
+learning signal. Enable a train-only next-market prediction loss:
+
+```bash
+train-demo \
+  --symbol AAPL \
+  --kind hybrid \
+  --auxiliary-coefficient 0.05
+```
+
+The shared GRU/LSTM representation predicts the next observation's bounded
+underlying return, front-ATM-IV change, 25-delta risk-reversal/butterfly
+changes, and ATM term-slope change. Each surface target uses its point-in-time
+coverage mask, so an unavailable wing or term point contributes no loss. The
+targets come only from the next transition inside the supplied training
+partition; neither validation nor test values are used. The small linear head
+is excluded from action inference and therefore adds parameters and training
+work but no policy-path matrix multiply. Episode metrics retain Smooth-L1 loss,
+masked MAE, weighted loss, and per-target coverage. The coefficient defaults to
+zero because this is a representation-learning hypothesis, not established
+alpha.
+In a local 500-iteration CPU smoke with a two-slot, hidden-size-eight hybrid,
+adding the five-output head increased parameters from 5,980 to 6,065 while the
+policy-only streaming median was 130.71 microseconds without the head and
+128.96 microseconds with it (measurement noise, not a speedup). Treat those
+numbers as machine-specific confirmation that inference skips the head.
+
 Train one ticker-invariant shared policy across the collected top-50 universe:
 
 ```bash
@@ -471,6 +498,14 @@ score and raw-reward lift versus its full-feature counterpart plus active and
 masked input counts.
 Only the validation winner reaches test, preventing feature research from
 becoming repeated holdout peeking.
+
+When auxiliary training is enabled, add `--auxiliary-ablation` to create an
+otherwise matched candidate with coefficient zero. Both candidates start from
+the same seeded initialization and train on the same fold; artifacts report the
+disabled candidate's validation reward and selection-score lift relative to the
+enabled version. This comparison is also available in the universe runner.
+Only the validation winner reaches test, so the auxiliary task cannot be kept
+because it happened to look good on the held-out range.
 
 Each fold trains only on its training range and touches the test range only
 after both architecture and checkpoint selection. It writes a safe checkpoint

@@ -245,6 +245,17 @@ must use only that validation environment and be labeled
 `validation_research_demo`. Checkpoints must load with PyTorch
 `weights_only=True`; never weaken this to unrestricted pickle loading.
 
+Auxiliary market prediction is optional representation supervision, not reward
+shaping. At step t the recurrent state may predict dimensionless market changes
+observed at t+1 only when both observations belong to the training partition.
+Use explicit point-in-time coverage masks for sparse IV-surface targets; never
+teach a missing wing or expiration as zero. Keep the prediction head out of
+`forward`, `sample_action`, streaming evaluation, and latency benchmarks so it
+cannot alter PPO likelihoods or deployment latency. Persist its targets,
+coefficient, masked loss/MAE, and coverage in checkpoints. Any claimed benefit
+requires the matched `--auxiliary-ablation` candidate to win on validation
+before the single selected policy reaches test.
+
 Shared-policy training accepts unique-symbol environment pools with identical
 feature and action layouts. Schedule seeded shuffled ticker cycles and require
 at least one episode per ticker. Reset recurrent state, portfolio state, and

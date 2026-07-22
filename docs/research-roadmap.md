@@ -36,6 +36,7 @@ Every candidate must eventually pass:
 | [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Use a sparse trainable hold prior now. Benchmark an autoregressive multi-leg option policy later; never post-process sampled rows in a way that breaks PPO likelihoods. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
+| [When does Self-Prediction help? Understanding Auxiliary Tasks in Reinforcement Learning (2024)](https://arxiv.org/abs/2406.17718) | Predictive auxiliary objectives can improve RL representations, but their value depends on observation structure and distractions rather than being universal. | A masked next-market Smooth-L1 head now supervises the shared recurrent encoder only on training transitions. Keep it only through the matched validation-only auxiliary ablation. |
 
 This is not an exclusive reading list. Profiling, microstructure knowledge,
 negative experimental results, and newly published work should change the
@@ -173,6 +174,9 @@ a simple underpriced-volatility rule rather than a complete volatility book.
   of substituting plausible-looking market values.
 - Ablate the implemented executable ATM term slope/curvature and prior-snapshot
   ATM, wing, and term-slope changes before retaining them in a paper strategy.
+- Compare the implemented next-market recurrent auxiliary loss against its
+  matched zero-coefficient candidate; never infer benefit from training loss
+  reduction alone.
 - Use the implemented walk-forward removal candidates to measure named feature
   groups on validation without exposing every ablation to test; add permutation
   diagnostics only as post-selection sensitivity evidence.

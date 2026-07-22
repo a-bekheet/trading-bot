@@ -76,6 +76,12 @@ class UniverseWalkForwardTests(TestCase):
         candidates = (
             ModelSpec("gru", "flat", hidden_size=4),
             ModelSpec("lstm", "flat", hidden_size=4),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
+                auxiliary_coefficient=0.0,
+            ),
         )
         with TemporaryDirectory() as directory:
             output_dir = Path(directory)
@@ -101,6 +107,7 @@ class UniverseWalkForwardTests(TestCase):
                     selection_patience=None,
                     selection_cross_ticker_std_penalty=0.25,
                     selection_worst_ticker_weight=0.25,
+                    auxiliary_coefficient=0.05,
                     seed=17,
                 ),
                 output_dir,
@@ -150,6 +157,20 @@ class UniverseWalkForwardTests(TestCase):
                 "heldout" not in candidate
                 for candidate in fold["model_selection"]["candidates"]
             )
+        )
+        auxiliary_ablation = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["model"]["auxiliary_coefficient"] == 0.0
+        )
+        self.assertEqual(
+            auxiliary_ablation["effective_auxiliary_coefficient"],
+            0.0,
+        )
+        self.assertIsNotNone(
+            auxiliary_ablation[
+                "validation_score_lift_vs_auxiliary_enabled"
+            ]
         )
         self.assertEqual(len(manifest["training_environments"]), 2)
         self.assertEqual(

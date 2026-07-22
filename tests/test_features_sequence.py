@@ -14,7 +14,9 @@ from trading_bot.training.features import (
 from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES, OptionsEnv
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION, Observation
 from trading_bot.training.sequence import (
+    AUXILIARY_TARGET_FEATURES,
     FEATURE_ABLATION_GROUPS,
+    auxiliary_market_targets,
     build_windows,
     feature_ablation_indices,
     observation_vector,
@@ -69,6 +71,38 @@ def surface_snapshot(
 
 
 class FeatureSequenceTests(TestCase):
+    def test_auxiliary_market_targets_use_next_state_scaling_and_coverage(self):
+        market = np.zeros(len(MARKET_FEATURES), dtype=float)
+        for name, value in {
+            "underlyingPrice": 100,
+            "underlyingReturn": 0.01,
+            "frontAtmIvChange": 0.03,
+            "frontAtmIvChangeCoverage": 0.5,
+            "front25DeltaRiskReversalChange": 0.02,
+            "front25DeltaButterflyChange": -0.01,
+            "frontWingChangeCoverage": 0.5,
+            "atmTermStructureSlopeChange": -0.1,
+            "atmTermSlopeChangeCoverage": 1.0,
+        }.items():
+            market[MARKET_FEATURES.index(name)] = value
+        observation = Observation(
+            "next",
+            market,
+            np.zeros((1, len(CONTRACT_FEATURES))),
+            np.zeros(8),
+            np.ones(1, dtype=bool),
+            np.ones((2, 3), dtype=bool),
+            ("C1",),
+        )
+
+        values, available = auxiliary_market_targets(observation)
+
+        self.assertEqual(len(values), len(AUXILIARY_TARGET_FEATURES))
+        np.testing.assert_allclose(available, (1, 1, 0, 0, 1))
+        self.assertAlmostEqual(values[0], np.log1p(1.0))
+        self.assertAlmostEqual(values[1], np.log1p(0.03))
+        self.assertAlmostEqual(values[-1], -np.log1p(0.1))
+
     def test_feature_ablation_groups_map_to_stable_non_overlapping_inputs(self):
         wing_indices = feature_ablation_indices(("surface_wings",), 2)
         quality_indices = feature_ablation_indices(("data_quality",), 2)
