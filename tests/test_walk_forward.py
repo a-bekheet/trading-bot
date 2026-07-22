@@ -14,7 +14,10 @@ except ImportError:
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
-from trading_bot.training.recurrent import build_recurrent_actor_critic
+from trading_bot.training.recurrent import (
+    RecurrentConfig,
+    build_recurrent_actor_critic,
+)
 from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
     feature_ablation_indices,
@@ -28,6 +31,7 @@ from trading_bot.training.walk_forward import (
     ModelSpec,
     WALK_FORWARD_SCHEMA_VERSION,
     WalkForwardConfig,
+    _architecture_latency,
     _model_specs_from_args,
     _parser,
     _select_seed_robust_group,
@@ -37,6 +41,39 @@ from trading_bot.training.walk_forward import (
     resolve_recurrent_config,
     run_walk_forward_training,
 )
+
+
+class ArchitectureLatencyTests(TestCase):
+    def test_reuses_one_measurement_for_identical_seed_replicates(self):
+        config = RecurrentConfig(
+            input_size=4,
+            slot_count=1,
+            action_count=2,
+        )
+        calls = []
+
+        def measure():
+            calls.append(True)
+            return {"median_microseconds": 42.0}
+
+        cache = {}
+        first = _architecture_latency(cache, config, 2, 7, measure)
+        same_seed = _architecture_latency(cache, config, 2, 7, measure)
+        second = _architecture_latency(cache, config, 2, 8, measure)
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(first["measurement_reused"])
+        self.assertTrue(same_seed["measurement_reused"])
+        self.assertTrue(second["measurement_reused"])
+        self.assertFalse(first["reused_for_training_seed"])
+        self.assertFalse(same_seed["reused_for_training_seed"])
+        self.assertTrue(second["reused_for_training_seed"])
+        self.assertEqual(first["measured_training_seed"], 7)
+        self.assertEqual(second["median_microseconds"], 42.0)
+        self.assertEqual(
+            second["measurement_scope"],
+            "recurrent_architecture_per_fold",
+        )
 
 
 def walk_forward_dataset() -> SnapshotDataset:

@@ -447,6 +447,16 @@ competitive IDs, and score sacrificed in every artifact. Single-ticker and
 universe commands default the materiality floor to zero unless explicitly
 declared; never tune it from held-out results.
 
+Keep the locked arena focused on deployable policies. Its fixed 12-candidate
+surface is six flat PPO GRU/LSTM/mixture decoder controls, three single-leg PPO
+surface-GNN agents, and three flat single-leg REINFORCE recurrent controls.
+Named feature-removal experiments belong in the general walk-forward CLI and
+must not double the operational job. Train every locked candidate with all
+three declared seeds. Because weights do not alter the fixed dense actor graph,
+measure latency once per exact recurrent configuration and fold, record the
+measured training seed, and explicitly mark reuse for other seeds. Do not reuse
+measurements across folds, sequence lengths, or recurrent configurations.
+
 The fast default arena must use `latest_fold_only=True`. Build its single split
 backward from the newest available test tail, preserve both embargoes, and assign
 all earlier eligible history to expanding training. Do not recreate this with a

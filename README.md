@@ -81,6 +81,17 @@ also requires both the seed-robust validation score and the exact deployed
 checkpoint's validation score to clear the no-op margin. A strong aggregate can
 therefore no longer activate weak representative weights.
 
+v0.88 separates operational policy selection from feature-diagnostic research.
+The locked arena now compares 12 deployable PPO/REINFORCE agents per ticker and
+keeps every GRU, LSTM, gated-mixture, flat, sparse single-leg, factorized, and
+surface-GNN family. The 12 feature-removal configurations remain available in
+the general walk-forward CLI but no longer double the once-per-session live job.
+The arena therefore falls from 360 to 180 independently trained replicas. Each
+fold also benchmarks an identical recurrent actor graph once and reuses that
+measurement across training seeds, recording the measured seed and each reuse;
+weights do not change the dense execution graph. These changes reduce
+time-to-agent without weakening the three-seed validation or held-out gate.
+
 ## Explore data
 
 ```bash
@@ -127,11 +138,12 @@ By default it independently compares PPO GRU, LSTM, and gated-mixture agents on
 AAPL, NVDA, MSFT, AMZN, and GOOG. Every flat recurrent family gets factorized
 multi-leg and exact sparse single-leg policies. Three additional
 `surface_graph_set` agents pair the sparse decoder with local strike/expiry and
-opposite-side message passing. Six matched sparse agents remove only the causal
-contract-level smile residual across flat/surface-GNN and GRU/LSTM/mixture
-families. Six more remove only cadence-normalized surface velocity. Three
-matched flat single-leg Monte-Carlo REINFORCE challengers add GRU, LSTM, and
-gated-mixture algorithm controls, for 24 candidates per ticker. Repeat
+opposite-side message passing. Three matched flat single-leg Monte-Carlo
+REINFORCE challengers add GRU, LSTM, and gated-mixture algorithm controls, for
+12 deployable candidates per ticker. Feature-removal models remain available
+through `train-walk-forward --ablation`; they are intentionally excluded from
+the operational arena because diagnostics should not double the time to a
+tangible selected policy. Repeat
 `--symbol` to choose another set. The command keeps identical budgets and split
 rules across tickers and uses the latest possible chronological fold, assigning
 all earlier eligible history to training. Each invocation gets a timestamped
@@ -158,7 +170,7 @@ arena-service install
 ```
 
 It checks the same strict five-ticker gate every 60 seconds, trains the full
-315-replica arena once for each New York market session whose data becomes
+180-replica arena once for each New York market session whose data becomes
 ready, and records its heartbeat in `data/_arena_watch_status.json`. It will not
 retrain on every collector cycle. The Agent Results tab displays whether it is
 waiting, running, complete, or already current. `arena-watch --once` performs a

@@ -10,7 +10,7 @@ import statistics
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from trading_bot.market_data.freshness import (
     DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
@@ -62,7 +62,34 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v64"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v65"
+
+
+def _architecture_latency(
+    cache: dict[tuple[RecurrentConfig, int], dict[str, Any]],
+    recurrent_config: RecurrentConfig,
+    sequence_length: int,
+    training_seed: int,
+    measure: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """Measure one fixed actor graph once per fold and reuse it across seeds."""
+    key = (recurrent_config, sequence_length)
+    measured = cache.get(key)
+    reused = measured is not None
+    if measured is None:
+        measured = {
+            **measure(),
+            "measurement_scope": "recurrent_architecture_per_fold",
+            "measured_training_seed": training_seed,
+        }
+        cache[key] = measured
+    return {
+        **measured,
+        "measurement_reused": reused,
+        "reused_for_training_seed": (
+            training_seed != measured["measured_training_seed"]
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -902,6 +929,9 @@ def run_walk_forward_training(
             seed=training_config.seed + fold.fold,
         )
         benchmark_observation, _ = train_env.reset(seed=fold_training.seed)
+        latency_cache: dict[
+            tuple[RecurrentConfig, int], dict[str, Any]
+        ] = {}
         candidate_runs = []
         for candidate in model_specs:
             resolved = resolved_configs.get(candidate.identifier)
@@ -976,15 +1006,21 @@ def run_walk_forward_training(
                         "trained model parameter count does not match its "
                         "resolved configuration"
                     )
-                inference_latency = benchmark_recurrent_inference(
-                    model,
-                    benchmark_observation,
+                inference_latency = _architecture_latency(
+                    latency_cache,
+                    recurrent_config,
                     candidate_training.sequence_length,
-                    warmup_iterations=(
-                        walk_forward_config.latency_warmup_iterations
-                    ),
-                    measured_iterations=(
-                        walk_forward_config.latency_measured_iterations
+                    candidate_training.seed,
+                    lambda: benchmark_recurrent_inference(
+                        model,
+                        benchmark_observation,
+                        candidate_training.sequence_length,
+                        warmup_iterations=(
+                            walk_forward_config.latency_warmup_iterations
+                        ),
+                        measured_iterations=(
+                            walk_forward_config.latency_measured_iterations
+                        ),
                     ),
                 )
                 latency_eligible = (

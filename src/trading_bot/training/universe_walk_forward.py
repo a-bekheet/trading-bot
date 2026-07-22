@@ -47,6 +47,7 @@ from trading_bot.training.walk_forward import (
     WalkForwardConfig,
     _model_specs_from_args,
     _entropy_evidence,
+    _architecture_latency,
     _normalize_model_specs,
     _parser as single_parser,
     _selected_metric,
@@ -60,7 +61,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v47"
+    "research-demo.universe-walk-forward.v48"
 )
 
 
@@ -400,6 +401,7 @@ def run_universe_walk_forward_training(
             training_config,
             seed=training_config.seed + fold.fold,
         )
+        latency_cache = {}
         candidate_runs = []
         for candidate in model_specs:
             resolved = resolved_configs.get(candidate.identifier)
@@ -474,11 +476,17 @@ def run_universe_walk_forward_training(
                         "trained model parameter count does not match its "
                         "resolved configuration"
                     )
-                inference_latency = _universe_latency(
-                    model,
-                    train_envs,
-                    candidate_training,
-                    walk_forward_config,
+                inference_latency = _architecture_latency(
+                    latency_cache,
+                    recurrent_config,
+                    candidate_training.sequence_length,
+                    candidate_training.seed,
+                    lambda: _universe_latency(
+                        model,
+                        train_envs,
+                        candidate_training,
+                        walk_forward_config,
+                    ),
                 )
                 latency_eligible = (
                     walk_forward_config.max_median_inference_latency_us is None

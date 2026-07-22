@@ -470,12 +470,12 @@ integration and gate preservation only, not the feature hypothesis.
 
 The v0.83 automation layer closes the gap between continuous collection and a
 tangible trained-agent result. A lightweight watcher applies the exact locked
-arena readiness contract every minute and launches the isolated 24-candidate,
+arena readiness contract every minute and launches the isolated 12-candidate,
 three-seed tournament only when all five tickers share a ready New York session
 tail. Matched single-leg PPO and Monte-Carlo REINFORCE GRU/LSTM/mixture controls
 test algorithmic lift on validation without changing the deployment graph.
 Completion is keyed by session, ordered ticker set, and run-contract version,
-so later collector cycles do not spend another 360 training replicas.
+so later collector cycles do not spend another 180 training replicas.
 An atomic heartbeat exposes waiting, running, error, complete, and up-to-date
 states in the Agent Lab while retaining the last successful artifact. This
 improves operational reproducibility and time-to-result; it does not weaken the
@@ -539,6 +539,18 @@ action-only path. Deployment activation now also requires the exact
 representative checkpoint, not only its seed-robust architecture aggregate, to
 beat no-op on validation. This prevents a stable group score from masking weak
 weights selected for deployment.
+
+v0.88 removes diagnostic models from the operational critical path. The locked
+arena retains 12 genuine policy candidates: six flat PPO recurrent/decoder
+controls, three PPO recurrent surface-GNNs, and three flat single-leg
+REINFORCE controls. Smile-residual and surface-velocity removals remain exact,
+named walk-forward experiments, but they no longer double a once-per-session
+agent-selection job. This reduces the five-ticker contract from 360 to 180
+training replicas while preserving all recurrent, GNN, decoder, and RL
+algorithm families. Identical actor graphs are also timed once per fold rather
+than once per training seed; every reused record declares its measured seed.
+Neither optimization changes validation scores, held-out access, or the
+activation gate.
 
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and

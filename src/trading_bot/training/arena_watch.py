@@ -24,7 +24,7 @@ from trading_bot.training.dataset import SnapshotDataset
 
 
 ARENA_WATCH_STATUS_SCHEMA_VERSION = "research-demo.arena-watch.status.v2"
-ARENA_WATCH_RUN_CONTRACT_VERSION = "research-demo.arena-watch.run.v2"
+ARENA_WATCH_RUN_CONTRACT_VERSION = "research-demo.arena-watch.run.v3"
 ARENA_WATCH_STATUS_FILENAME = "_arena_watch_status.json"
 ARENA_WATCH_LOCK_FILENAME = ".arena-watch.lock"
 NEW_YORK = ZoneInfo("America/New_York")

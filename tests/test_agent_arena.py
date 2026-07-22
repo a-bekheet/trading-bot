@@ -221,7 +221,7 @@ class AgentArenaTests(TestCase):
         )
         self.assertEqual(result["preflight"][0]["excluded_non_regular_count"], 1)
 
-    def test_fixed_arena_adds_surface_gnns_and_matched_signal_ablations(self):
+    def test_fixed_arena_contains_only_deployable_recurrent_agents(self):
         models = recurrent_arena_models(hidden_size=12)
 
         self.assertEqual(
@@ -267,32 +267,21 @@ class AgentArenaTests(TestCase):
             ],
         )
         self.assertEqual({model.hidden_size for model in models}, {12})
+        self.assertEqual(len(models), 12)
         self.assertEqual(
             {
                 (model.graph_hidden_size, model.graph_layers, model.graph_neighbors)
-                for model in models[6:9] + models[12:15] + models[18:21]
+                for model in models[6:9]
             },
             {(12, 1, 1)},
         )
-        self.assertEqual(
-            {model.disabled_feature_groups for model in models[9:15]},
-            {("contract_smile_residual",)},
-        )
-        self.assertEqual(
-            {model.disabled_feature_groups for model in models[15:21]},
-            {("surface_velocity",)},
-        )
-        self.assertEqual(
-            {
-                (model.graph_hidden_size, model.graph_layers, model.graph_neighbors)
-                for model in models[9:12] + models[15:18]
-            },
-            {(32, 2, 3)},
+        self.assertTrue(
+            all(not model.disabled_feature_groups for model in models)
         )
         self.assertEqual(
             [
                 (model.kind, model.algorithm, model.action_decoder)
-                for model in models[21:]
+                for model in models[9:]
             ],
             [
                 ("gru", "reinforce", "single_leg"),
@@ -300,7 +289,7 @@ class AgentArenaTests(TestCase):
                 ("mixture", "reinforce", "single_leg"),
             ],
         )
-        self.assertEqual(len({model.identifier for model in models}), 24)
+        self.assertEqual(len({model.identifier for model in models}), 12)
 
     def test_runs_unique_symbols_and_records_per_ticker_failures(self):
         summary = {
