@@ -591,12 +591,69 @@ class FeatureSequenceTests(TestCase):
             first[contract_end:contract_end + 8],
             second[contract_end:contract_end + 8],
         )
+        self.assertAlmostEqual(
+            first[2 + CONTRACT_FEATURES.index("positionQuantity")],
+            np.log1p(2),
+        )
+        self.assertAlmostEqual(
+            first[2 + CONTRACT_FEATURES.index("midPriceLogReturn")],
+            np.log1p(2),
+        )
+        self.assertAlmostEqual(
+            first[2 + CONTRACT_FEATURES.index("spreadPctChange")],
+            -np.log1p(0.3),
+        )
+        self.assertAlmostEqual(
+            first[2 + CONTRACT_FEATURES.index("ivChange")],
+            np.log1p(0.4),
+        )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
         self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v11")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
+
+    def test_dimensionless_vector_sanitizes_nonfinite_values_at_boundary(self):
+        market = np.zeros(len(MARKET_FEATURES), dtype=float)
+        market[MARKET_FEATURES.index("underlyingPrice")] = 100
+        market[MARKET_FEATURES.index("riskFreeRate")] = np.inf
+        market[MARKET_FEATURES.index("underlyingReturn")] = np.nan
+        contracts = np.zeros((1, len(CONTRACT_FEATURES)), dtype=float)
+        contracts[0, CONTRACT_FEATURES.index("strike")] = np.inf
+        contracts[0, CONTRACT_FEATURES.index("lastPrice")] = -np.inf
+        contracts[0, CONTRACT_FEATURES.index("impliedVolatility")] = np.nan
+        observation = Observation(
+            "now",
+            market,
+            contracts,
+            np.array([np.inf, 0, 100_000, 0, 0, 0, 0, 0]),
+            np.ones(1, dtype=bool),
+            np.ones((2, 3), dtype=bool),
+            ("C1",),
+        )
+
+        vector = observation_vector(observation)
+        contract_start = len(MARKET_FEATURES)
+
+        self.assertTrue(np.isfinite(vector).all())
+        self.assertEqual(vector[MARKET_FEATURES.index("riskFreeRate")], 10)
+        self.assertEqual(vector[MARKET_FEATURES.index("underlyingReturn")], 0)
+        self.assertEqual(
+            vector[contract_start + CONTRACT_FEATURES.index("strike")],
+            10,
+        )
+        self.assertEqual(
+            vector[contract_start + CONTRACT_FEATURES.index("lastPrice")],
+            -10,
+        )
+        self.assertEqual(
+            vector[
+                contract_start
+                + CONTRACT_FEATURES.index("impliedVolatility")
+            ],
+            0,
+        )
 
     def test_volatility_regime_market_features_have_fixed_transform(self):
         market = np.zeros(len(MARKET_FEATURES), dtype=float)

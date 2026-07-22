@@ -217,6 +217,10 @@ must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
 finite-value tests, and a checkpoint-schema bump; old weights must never be
 silently loaded against a changed feature layout.
+Transform-only optimizations must preserve the exact versioned numerical
+contract, including NaN-to-zero and infinity clipping at plus/minus 10. Prefer
+batched column operations and direct float32 output assembly; do not restore
+generic multi-pass sanitation without a matched benchmark and edge-case tests.
 
 Per-contract dynamics must match `contractSymbol` against the immediately prior
 snapshot. Mid-quote return and relative-spread change require positive,

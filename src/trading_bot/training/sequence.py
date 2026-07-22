@@ -127,11 +127,18 @@ _SIGNED_SURFACE_MARKET_FEATURES = (
     "front25DeltaButterflyChange",
     "atmTermStructureSlopeChange",
 )
-_SIGNED_CONTRACT_DYNAMICS_SCALES = {
-    "midPriceLogReturn": 100.0,
-    "spreadPctChange": 10.0,
-    "ivChange": 10.0,
-}
+_SIGNED_CONTRACT_FEATURES = (
+    "positionQuantity",
+    "positionUnrealizedReturn",
+    "midPriceLogReturn",
+    "spreadPctChange",
+    "ivChange",
+)
+_SIGNED_CONTRACT_INDICES = np.asarray([
+    _CONTRACT_FEATURE_INDEX[name]
+    for name in _SIGNED_CONTRACT_FEATURES
+])
+_SIGNED_CONTRACT_SCALES = np.asarray((1.0, 1.0, 100.0, 10.0, 10.0))
 
 
 def feature_ablation_indices(
@@ -180,18 +187,11 @@ def _dimensionless_components(
     contracts[:, _SPOT_SCALED_CONTRACT_INDICES] = (
         contracts[:, _SPOT_SCALED_CONTRACT_INDICES] / spot_scale
     )
-    quantity_index = indices["positionQuantity"]
-    quantity = contracts[:, quantity_index]
-    contracts[:, quantity_index] = np.sign(quantity) * np.log1p(abs(quantity))
-    unrealized_index = indices["positionUnrealizedReturn"]
-    unrealized = contracts[:, unrealized_index]
-    contracts[:, unrealized_index] = (
-        np.sign(unrealized) * np.log1p(abs(unrealized))
+    signed_contract_values = contracts[:, _SIGNED_CONTRACT_INDICES]
+    contracts[:, _SIGNED_CONTRACT_INDICES] = (
+        np.sign(signed_contract_values)
+        * np.log1p(abs(signed_contract_values) * _SIGNED_CONTRACT_SCALES)
     )
-    for name, scale in _SIGNED_CONTRACT_DYNAMICS_SCALES.items():
-        index = indices[name]
-        value = contracts[:, index]
-        contracts[:, index] = np.sign(value) * np.log1p(abs(value) * scale)
     # Gamma times a 10% spot move is the approximate corresponding Delta
     # change and remains comparable across differently priced underlyings.
     contracts[:, indices["gamma"]] *= spot_scale * 0.1
@@ -263,13 +263,9 @@ def _dimensionless_components(
         )
 
     for values in (market, contracts, portfolio):
-        np.nan_to_num(
-            values,
-            copy=False,
-            nan=0.0,
-            posinf=10.0,
-            neginf=-10.0,
-        )
+        # Clipping already maps infinities to the finite policy boundary. A
+        # dedicated NaN pass avoids nan_to_num's two redundant infinity scans.
+        values[np.isnan(values)] = 0.0
         np.clip(values, -10.0, 10.0, out=values)
     return market, contracts, portfolio
 
@@ -277,14 +273,24 @@ def _dimensionless_components(
 def observation_vector(observation: Observation) -> np.ndarray:
     """Flatten one observation using the versioned dimensionless transform."""
     market, contracts, portfolio = _dimensionless_components(observation)
-    return np.concatenate(
-        (
-            market.ravel(),
-            contracts.ravel(),
-            portfolio.ravel(),
-            observation.valid_mask.astype(np.float64).ravel(),
-        )
-    ).astype(np.float32)
+    market_size = market.size
+    contract_size = contracts.size
+    portfolio_size = portfolio.size
+    result = np.empty(
+        market_size
+        + contract_size
+        + portfolio_size
+        + observation.valid_mask.size,
+        dtype=np.float32,
+    )
+    contract_start = market_size
+    portfolio_start = contract_start + contract_size
+    mask_start = portfolio_start + portfolio_size
+    result[:contract_start] = market.ravel()
+    result[contract_start:portfolio_start] = contracts.ravel()
+    result[portfolio_start:mask_start] = portfolio.ravel()
+    result[mask_start:] = observation.valid_mask.ravel()
+    return result
 
 
 def auxiliary_market_change_targets(

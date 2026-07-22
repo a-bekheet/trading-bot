@@ -542,6 +542,20 @@ exactly 20 inputs across four slots; the masked candidate won the declared tie.
 These are machine-specific integration and latency measurements, not evidence
 of predictive benefit or alpha.
 
+v0.40.1 preserves the `dimensionless.v11` values while reducing transform work:
+the signed contract columns are processed as one matrix, clipping handles
+infinities directly, one explicit pass replaces NaNs, and the float32 policy
+vector is filled without a float64 concatenation. On the same 32-slot AAPL
+observation, preprocessing fell from 47.79 to 30.13 microseconds median over
+10,000 calls (37%). Matched 3,000-iteration streaming medians fell from 203.00
+to 181.75 microseconds for flat hybrid, 209.75 to 191.63 for flat mixture,
+241.67 to 224.29 for graph-set hybrid, and 259.88 to 239.08 for graph-set
+mixture. Tests explicitly retain NaN-to-zero, positive-infinity-to-10, and
+negative-infinity-to-minus-10 boundary behavior; 500 randomized finite and
+nonfinite 32-slot observations were bitwise identical to the committed v0.40
+transform. These measurements are local engineering evidence, not a production
+SLA or alpha result.
+
 The categorical policy head starts with a configurable `5.0` logit bias toward
 hold, while every feasible action remains sampleable and the bias remains fully
 trainable. On the real AAPL 33-row mask, 1,024 untrained graph-hybrid samples

@@ -196,6 +196,13 @@ inference on both flat and graph-set layouts, so it remains a tournament
 candidate subject to the same latency ceiling rather than replacing GRU or the
 concatenated hybrid.
 
+The `dimensionless.v11` policy transform now batches signed contract columns,
+uses clipping for infinity handling, replaces NaNs in one pass, and assembles
+the float32 vector directly. This reduced local preprocessing median by 37% and
+cut matched batch-one medians across flat and graph-set hybrid/mixture models
+without changing policy features or checkpoint compatibility. It is latency
+headroom for future experiments, not evidence that any model earns more return.
+
 Walk-forward artifacts now include post-selection, paired circular moving-block
 comparisons of the agent against every baseline. They report cumulative
 log-return lift, confidence bounds, and the fraction of bootstrap estimates
