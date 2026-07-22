@@ -17,6 +17,7 @@ from trading_bot.training.arena import (
     arena_tail_readiness,
     arena_walk_forward_config,
     default_arena_output_dir,
+    eligible_arena_dataset,
     recurrent_arena_models,
     run_agent_arena,
 )
@@ -81,13 +82,54 @@ class AgentArenaTests(TestCase):
             readiness_dataset(last_state="PRE"),
             config,
         )
+        training_premarket = readiness_dataset()
+        snapshots = list(training_premarket.snapshots)
+        first = snapshots[0]
+        first_frame = first.frame.copy()
+        first_frame["marketState"] = "PRE"
+        snapshots[0] = Snapshot(first.timestamp, first_frame)
+        training_waiting = arena_tail_readiness(
+            SnapshotDataset(tuple(snapshots), "TEST"),
+            config,
+        )
 
         self.assertTrue(ready["ready"])
+        self.assertEqual(ready["training"]["regular_snapshot_count"], 3)
         self.assertEqual(ready["validation"]["regular_snapshot_count"], 2)
         self.assertEqual(ready["test"]["fresh_underlying_quote_count"], 2)
         self.assertEqual(ready["test"]["executable_option_quote_count"], 2)
         self.assertFalse(waiting["ready"])
         self.assertEqual(waiting["test"]["regular_snapshot_count"], 1)
+        self.assertFalse(training_waiting["ready"])
+        self.assertEqual(training_waiting["training"]["regular_snapshot_count"], 2)
+
+    def test_eligible_arena_dataset_filters_before_all_three_partitions(self):
+        source = readiness_dataset()
+        snapshots = list(source.snapshots)
+        premarket = snapshots[0]
+        premarket_frame = premarket.frame.copy()
+        premarket_frame["marketState"] = "PRE"
+        snapshots.insert(0, Snapshot(premarket.timestamp, premarket_frame))
+        material = SnapshotDataset(tuple(snapshots), "TEST")
+
+        eligible, readiness = eligible_arena_dataset(
+            material,
+            WalkForwardConfig(3, 2, 2, latest_fold_only=True),
+        )
+
+        self.assertIsNotNone(eligible)
+        self.assertEqual(len(eligible), 7)
+        self.assertTrue(readiness["ready"])
+        self.assertEqual(readiness["source_snapshot_count"], 8)
+        self.assertEqual(readiness["eligible_snapshot_count"], 7)
+        self.assertEqual(readiness["required_eligible_snapshot_count"], 7)
+        self.assertEqual(readiness["excluded_non_regular_count"], 1)
+        self.assertTrue(
+            all(
+                snapshot.frame["marketState"].eq("REGULAR").all()
+                for snapshot in eligible.snapshots
+            )
+        )
 
     def test_unready_tail_skips_training_and_persists_preflight(self):
         with (
@@ -120,10 +162,64 @@ class AgentArenaTests(TestCase):
         self.assertEqual(result["completed"], [])
         self.assertEqual(
             result["failures"][0]["error_type"],
-            "InsufficientRegularTail",
+            "InsufficientEligibleHistory",
         )
         self.assertFalse(result["preflight"][0]["ready"])
         runner.assert_not_called()
+
+    def test_strict_arena_trains_only_from_eligible_material_states(self):
+        source = readiness_dataset()
+        premarket = source.snapshots[0]
+        premarket_frame = premarket.frame.copy()
+        premarket_frame["marketState"] = "PRE"
+        material = SnapshotDataset(
+            (Snapshot(premarket.timestamp, premarket_frame), *source.snapshots),
+            "TEST",
+        )
+        summary = {
+            "folds": [
+                {
+                    "model_selection": {"selected_model_id": "winner"},
+                    "test": [{"total_return": 0.0}],
+                }
+            ]
+        }
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "trading_bot.training.arena.SnapshotDataset.material_from_directory",
+                return_value=material,
+            ),
+            patch(
+                "trading_bot.training.arena.run_walk_forward_training",
+                return_value=summary,
+            ) as runner,
+        ):
+            result = run_agent_arena(
+                data_dir=Path(directory),
+                output_dir=Path(directory) / "arena",
+                symbols=("TEST",),
+                walk_forward_config=WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    latest_fold_only=True,
+                ),
+                model_specs=recurrent_arena_models(hidden_size=4),
+                training_config=TrainingConfig(episodes=1),
+                env_kwargs={"slot_count": 2},
+                require_ready_tail=True,
+            )
+
+        trained_dataset = runner.call_args.args[0]
+        self.assertEqual(len(trained_dataset), 7)
+        self.assertTrue(
+            all(
+                snapshot.frame["marketState"].eq("REGULAR").all()
+                for snapshot in trained_dataset.snapshots
+            )
+        )
+        self.assertEqual(result["preflight"][0]["excluded_non_regular_count"], 1)
 
     def test_fixed_arena_adds_surface_gnns_and_matched_signal_ablations(self):
         models = recurrent_arena_models(hidden_size=12)

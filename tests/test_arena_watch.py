@@ -93,21 +93,27 @@ class ArenaWatchTests(TestCase):
         self.assertEqual(result["message"], "training failed")
         self.assertIsNone(result["last_completed_session_date"])
 
-    @patch("trading_bot.training.arena_watch.arena_tail_readiness")
+    @patch("trading_bot.training.arena_watch.eligible_arena_dataset")
     @patch("trading_bot.training.arena_watch.SnapshotDataset.material_from_directory")
-    def test_readiness_uses_new_york_session_date(self, loader, tail):
+    def test_readiness_uses_new_york_session_date(self, loader, eligible):
         loader.return_value = object()
-        tail.side_effect = [
-            {
-                "ready": True,
-                "reason": "ready",
-                "test": {"last_timestamp": "2026-07-23T00:30:00+00:00"},
-            },
-            {
-                "ready": True,
-                "reason": "ready",
-                "test": {"last_timestamp": "2026-07-22T20:30:00-04:00"},
-            },
+        eligible.side_effect = [
+            (
+                object(),
+                {
+                    "ready": True,
+                    "reason": "ready",
+                    "test": {"last_timestamp": "2026-07-23T00:30:00+00:00"},
+                },
+            ),
+            (
+                object(),
+                {
+                    "ready": True,
+                    "reason": "ready",
+                    "test": {"last_timestamp": "2026-07-22T20:30:00-04:00"},
+                },
+            ),
         ]
 
         readiness, session_date = inspect_arena_readiness(
@@ -118,7 +124,7 @@ class ArenaWatchTests(TestCase):
         self.assertEqual(session_date, "2026-07-22")
         self.assertTrue(all(item["ready"] for item in readiness))
         self.assertEqual(
-            [call.args[1] for call in tail.call_args_list],
+            [call.args[1] for call in eligible.call_args_list],
             [arena_walk_forward_config(), arena_walk_forward_config()],
         )
         self.assertEqual(loader.call_args_list[0].args[1], "AAPL")

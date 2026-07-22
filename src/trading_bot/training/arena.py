@@ -25,7 +25,7 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v9"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v10"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 DEFAULT_ARENA_TRAINING_SEED_OFFSETS = (0, 1, 2)
 DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE = 1e-4
@@ -106,6 +106,24 @@ def _has_executable_option_quote(frame) -> bool:
     return False
 
 
+def _snapshot_readiness(snapshot, max_quote_age_seconds: float) -> dict[str, bool]:
+    first = snapshot.frame.iloc[0]
+    regular, regular_coverage = market_state_features(first.get("marketState"))
+    quote_age, quote_coverage = underlying_quote_age(
+        snapshot.timestamp,
+        first.get("underlyingQuoteTime"),
+    )
+    checks = {
+        "regular": bool(regular_coverage >= 1.0 and regular >= 1.0),
+        "fresh_underlying_quote": bool(
+            quote_coverage >= 1.0 and quote_age <= max_quote_age_seconds
+        ),
+        "executable_option_quote": _has_executable_option_quote(snapshot.frame),
+    }
+    checks["eligible"] = all(checks.values())
+    return checks
+
+
 def _partition_readiness(
     dataset: SnapshotDataset,
     max_quote_age_seconds: float,
@@ -114,17 +132,10 @@ def _partition_readiness(
     fresh_quote_count = 0
     executable_quote_count = 0
     for snapshot in dataset.snapshots:
-        first = snapshot.frame.iloc[0]
-        regular, coverage = market_state_features(first.get("marketState"))
-        regular_count += int(coverage >= 1.0 and regular >= 1.0)
-        quote_age, quote_coverage = underlying_quote_age(
-            snapshot.timestamp,
-            first.get("underlyingQuoteTime"),
-        )
-        fresh_quote_count += int(
-            quote_coverage >= 1.0 and quote_age <= max_quote_age_seconds
-        )
-        executable_quote_count += int(_has_executable_option_quote(snapshot.frame))
+        checks = _snapshot_readiness(snapshot, max_quote_age_seconds)
+        regular_count += int(checks["regular"])
+        fresh_quote_count += int(checks["fresh_underlying_quote"])
+        executable_quote_count += int(checks["executable_option_quote"])
     count = len(dataset)
     return {
         "snapshot_count": count,
@@ -142,13 +153,84 @@ def _partition_readiness(
     }
 
 
+def eligible_arena_dataset(
+    dataset: SnapshotDataset,
+    walk_forward_config: WalkForwardConfig,
+    *,
+    max_quote_age_seconds: float = DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+) -> tuple[SnapshotDataset | None, dict[str, Any]]:
+    """Filter execution-eligible states before creating any arena partition."""
+    if not walk_forward_config.latest_fold_only:
+        raise ValueError("arena readiness requires latest_fold_only")
+    if not math.isfinite(max_quote_age_seconds) or max_quote_age_seconds < 0:
+        raise ValueError("max_quote_age_seconds must be finite and non-negative")
+    checks = [
+        _snapshot_readiness(snapshot, max_quote_age_seconds)
+        for snapshot in dataset.snapshots
+    ]
+    eligible_snapshots = tuple(
+        snapshot
+        for snapshot, snapshot_checks in zip(
+            dataset.snapshots,
+            checks,
+            strict=True,
+        )
+        if snapshot_checks["eligible"]
+    )
+    eligible = (
+        SnapshotDataset(eligible_snapshots, dataset.symbol)
+        if eligible_snapshots
+        else None
+    )
+    required = (
+        walk_forward_config.min_train_size
+        + walk_forward_config.validation_size
+        + walk_forward_config.test_size
+        + 2 * walk_forward_config.embargo
+    )
+    if eligible is None:
+        readiness = {
+            "ready": False,
+            "reason": "eligible_dataset_too_short",
+            "split": None,
+            "training": None,
+            "validation": None,
+            "test": None,
+            "max_quote_age_seconds": max_quote_age_seconds,
+        }
+    else:
+        readiness = arena_tail_readiness(
+            eligible,
+            walk_forward_config,
+            max_quote_age_seconds=max_quote_age_seconds,
+        )
+        if not readiness["ready"] and readiness["reason"] == "dataset_too_short":
+            readiness["reason"] = "eligible_dataset_too_short"
+    readiness.update(
+        {
+            "source_snapshot_count": len(dataset),
+            "eligible_snapshot_count": len(eligible_snapshots),
+            "required_eligible_snapshot_count": required,
+            "excluded_snapshot_count": len(dataset) - len(eligible_snapshots),
+            "excluded_non_regular_count": sum(not item["regular"] for item in checks),
+            "excluded_stale_underlying_count": sum(
+                not item["fresh_underlying_quote"] for item in checks
+            ),
+            "excluded_non_executable_count": sum(
+                not item["executable_option_quote"] for item in checks
+            ),
+        }
+    )
+    return eligible, readiness
+
+
 def arena_tail_readiness(
     dataset: SnapshotDataset,
     walk_forward_config: WalkForwardConfig,
     *,
     max_quote_age_seconds: float = DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
 ) -> dict[str, Any]:
-    """Check whether the latest validation/test tail can support trading evidence."""
+    """Check whether all latest-fold partitions support trading evidence."""
     if not walk_forward_config.latest_fold_only:
         raise ValueError("arena readiness requires latest_fold_only")
     if not math.isfinite(max_quote_age_seconds) or max_quote_age_seconds < 0:
@@ -168,19 +250,26 @@ def arena_tail_readiness(
             "ready": False,
             "reason": "dataset_too_short",
             "split": None,
+            "training": None,
             "validation": None,
             "test": None,
             "max_quote_age_seconds": max_quote_age_seconds,
         }
     split = folds[0]
-    _, validation, test = split.apply(dataset)
+    training, validation, test = split.apply(dataset)
+    training_readiness = _partition_readiness(training, max_quote_age_seconds)
     validation_readiness = _partition_readiness(validation, max_quote_age_seconds)
     test_readiness = _partition_readiness(test, max_quote_age_seconds)
-    ready = validation_readiness["ready"] and test_readiness["ready"]
+    ready = (
+        training_readiness["ready"]
+        and validation_readiness["ready"]
+        and test_readiness["ready"]
+    )
     return {
         "ready": ready,
         "reason": "ready" if ready else "regular_fresh_executable_tail_required",
         "split": split.to_dict(),
+        "training": training_readiness,
         "validation": validation_readiness,
         "test": test_readiness,
         "max_quote_age_seconds": max_quote_age_seconds,
@@ -285,22 +374,27 @@ def run_agent_arena(
                     data_dir,
                     symbol,
                 )
-                readiness = arena_tail_readiness(
+                eligible_dataset, readiness = eligible_arena_dataset(
                     material_dataset,
                     walk_forward_config,
                     max_quote_age_seconds=max_quote_age_seconds,
                 )
                 preflight.append({"symbol": symbol, **readiness})
-                if require_ready_tail and not readiness["ready"]:
-                    failures.append(
-                        {
-                            "symbol": symbol,
-                            "error_type": "InsufficientRegularTail",
-                            "message": readiness["reason"],
-                        }
-                    )
-                    continue
-                dataset = material_dataset.engineered()
+                if require_ready_tail:
+                    if not readiness["ready"]:
+                        failures.append(
+                            {
+                                "symbol": symbol,
+                                "error_type": "InsufficientEligibleHistory",
+                                "message": readiness["reason"],
+                            }
+                        )
+                        continue
+                    if eligible_dataset is None:
+                        raise RuntimeError("ready arena has no eligible dataset")
+                    dataset = eligible_dataset.engineered()
+                else:
+                    dataset = material_dataset.engineered()
             elif require_ready_tail:
                 raise ValueError("require_ready_tail requires latest_fold_only")
             else:
@@ -360,7 +454,7 @@ def run_agent_arena(
         encoding="utf-8",
     )
     readiness_only = bool(failures) and all(
-        failure["error_type"] == "InsufficientRegularTail" for failure in failures
+        failure["error_type"] == "InsufficientEligibleHistory" for failure in failures
     )
     if not completed and not readiness_only:
         raise RuntimeError("agent arena produced no completed ticker runs")

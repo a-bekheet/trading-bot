@@ -116,10 +116,11 @@ leader, with a one-basis-point materiality floor, then prefers the existing
 ablation, actor-latency, and complexity ordering. A separate validation-only
 gate requires the winner to beat no-op by one basis point before the sandbox
 will invoke it; otherwise the research result stays visible while the active
-policy abstains. Before any model is trained, the default arena also requires
-every validation and test state to be provider-confirmed regular, have a fresh
-underlying timestamp, and contain an executable option quote. An unready run
-writes a readiness manifest and exits successfully without training; use
+policy abstains. Before any model is trained, the default arena filters to
+provider-confirmed regular states with a fresh underlying timestamp and an
+executable option quote, then requires enough eligible states for all three
+partitions: six training, three validation, and four held-out test. An unready
+run writes a readiness manifest and exits successfully without training; use
 `--allow-unready-tail` only for an explicit plumbing experiment.
 
 On macOS, the readiness-aware training loop can run without an open terminal:
@@ -129,7 +130,7 @@ arena-service install
 ```
 
 It checks the same strict five-ticker gate every 60 seconds, trains the full
-315-replica arena once for each New York market session whose tails become
+315-replica arena once for each New York market session whose data becomes
 ready, and records its heartbeat in `data/_arena_watch_status.json`. It will not
 retrain on every collector cycle. The Agent Results tab displays whether it is
 waiting, running, complete, or already current. `arena-watch --once` performs a
@@ -949,6 +950,22 @@ run stopped all five tickers in 1.6 seconds with five expected readiness statuse
 and no trainer invocation. Environment,
 feature-vector, checkpoint, walk-forward, universe, and arena schemas advance to
 v29, `dimensionless.v24`, v56, v64, v47, and v9; package version is 0.82.0.
+
+v0.83 connects continuous collection to tangible training. A user LaunchAgent
+checks the shared arena contract once per minute, launches the isolated
+five-ticker tournament once per eligible New York session, and exposes atomic
+waiting/running/error/complete/up-to-date state in the Agent Lab. Session,
+ordered symbols, and a versioned run contract prevent duplicate 315-replica
+jobs. Package version is 0.83.0.
+
+v0.84 corrects the eligibility boundary discovered while watching the first
+regular snapshots arrive. A regular seven-state validation/test tail did not
+prove that the expanding six-state training partition contained any executable
+states; it could remain entirely pre-market, making policy training actionless.
+The locked arena now filters before splitting and needs thirteen eligible states
+per ticker: six training, three validation, and four test. The live UI shows
+source, eligible, required, and excluded counts. Arena and watcher schemas
+advance to v10 and status/run v2; package version is 0.84.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The

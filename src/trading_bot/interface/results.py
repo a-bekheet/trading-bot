@@ -91,9 +91,10 @@ def discover_agent_arena_manifests(data_dir: Path) -> list[dict[str, Any]]:
 
 
 def arena_readiness_overview(manifest: dict[str, Any]) -> pd.DataFrame:
-    """Project validation/test evidence readiness before expensive training."""
+    """Project train/validation/test eligibility before expensive training."""
     records = []
     for item in manifest.get("preflight", []):
+        training = item.get("training") or {}
         validation = item.get("validation") or {}
         test = item.get("test") or {}
         records.append(
@@ -101,6 +102,18 @@ def arena_readiness_overview(manifest: dict[str, Any]) -> pd.DataFrame:
                 "Ticker": str(item.get("symbol", "unknown")).upper(),
                 "Ready": "Yes" if item.get("ready") else "Waiting",
                 "Reason": _humanize(str(item.get("reason", "unknown"))),
+                "Source snapshots": int(item.get("source_snapshot_count", 0)),
+                "Eligible snapshots": int(item.get("eligible_snapshot_count", 0)),
+                "Required eligible": int(
+                    item.get("required_eligible_snapshot_count", 0)
+                ),
+                "Excluded snapshots": int(item.get("excluded_snapshot_count", 0)),
+                "Training snapshots": int(training.get("snapshot_count", 0)),
+                "Training regular": int(training.get("regular_snapshot_count", 0)),
+                "Training fresh": int(training.get("fresh_underlying_quote_count", 0)),
+                "Training executable": int(
+                    training.get("executable_option_quote_count", 0)
+                ),
                 "Validation snapshots": int(validation.get("snapshot_count", 0)),
                 "Validation regular": int(validation.get("regular_snapshot_count", 0)),
                 "Validation fresh": int(

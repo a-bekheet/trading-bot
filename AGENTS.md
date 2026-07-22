@@ -397,23 +397,28 @@ summary, and show test timestamps in the interface. Default `agent-arena` runs
 must use timestamped subdirectories beneath `data/agent_runs/recurrent-arena`;
 an explicit `--output-dir` may reproduce or replace a caller-owned target.
 
-The default arena must preflight that latest tail before model construction.
-Every validation and test snapshot must be provider-confirmed `REGULAR`, have a
-covered underlying quote age within the environment threshold, and contain at
-least one positive non-crossed option bid/ask. Load and materially deduplicate
-raw snapshots for this check; do not engineer policy features until the ticker
-passes. Persist per-partition regular, fresh, and executable counts plus time
-bounds. Readiness-only failures are expected status, not a crashed job, and must
-remain visible in Streamlit while the most recent successful agents stay
-inspectable. `--allow-unready-tail` is an explicit plumbing override and must
-never support an economic or alpha claim.
+The default arena must preflight all three partitions before model construction.
+Filter materially deduplicated raw snapshots to states that are
+provider-confirmed `REGULAR`, have a covered underlying quote age within the
+environment threshold, and contain at least one positive non-crossed option
+bid/ask. Build the split from only those eligible states so pre-market history
+cannot satisfy the training minimum while execution is disabled. The default
+contract therefore needs at least thirteen eligible states: six training, three
+validation, and four test. Do not engineer policy features until the ticker
+passes. Persist source, eligible, required, and exclusion counts together with
+per-partition readiness and time bounds. Readiness-only failures are expected
+status, not a crashed job, and must remain visible in Streamlit while the most
+recent successful agents stay inspectable. `--allow-unready-tail` is an explicit
+plumbing override that retains the unfiltered source dataset and must never
+support an economic or alpha claim.
 
 `arena-watch` must reuse `arena_walk_forward_config()` so readiness and the
 launched job cannot drift. It may launch the strict arena only when all watched
-tickers are ready and resolve to the same New York session date. Persist an
-atomic heartbeat before and after training, retain the latest successful
-artifact across waiting/errors, and key completion by session, ordered symbol
-set, and watcher run-contract version. Never pass `--allow-unready-tail`. Hold
+tickers have thirteen eligible states and resolve to the same New York session
+date. Persist an atomic heartbeat before and after training, retain the latest
+successful artifact across waiting/errors, and key completion by session,
+ordered symbol set, and watcher run-contract version. Never pass
+`--allow-unready-tail`. Hold
 one advisory lock for the watcher lifetime so manual and LaunchAgent instances
 cannot train the same session concurrently. The service checks frequently but
 trains at most once per completed contract/session; Streamlit only reads its

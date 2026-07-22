@@ -17,14 +17,14 @@ from zoneinfo import ZoneInfo
 
 from trading_bot.training.arena import (
     DEFAULT_ARENA_SYMBOLS,
-    arena_tail_readiness,
     arena_walk_forward_config,
+    eligible_arena_dataset,
 )
 from trading_bot.training.dataset import SnapshotDataset
 
 
-ARENA_WATCH_STATUS_SCHEMA_VERSION = "research-demo.arena-watch.status.v1"
-ARENA_WATCH_RUN_CONTRACT_VERSION = "research-demo.arena-watch.run.v1"
+ARENA_WATCH_STATUS_SCHEMA_VERSION = "research-demo.arena-watch.status.v2"
+ARENA_WATCH_RUN_CONTRACT_VERSION = "research-demo.arena-watch.run.v2"
 ARENA_WATCH_STATUS_FILENAME = "_arena_watch_status.json"
 ARENA_WATCH_LOCK_FILENAME = ".arena-watch.lock"
 NEW_YORK = ZoneInfo("America/New_York")
@@ -96,7 +96,7 @@ def _base_status(
         ),
         "last_artifact": previous.get("last_artifact"),
         "readiness": [],
-        "message": "checking the latest causal validation/test tails",
+        "message": "checking eligible training/validation/test history",
     }
 
 
@@ -111,7 +111,7 @@ def inspect_arena_readiness(
     for symbol in _normalize_symbols(symbols):
         try:
             dataset = SnapshotDataset.material_from_directory(data_dir, symbol)
-            item = arena_tail_readiness(dataset, config)
+            _, item = eligible_arena_dataset(dataset, config)
         except (FileNotFoundError, OSError, ValueError) as error:
             item = {
                 "ready": False,
@@ -222,8 +222,8 @@ def run_watch_cycle(
     if session_date is None:
         status["status"] = "waiting"
         status["message"] = (
-            "waiting for every ticker to have regular, fresh, executable "
-            "validation and test tails"
+            "waiting for every ticker to have thirteen regular, fresh, "
+            "executable states for train/validation/test"
         )
         _write_status(data_dir, status)
         return status

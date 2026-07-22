@@ -479,6 +479,18 @@ states in the Agent Lab while retaining the last successful artifact. This
 improves operational reproducibility and time-to-result; it does not weaken the
 regular/fresh/executable gate or constitute return evidence.
 
+The v0.84 eligibility correction prevents a subtle but consequential false
+start. Requiring only a seven-state regular validation/test tail still allowed
+the six-state expanding training partition to consist entirely of pre-market
+observations, where the environment disables execution and PPO has no trading
+choice to learn from. The locked arena now filters material snapshots before
+splitting and requires thirteen regular, fresh, executable states per ticker:
+six training, three validation, and four test. Source and exclusion counts stay
+visible, while the explicit plumbing override retains its unfiltered behavior.
+This delays the first arena but changes it from a guaranteed no-learning run to
+the first minimally actionable integration experiment; thirteen intraday states
+remain far too small for an alpha claim.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

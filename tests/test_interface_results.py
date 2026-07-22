@@ -129,7 +129,7 @@ class InterfaceResultTests(TestCase):
             path.write_text(json.dumps({"schema_version": "wrong"}), encoding="utf-8")
             self.assertIsNone(load_arena_watch_status(data_dir))
             expected = {
-                "schema_version": "research-demo.arena-watch.status.v1",
+                "schema_version": "research-demo.arena-watch.status.v2",
                 "status": "waiting",
             }
             path.write_text(json.dumps(expected), encoding="utf-8")
@@ -172,12 +172,22 @@ class InterfaceResultTests(TestCase):
 
     def test_discovers_and_projects_readiness_only_arena_manifest(self):
         manifest = {
-            "schema_version": "research-demo.agent-arena.v9",
+            "schema_version": "research-demo.agent-arena.v10",
             "preflight": [
                 {
                     "symbol": "AAPL",
                     "ready": False,
                     "reason": "regular_fresh_executable_tail_required",
+                    "source_snapshot_count": 20,
+                    "eligible_snapshot_count": 6,
+                    "required_eligible_snapshot_count": 13,
+                    "excluded_snapshot_count": 14,
+                    "training": {
+                        "snapshot_count": 6,
+                        "regular_snapshot_count": 6,
+                        "fresh_underlying_quote_count": 6,
+                        "executable_option_quote_count": 6,
+                    },
                     "validation": {
                         "snapshot_count": 3,
                         "regular_snapshot_count": 0,
@@ -210,6 +220,12 @@ class InterfaceResultTests(TestCase):
         self.assertEqual(len(manifests), 1)
         self.assertEqual(manifests[0]["_run_name"], "run-id")
         self.assertEqual(readiness.iloc[0]["Ready"], "Waiting")
+        self.assertEqual(readiness.iloc[0]["Source snapshots"], 20)
+        self.assertEqual(readiness.iloc[0]["Eligible snapshots"], 6)
+        self.assertEqual(readiness.iloc[0]["Required eligible"], 13)
+        self.assertEqual(readiness.iloc[0]["Excluded snapshots"], 14)
+        self.assertEqual(readiness.iloc[0]["Training snapshots"], 6)
+        self.assertEqual(readiness.iloc[0]["Training regular"], 6)
         self.assertEqual(readiness.iloc[0]["Validation regular"], 0)
         self.assertEqual(readiness.iloc[0]["Test regular"], 1)
         self.assertEqual(readiness.iloc[0]["Test end"], "2026-07-22T13:45:00Z")

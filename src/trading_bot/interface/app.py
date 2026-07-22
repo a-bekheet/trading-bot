@@ -146,30 +146,36 @@ with agent_tab:
             )
     if not readiness.empty:
         ready_count = int((readiness["Ready"] == "Yes").sum())
-        readiness_columns = st.columns(3)
+        readiness_columns = st.columns(4)
+        required_eligible = int(readiness["Required eligible"].max())
+        minimum_eligible = int(readiness["Eligible snapshots"].min())
         readiness_columns[0].metric(
             "Arena tails ready",
             f"{ready_count}/{len(readiness)}",
         )
         readiness_columns[1].metric(
+            "Eligible states",
+            f"{minimum_eligible}/{required_eligible}",
+        )
+        readiness_columns[2].metric(
             "Regular validation states",
             int(readiness["Validation regular"].sum()),
         )
-        readiness_columns[2].metric(
+        readiness_columns[3].metric(
             "Regular test states",
             int(readiness["Test regular"].sum()),
         )
         if ready_count < len(readiness):
             st.warning(
-                "The newest arena preflight is waiting for every validation "
-                "and test state to be provider-confirmed regular, carry a "
-                "fresh underlying quote, and contain an executable option "
-                "quote. Expensive agent training is skipped until then."
+                "The arena is waiting for enough provider-confirmed regular, "
+                "fresh, executable states to fill training, validation, and "
+                "test. Expensive agent training is skipped until all thirteen "
+                "eligible states exist for every ticker."
             )
         else:
             st.success(
-                "The newest arena validation/test tails passed the regular, "
-                "fresh, and executable pre-training gate."
+                "Training, validation, and test have enough regular, fresh, "
+                "executable states for the locked arena."
             )
         with st.expander("Arena evidence readiness"):
             st.dataframe(readiness, width="stretch", hide_index=True)
