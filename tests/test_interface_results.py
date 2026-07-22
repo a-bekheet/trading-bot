@@ -11,6 +11,7 @@ from trading_bot.interface.results import (
     equity_curve,
     evidence_summary,
     heldout_results,
+    promotion_assessment,
     trade_ledger,
 )
 
@@ -57,22 +58,26 @@ def result_summary():
         "timestamps": ["2026-01-01T15:00:00Z", "2026-01-01T15:01:00Z"],
         "step_returns": [0.0, 0.01],
         "navs": [1_000, 1_000, 1_010],
-        "decisions": [{
-            "decision_timestamp": "2026-01-01T14:59:00Z",
-            "arrival_timestamp": "2026-01-01T15:00:00Z",
-            "orders": [1, 0],
-            "invalid_actions": 0,
-            "reward": 0.0,
-            "nav": 1_000,
-            "executions": [{
-                "instrument": "option",
-                "side": "buy",
-                "contract_symbol": "TEST-C",
-                "quantity": 1,
-                "price": 1.0,
-                "fee": 0.65,
-            }],
-        }],
+        "decisions": [
+            {
+                "decision_timestamp": "2026-01-01T14:59:00Z",
+                "arrival_timestamp": "2026-01-01T15:00:00Z",
+                "orders": [1, 0],
+                "invalid_actions": 0,
+                "reward": 0.0,
+                "nav": 1_000,
+                "executions": [
+                    {
+                        "instrument": "option",
+                        "side": "buy",
+                        "contract_symbol": "TEST-C",
+                        "quantity": 1,
+                        "price": 1.0,
+                        "fee": 0.65,
+                    }
+                ],
+            }
+        ],
     }
     no_op_trace = {
         **agent_trace,
@@ -82,21 +87,23 @@ def result_summary():
     return {
         "schema_version": "research-demo.walk-forward.v59",
         "symbol": "TEST",
-        "folds": [{
-            "fold": 0,
-            "model_selection": {
-                "selected_model_id": "gru",
-                "candidates": candidates,
-            },
-            "test": [report],
-            "heldout_traces": {
-                "agent": [agent_trace],
-                "baselines": {"no_op": [no_op_trace]},
-            },
-            "statistical_comparisons": {
-                "no_op": [{"status": "insufficient_history"}],
-            },
-        }],
+        "folds": [
+            {
+                "fold": 0,
+                "model_selection": {
+                    "selected_model_id": "gru",
+                    "candidates": candidates,
+                },
+                "test": [report],
+                "heldout_traces": {
+                    "agent": [agent_trace],
+                    "baselines": {"no_op": [no_op_trace]},
+                },
+                "statistical_comparisons": {
+                    "no_op": [{"status": "insufficient_history"}],
+                },
+            }
+        ],
     }
 
 
@@ -133,9 +140,9 @@ class InterfaceResultTests(TestCase):
         )
         self.assertEqual(leaderboard["Selected folds"].tolist(), [1, 0])
         self.assertEqual(heldout.iloc[0]["Agent"], "GRU Agent")
-        self.assertEqual(
-            heldout.iloc[0]["Action policy"], "Factorized multi-leg"
-        )
+        self.assertEqual(heldout.iloc[0]["Encoder"], "Flat")
+        self.assertEqual(heldout.iloc[0]["Architecture"], "Flat / Gru")
+        self.assertEqual(heldout.iloc[0]["Action policy"], "Factorized multi-leg")
         self.assertAlmostEqual(heldout.iloc[0]["Test return"], 0.01)
         self.assertEqual(heldout.iloc[0]["Fills / decision"], 0.5)
         self.assertEqual(set(curve["Series"]), {"Selected agent", "No Op"})
@@ -166,6 +173,9 @@ class InterfaceResultTests(TestCase):
         nvda["folds"][0]["model_selection"]["candidates"][1]["model"][
             "action_decoder"
         ] = "single_leg"
+        nvda["folds"][0]["model_selection"]["candidates"][1]["model"]["encoder"] = (
+            "surface_graph_set"
+        )
 
         overview = arena_overview([aapl_new, aapl_old, nvda])
 
@@ -173,6 +183,37 @@ class InterfaceResultTests(TestCase):
         self.assertEqual(overview.iloc[0]["Experiment"], "new")
         self.assertAlmostEqual(overview.iloc[0]["Held-out return"], 0.01)
         self.assertEqual(overview.iloc[1]["Selected agent"], "LSTM Agent")
-        self.assertEqual(
-            overview.iloc[1]["Action policy"], "Sparse single-leg"
-        )
+        self.assertEqual(overview.iloc[1]["Selected encoder"], "Surface Graph Set")
+        self.assertEqual(overview.iloc[1]["Architecture"], "Surface Graph Set / Lstm")
+        self.assertEqual(overview.iloc[1]["Action policy"], "Sparse single-leg")
+        self.assertEqual(overview.iloc[1]["Promotion"], "Research only")
+
+    def test_promotion_gate_requires_all_deployment_evidence(self):
+        summary = result_summary()
+
+        rejected = promotion_assessment(summary)
+
+        self.assertEqual(rejected["status"], "Research only")
+        self.assertIn("held-out history is too short", rejected["failed_reasons"])
+
+        fold = summary["folds"][0]
+        fold["test"][0]["steps"] = 100
+        fold["baselines"] = {"no_op": [{"total_return": 0.0}]}
+        fold["cost_stress"] = {
+            "double_costs": [{"total_return": 0.005}],
+        }
+        fold["statistical_comparisons"]["no_op"] = [
+            {
+                "status": "ok",
+                "supports_improvement": True,
+            }
+        ]
+        fold["test_data_quality"] = {
+            "execution_provenance": "provider_confirmed_regular",
+        }
+
+        accepted = promotion_assessment(summary)
+
+        self.assertEqual(accepted["status"], "Promotion ready")
+        self.assertTrue(all(accepted["checks"].values()))
+        self.assertAlmostEqual(accepted["mean_excess_vs_no_op"], 0.01)

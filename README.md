@@ -74,12 +74,13 @@ streamlit run src/trading_bot/interface/app.py
 ```
 
 The first tab is an agent-results workspace. It discovers saved walk-forward
-runs under `data/agent_runs/`, ranks GRU/LSTM/mixture candidates on validation,
-and shows only the validation-selected winner on the held-out slice. The view
-includes the stored equity path, risk and turnover, actor-only latency, actual
-simulated fills, and artifact provenance. It labels short runs as exploratory
-and separately warns when legacy snapshots lack provider-confirmed session or
-quote-time coverage.
+runs under `data/agent_runs/`, ranks flat and surface-GNN GRU/LSTM/mixture
+candidates on validation, and shows only the validation-selected winner on the
+held-out slice. The view includes the selected encoder, stored equity path,
+risk and turnover, actor-only latency, actual simulated fills, and artifact
+provenance. A conservative promotion gate requires positive held-out and
+doubled-cost returns, improvement over no-op with statistical support, adequate
+history, regular-session provenance, and no invalid actions.
 
 The remaining tabs let you choose a ticker, inspect its latest call or put
 snapshot, and submit fake option orders. Paper buys fill at the saved ask and
@@ -91,13 +92,15 @@ Run the reproducible five-ticker recurrent-agent arena used by the interface:
 agent-arena
 ```
 
-By default it independently compares flat PPO GRU, LSTM, and gated-mixture
-agents on AAPL, NVDA, MSFT, AMZN, and GOOG. Every recurrent family gets both a
-factorized multi-leg policy and an exact sparse single-leg policy, for six
-matched candidates per ticker. Repeat `--symbol` to choose another set. The
-command keeps identical budgets and split rules across tickers, writes one
-walk-forward artifact per ticker plus `agent-arena.json`, and records a
-per-ticker failure without discarding completed runs.
+By default it independently compares PPO GRU, LSTM, and gated-mixture agents on
+AAPL, NVDA, MSFT, AMZN, and GOOG. Every flat recurrent family gets factorized
+multi-leg and exact sparse single-leg policies. Three additional
+`surface_graph_set` agents pair the sparse decoder with local strike/expiry and
+opposite-side message passing, for nine candidates per ticker. Repeat
+`--symbol` to choose another set. The command keeps identical budgets and split
+rules across tickers, writes one walk-forward artifact per ticker plus
+`agent-arena.json`, and records a per-ticker failure without discarding
+completed runs.
 
 For a one-ticker drill-down with explicit settings:
 
@@ -747,6 +750,21 @@ decodes the winning joint index directly. A nine-repeat alternating AAPL GRU
 benchmark reduced its median from 113.6 to 108.2 microseconds (4.8%) and narrowed
 the overhead versus factorized from 15.9% to 9.6%. Arena schema advances to v2;
 package version is 0.75.0.
+
+v0.76 restores topology-aware GNNs to the tangible default arena after v0.75's
+action-decoder isolation. Surface-GNN GRU, LSTM, and gated-mixture PPO policies
+now compete against all six flat controls using the sparse decoder that won the
+earlier action-surface test. In the first nine-policy five-ticker run, a surface
+GNN won validation on every ticker: the gated mixture on AAPL, AMZN, MSFT, and
+NVDA, and GRU on GOOG. Actor medians on AAPL were roughly 343-390 microseconds
+for the GNNs versus 102-156 for flat candidates, keeping the latency tradeoff
+visible.
+
+That selection result did not translate into profit. All five held-out paths
+were negative, mean return was -0.027%, and 14 fills cost $2.28. The interface
+therefore reports zero promotion-ready paths and shows the exact failed gates
+instead of treating a validation win as alpha. Arena schema advances to v3;
+package version is 0.76.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The

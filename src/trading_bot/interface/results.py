@@ -55,41 +55,51 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
             kind = str(model.get("kind", "unknown"))
             latency = candidate.get("inference_latency", {})
             candidate_selection = candidate.get("selection", {})
-            records.append({
-                "model_id": candidate.get("model_id", "unknown"),
-                "Agent": AGENT_LABELS.get(kind, kind.upper()),
-                "Architecture": _architecture_label(model),
-                "Action policy": _decoder_label(model),
-                "Algorithm": str(model.get("algorithm", "unknown")).upper(),
-                "Validation score": _number(candidate_selection.get(
-                    "robust_training_seed_validation_score"
-                )),
-                "Validation reward": _number(candidate_selection.get(
-                    "training_seed_mean_validation_reward",
-                    candidate_selection.get("validation_total_reward"),
-                )),
-                "Median latency (us)": _number(
-                    latency.get("median_microseconds")
-                ),
-                "Parameters": _number(candidate.get("parameter_count")),
-                "Episodes": _number(candidate.get("episodes_completed")),
-                "Selected folds": int(candidate.get("model_id") == selected),
-            })
+            records.append(
+                {
+                    "model_id": candidate.get("model_id", "unknown"),
+                    "Agent": AGENT_LABELS.get(kind, kind.upper()),
+                    "Architecture": _architecture_label(model),
+                    "Action policy": _decoder_label(model),
+                    "Algorithm": str(model.get("algorithm", "unknown")).upper(),
+                    "Validation score": _number(
+                        candidate_selection.get("robust_training_seed_validation_score")
+                    ),
+                    "Validation reward": _number(
+                        candidate_selection.get(
+                            "training_seed_mean_validation_reward",
+                            candidate_selection.get("validation_total_reward"),
+                        )
+                    ),
+                    "Median latency (us)": _number(latency.get("median_microseconds")),
+                    "Parameters": _number(candidate.get("parameter_count")),
+                    "Episodes": _number(candidate.get("episodes_completed")),
+                    "Selected folds": int(candidate.get("model_id") == selected),
+                }
+            )
     if not records:
         return pd.DataFrame()
     frame = pd.DataFrame(records)
-    stable = frame[[
-        "model_id", "Agent", "Architecture", "Action policy", "Algorithm",
-    ]]
+    stable = frame[
+        [
+            "model_id",
+            "Agent",
+            "Architecture",
+            "Action policy",
+            "Algorithm",
+        ]
+    ]
     stable = stable.drop_duplicates("model_id").set_index("model_id")
-    numeric = frame.groupby("model_id", sort=False).agg({
-        "Validation score": "mean",
-        "Validation reward": "mean",
-        "Median latency (us)": "mean",
-        "Parameters": "mean",
-        "Episodes": "sum",
-        "Selected folds": "sum",
-    })
+    numeric = frame.groupby("model_id", sort=False).agg(
+        {
+            "Validation score": "mean",
+            "Validation reward": "mean",
+            "Median latency (us)": "mean",
+            "Parameters": "mean",
+            "Episodes": "sum",
+            "Selected folds": "sum",
+        }
+    )
     result = stable.join(numeric).reset_index(drop=True)
     return result.sort_values(
         ["Validation score", "Median latency (us)"],
@@ -103,31 +113,34 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
     for fold in summary.get("folds", []):
         winner = _selected_candidate(fold)
         label = _agent_label(winner)
-        action_policy = _decoder_label(winner.get("model", {}))
+        model = winner.get("model", {})
+        action_policy = _decoder_label(model)
         for report in fold.get("test", []):
             steps = int(report.get("steps", 0))
             executions = int(report.get("executions", 0))
-            records.append({
-                "Fold": int(fold.get("fold", len(records))),
-                "Agent": label,
-                "Action policy": action_policy,
-                "Test return": _number(report.get("total_return")),
-                "Final NAV": _number(report.get("final_nav")),
-                "Max drawdown": _number(report.get("max_drawdown")),
-                "Executions": executions,
-                "Fills / decision": executions / steps if steps else 0.0,
-                "Turnover": _number(report.get("turnover")),
-                "Fees": _number(report.get("fees")),
-                "Invalid actions": int(report.get("invalid_actions", 0)),
-                "Step Sharpe": _number(report.get("step_sharpe")),
-                "Market beta": _number(
-                    report.get("return_beta_to_underlying")
-                ),
-                "Mean |Delta notional|": _number(
-                    report.get("mean_abs_delta_notional_weight")
-                ),
-                "Steps": steps,
-            })
+            records.append(
+                {
+                    "Fold": int(fold.get("fold", len(records))),
+                    "Agent": label,
+                    "Encoder": _humanize(str(model.get("encoder", "unknown"))),
+                    "Architecture": _architecture_label(model),
+                    "Action policy": action_policy,
+                    "Test return": _number(report.get("total_return")),
+                    "Final NAV": _number(report.get("final_nav")),
+                    "Max drawdown": _number(report.get("max_drawdown")),
+                    "Executions": executions,
+                    "Fills / decision": executions / steps if steps else 0.0,
+                    "Turnover": _number(report.get("turnover")),
+                    "Fees": _number(report.get("fees")),
+                    "Invalid actions": int(report.get("invalid_actions", 0)),
+                    "Step Sharpe": _number(report.get("step_sharpe")),
+                    "Market beta": _number(report.get("return_beta_to_underlying")),
+                    "Mean |Delta notional|": _number(
+                        report.get("mean_abs_delta_notional_weight")
+                    ),
+                    "Steps": steps,
+                }
+            )
     return pd.DataFrame(records)
 
 
@@ -144,36 +157,126 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
         if heldout.empty:
             continue
         provenance = {
-            fold.get("test_data_quality", {}).get(
-                "execution_provenance", "unknown"
-            )
+            fold.get("test_data_quality", {}).get("execution_provenance", "unknown")
             for fold in run.get("folds", [])
         }
         agents = sorted(set(heldout["Agent"]))
+        encoders = sorted(set(heldout["Encoder"]))
+        architectures = sorted(set(heldout["Architecture"]))
         action_policies = sorted(set(heldout["Action policy"]))
-        records.append({
-            "Ticker": symbol,
-            "Selected agent": ", ".join(agents),
-            "Action policy": ", ".join(action_policies),
-            "Held-out return": float(heldout["Test return"].mean()),
-            "Final NAV": float(heldout["Final NAV"].mean()),
-            "Max drawdown": float(heldout["Max drawdown"].max()),
-            "Executions": int(heldout["Executions"].sum()),
-            "Fills / decision": (
-                float(heldout["Executions"].sum())
-                / float(heldout["Steps"].sum())
-                if heldout["Steps"].sum()
-                else 0.0
-            ),
-            "Fees": float(heldout["Fees"].sum()),
-            "Steps": int(heldout["Steps"].sum()),
-            "Evidence": evidence_summary(run)["grade"],
-            "Execution provenance": ", ".join(sorted(provenance)),
-            "Experiment": run.get("_run_name", "unknown"),
-        })
+        promotion = promotion_assessment(run)
+        records.append(
+            {
+                "Ticker": symbol,
+                "Selected agent": ", ".join(agents),
+                "Selected encoder": ", ".join(encoders),
+                "Architecture": ", ".join(architectures),
+                "Action policy": ", ".join(action_policies),
+                "Held-out return": float(heldout["Test return"].mean()),
+                "Final NAV": float(heldout["Final NAV"].mean()),
+                "Max drawdown": float(heldout["Max drawdown"].max()),
+                "Executions": int(heldout["Executions"].sum()),
+                "Fills / decision": (
+                    float(heldout["Executions"].sum()) / float(heldout["Steps"].sum())
+                    if heldout["Steps"].sum()
+                    else 0.0
+                ),
+                "Fees": float(heldout["Fees"].sum()),
+                "Steps": int(heldout["Steps"].sum()),
+                "Evidence": evidence_summary(run)["grade"],
+                "Excess vs no-op": promotion["mean_excess_vs_no_op"],
+                "Double-cost return": promotion["worst_double_cost_return"],
+                "Promotion": promotion["status"],
+                "Execution provenance": ", ".join(sorted(provenance)),
+                "Experiment": run.get("_run_name", "unknown"),
+            }
+        )
     if not records:
         return pd.DataFrame()
     return pd.DataFrame(records).sort_values("Ticker").reset_index(drop=True)
+
+
+def promotion_assessment(summary: dict[str, Any]) -> dict[str, Any]:
+    """Apply conservative deployment gates to held-out research evidence."""
+    agent_returns = []
+    no_op_returns = []
+    double_cost_returns = []
+    comparisons = []
+    provenances = []
+    invalid_actions = 0
+    for fold in summary.get("folds", []):
+        agent_reports = fold.get("test", [])
+        no_op_reports = fold.get("baselines", {}).get("no_op", [])
+        stressed_reports = fold.get("cost_stress", {}).get("double_costs", [])
+        agent_returns.extend(
+            _number(report.get("total_return")) for report in agent_reports
+        )
+        no_op_returns.extend(
+            _number(report.get("total_return")) for report in no_op_reports
+        )
+        double_cost_returns.extend(
+            _number(report.get("total_return")) for report in stressed_reports
+        )
+        invalid_actions += sum(
+            int(report.get("invalid_actions", 0)) for report in agent_reports
+        )
+        comparisons.extend(fold.get("statistical_comparisons", {}).get("no_op", []))
+        provenances.append(
+            fold.get("test_data_quality", {}).get("execution_provenance", "unknown")
+        )
+
+    paired_count = min(len(agent_returns), len(no_op_returns))
+    excess = [
+        agent_returns[index] - no_op_returns[index] for index in range(paired_count)
+    ]
+    evidence = evidence_summary(summary)
+    checks = {
+        "positive_heldout_return": bool(agent_returns and min(agent_returns) > 0),
+        "beats_no_op": bool(excess and min(excess) > 0),
+        "statistical_support_vs_no_op": bool(
+            comparisons
+            and all(
+                item.get("status") == "ok" and item.get("supports_improvement") is True
+                for item in comparisons
+            )
+        ),
+        "adequate_heldout_history": (evidence["grade"] == "Statistically evaluated"),
+        "provider_confirmed_regular": bool(
+            provenances
+            and all(value == "provider_confirmed_regular" for value in provenances)
+        ),
+        "positive_under_double_costs": bool(
+            double_cost_returns and min(double_cost_returns) > 0
+        ),
+        "no_invalid_actions": invalid_actions == 0,
+    }
+    labels = {
+        "positive_heldout_return": "held-out return is not positive",
+        "beats_no_op": "agent does not beat no-op on every path",
+        "statistical_support_vs_no_op": (
+            "no statistically supported improvement over no-op"
+        ),
+        "adequate_heldout_history": "held-out history is too short",
+        "provider_confirmed_regular": (
+            "test data lacks fully confirmed regular-session provenance"
+        ),
+        "positive_under_double_costs": ("return is not positive under double costs"),
+        "no_invalid_actions": "held-out path contains invalid actions",
+    }
+    failed = [labels[name] for name, passed in checks.items() if not passed]
+    return {
+        "status": "Promotion ready" if not failed else "Research only",
+        "checks": checks,
+        "failed_reasons": failed,
+        "heldout_steps": evidence["heldout_steps"],
+        "mean_heldout_return": (
+            sum(agent_returns) / len(agent_returns) if agent_returns else float("nan")
+        ),
+        "mean_excess_vs_no_op": (sum(excess) / len(excess) if excess else float("nan")),
+        "worst_double_cost_return": (
+            min(double_cost_returns) if double_cost_returns else float("nan")
+        ),
+    }
 
 
 def equity_curve(
@@ -186,10 +289,7 @@ def equity_curve(
     traces = fold.get("heldout_traces", {})
     series = [("Selected agent", traces.get("agent", []))]
     baselines = traces.get("baselines", {})
-    series.extend(
-        (_humanize(name), baselines.get(name, []))
-        for name in baseline_names
-    )
+    series.extend((_humanize(name), baselines.get(name, [])) for name in baseline_names)
     records = []
     for label, paths in series:
         for trace_index, trace in enumerate(paths):
@@ -198,12 +298,14 @@ def equity_curve(
             if len(navs) == len(timestamps) + 1:
                 navs = navs[1:]
             for timestamp, nav in zip(timestamps, navs, strict=False):
-                records.append({
-                    "Timestamp": timestamp,
-                    "Series": label,
-                    "Equity": _number(nav),
-                    "Path": trace_index,
-                })
+                records.append(
+                    {
+                        "Timestamp": timestamp,
+                        "Series": label,
+                        "Equity": _number(nav),
+                        "Path": trace_index,
+                    }
+                )
     frame = pd.DataFrame(records)
     if not frame.empty:
         frame["Timestamp"] = pd.to_datetime(frame["Timestamp"], utc=True)
@@ -218,18 +320,20 @@ def trade_ledger(summary: dict[str, Any], fold_number: int) -> pd.DataFrame:
     for trace_index, trace in enumerate(traces):
         for decision_index, decision in enumerate(trace.get("decisions", [])):
             for execution in decision.get("executions", []):
-                records.append({
-                    "Timestamp": decision.get("decision_timestamp"),
-                    "Path": trace_index,
-                    "Decision": decision_index,
-                    "Instrument": execution.get("instrument"),
-                    "Side": execution.get("side"),
-                    "Contract": execution.get("contract_symbol"),
-                    "Quantity": execution.get("quantity"),
-                    "Price": execution.get("price"),
-                    "Fee": execution.get("fee"),
-                    "Post-trade NAV": decision.get("nav"),
-                })
+                records.append(
+                    {
+                        "Timestamp": decision.get("decision_timestamp"),
+                        "Path": trace_index,
+                        "Decision": decision_index,
+                        "Instrument": execution.get("instrument"),
+                        "Side": execution.get("side"),
+                        "Contract": execution.get("contract_symbol"),
+                        "Quantity": execution.get("quantity"),
+                        "Price": execution.get("price"),
+                        "Fee": execution.get("fee"),
+                        "Post-trade NAV": decision.get("nav"),
+                    }
+                )
     return pd.DataFrame(records)
 
 

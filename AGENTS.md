@@ -347,13 +347,25 @@ insufficient. Training and market fetching stay outside Streamlit reruns.
 
 `agent-arena` is the reproducible integration-demo entry point. Keep candidate
 families, split sizes, training budget, costs, and risk rules identical across
-its tickers unless the changed contract is explicit in the artifact. Every
+its tickers unless the changed contract is explicit in the artifact. Every flat
 GRU/LSTM/gated-mixture family receives both factorized multi-leg and exact
 single-leg candidates so action sparsity is validation-selected rather than
-silently fixed. A failure
+silently fixed. The default arena also includes GRU/LSTM/gated-mixture
+`surface_graph_set` candidates with one same-side surface neighbor,
+opposite-side counterpart edges, and the exact single-leg decoder. Preserve the
+six flat candidates as measured controls; do not report a GNN validation win
+without its parameter count, actor latency, and held-out result. A failure
 for one ticker must be written with its exception type and message while other
 tickers continue. Do not average returns into a portfolio claim: each row is an
 independent, validation-selected research-demo path with its own provenance.
+
+The interface promotion status is a strict research-to-deployment gate, not a
+model-selection input. `Promotion ready` requires every held-out path to be
+positive, beat no-op with statistical support, remain positive under doubled
+costs, have at least statistically evaluated history, use provider-confirmed
+regular-session data, and contain no invalid actions. Missing evidence fails
+closed. Keep all failed reasons visible in the drill-down and never weaken a
+gate merely to produce a deployable-looking result.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
 `dimensionless.v22`, price-like fields are relative to spot, contract Gamma is

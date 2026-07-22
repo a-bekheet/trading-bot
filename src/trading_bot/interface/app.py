@@ -22,6 +22,7 @@ from trading_bot.interface.results import (
     equity_curve,
     evidence_summary,
     heldout_results,
+    promotion_assessment,
     trade_ledger,
 )
 
@@ -68,9 +69,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.caption(
-    "RESEARCH DEMO · PAPER TRADING ONLY · NO LIVE BROKER CONNECTION"
-)
+st.caption("RESEARCH DEMO · PAPER TRADING ONLY · NO LIVE BROKER CONNECTION")
 
 tickers = available_tickers(DATA_DIR)
 if not tickers:
@@ -85,9 +84,7 @@ snapshot = load_latest_snapshot(DATA_DIR, symbol)
 filtered = snapshot[snapshot["optionType"] == option_type].sort_values("strike")
 session = market_session_status(snapshot)
 freshness = market_data_freshness_status(snapshot)
-execution_enabled = bool(
-    session["trading_enabled"] and freshness["trading_enabled"]
-)
+execution_enabled = bool(session["trading_enabled"] and freshness["trading_enabled"])
 
 agent_tab, market_tab, portfolio_tab, history_tab = st.tabs(
     (
@@ -125,7 +122,7 @@ with agent_tab:
                 "Newest run per ticker. Each row uses its own validation "
                 "tournament and separately selected held-out policy."
             )
-            arena_columns = st.columns(5)
+            arena_columns = st.columns(6)
             arena_columns[0].metric("Tickers evaluated", len(arena))
             arena_columns[1].metric(
                 "Total held-out fills", int(arena["Executions"].sum())
@@ -135,11 +132,13 @@ with agent_tab:
                 f"{float(arena['Held-out return'].mean()):.3%}",
             )
             arena_columns[3].metric(
-                "Positive ticker paths",
-                int((arena["Held-out return"] > 0).sum()),
+                "Surface-GNN winners",
+                int((arena["Selected encoder"] == "Surface Graph Set").sum()),
             )
-            arena_columns[4].metric(
-                "Total held-out steps", int(arena["Steps"].sum())
+            arena_columns[4].metric("Total held-out steps", int(arena["Steps"].sum()))
+            arena_columns[5].metric(
+                "Promotion-ready paths",
+                int((arena["Promotion"] == "Promotion ready").sum()),
             )
             arena_chart, winner_chart = st.columns((3, 2))
             with arena_chart:
@@ -151,25 +150,27 @@ with agent_tab:
             with winner_chart:
                 st.caption("Validation-selected architecture count")
                 winner_labels = (
-                    arena["Selected agent"] + " / " + arena["Action policy"]
+                    arena["Selected encoder"]
+                    + " / "
+                    + arena["Selected agent"]
+                    + " / "
+                    + arena["Action policy"]
                 )
-                winner_counts = (
-                    winner_labels.value_counts().rename("Selections")
-                )
+                winner_counts = winner_labels.value_counts().rename("Selections")
                 st.bar_chart(winner_counts, height=260)
             st.dataframe(
                 arena,
                 width="stretch",
                 hide_index=True,
                 column_config={
-                    "Held-out return": st.column_config.NumberColumn(
-                        format="percent"
-                    ),
+                    "Held-out return": st.column_config.NumberColumn(format="percent"),
                     "Final NAV": st.column_config.NumberColumn(format="$%.2f"),
-                    "Max drawdown": st.column_config.NumberColumn(
+                    "Max drawdown": st.column_config.NumberColumn(format="percent"),
+                    "Fees": st.column_config.NumberColumn(format="$%.2f"),
+                    "Excess vs no-op": st.column_config.NumberColumn(format="percent"),
+                    "Double-cost return": st.column_config.NumberColumn(
                         format="percent"
                     ),
-                    "Fees": st.column_config.NumberColumn(format="$%.2f"),
                 },
             )
             st.divider()
@@ -187,6 +188,7 @@ with agent_tab:
         leaderboard = agent_leaderboard(run)
         heldout = heldout_results(run)
         evidence = evidence_summary(run)
+        promotion = promotion_assessment(run)
 
         st.markdown(
             '<span class="scope-pill">Validation-ranked agents</span>'
@@ -217,21 +219,29 @@ with agent_tab:
                 "snapshots. The environment masks non-hold actions there; "
                 "keep this path in the sandbox-evidence category."
             )
+        if promotion["status"] == "Promotion ready":
+            st.success(
+                "Promotion gate passed: this run cleared held-out, no-op, "
+                "cost-stress, provenance, and action-validity checks."
+            )
+        else:
+            st.error(
+                "Research-only policy. Promotion blockers: "
+                + "; ".join(promotion["failed_reasons"])
+                + "."
+            )
 
         selected_name = (
             (
                 f"{heldout.iloc[0]['Agent']} · "
+                f"{heldout.iloc[0]['Encoder']} · "
                 f"{heldout.iloc[0]['Action policy']}"
             )
             if not heldout.empty
             else "Unavailable"
         )
-        mean_return = (
-            float(heldout["Test return"].mean()) if not heldout.empty else 0.0
-        )
-        executions = (
-            int(heldout["Executions"].sum()) if not heldout.empty else 0
-        )
+        mean_return = float(heldout["Test return"].mean()) if not heldout.empty else 0.0
+        executions = int(heldout["Executions"].sum()) if not heldout.empty else 0
         metric_columns = st.columns(6)
         metric_columns[0].metric("Agents compared", len(leaderboard))
         metric_columns[1].metric("Selected agent", selected_name)
@@ -247,8 +257,10 @@ with agent_tab:
 
         st.subheader("Agent leaderboard")
         st.caption(
-            "Models are ranked only on validation evidence. Held-out data is "
-            "opened after a winner is fixed."
+            "Models are ranked only on validation evidence. Surface Graph Set "
+            "agents pass messages over neighboring strike/expiry contracts and "
+            "opposite-side counterparts. Held-out data is opened after a winner "
+            "is fixed."
         )
         st.dataframe(
             leaderboard,
@@ -313,9 +325,7 @@ with agent_tab:
                 column_config={
                     "Price": st.column_config.NumberColumn(format="$%.4f"),
                     "Fee": st.column_config.NumberColumn(format="$%.2f"),
-                    "Post-trade NAV": st.column_config.NumberColumn(
-                        format="$%.2f"
-                    ),
+                    "Post-trade NAV": st.column_config.NumberColumn(format="$%.2f"),
                 },
             )
 
@@ -325,11 +335,17 @@ with agent_tab:
                 f"`{run.get('schema_version')}`"
             )
             st.dataframe(heldout, width="stretch", hide_index=True)
-            st.json(json.loads(json.dumps({
-                "walk_forward": run.get("walk_forward"),
-                "training": run.get("training"),
-                "candidate_models": run.get("candidate_models"),
-            })))
+            st.json(
+                json.loads(
+                    json.dumps(
+                        {
+                            "walk_forward": run.get("walk_forward"),
+                            "training": run.get("training"),
+                            "candidate_models": run.get("candidate_models"),
+                        }
+                    )
+                )
+            )
 
 with market_tab:
     first = snapshot.iloc[0]
@@ -341,19 +357,23 @@ with market_tab:
     col5.metric("Market session", session["provider_state"])
     col6.metric(
         "Underlying quote age",
-        (
-            f"{freshness['age_seconds']:.0f}s"
-            if freshness["coverage"]
-            else "unknown"
-        ),
+        (f"{freshness['age_seconds']:.0f}s" if freshness["coverage"] else "unknown"),
     )
-    st.caption(
-        f"Collected at {first['collectedAt']} · Greeks: Black-Scholes-Merton"
-    )
+    st.caption(f"Collected at {first['collectedAt']} · Greeks: Black-Scholes-Merton")
 
     table_columns = [
-        "contractSymbol", "strike", "lastPrice", "bid", "ask", "volume",
-        "openInterest", "impliedVolatility", "delta", "gamma", "theta", "vega",
+        "contractSymbol",
+        "strike",
+        "lastPrice",
+        "bid",
+        "ask",
+        "volume",
+        "openInterest",
+        "impliedVolatility",
+        "delta",
+        "gamma",
+        "theta",
+        "vega",
     ]
     st.dataframe(filtered[table_columns], width="stretch", hide_index=True)
 
@@ -399,9 +419,7 @@ with market_tab:
     if buy_col.button(
         f"Paper buy at ask ${buy_price:,.2f}",
         disabled=(
-            not execution_enabled
-            or not math.isfinite(buy_price)
-            or buy_price <= 0
+            not execution_enabled or not math.isfinite(buy_price) or buy_price <= 0
         ),
         width="stretch",
     ):
@@ -416,9 +434,7 @@ with market_tab:
     if sell_col.button(
         f"Paper sell at bid ${sell_price:,.2f}",
         disabled=(
-            not execution_enabled
-            or not math.isfinite(sell_price)
-            or sell_price <= 0
+            not execution_enabled or not math.isfinite(sell_price) or sell_price <= 0
         ),
         width="stretch",
     ):
@@ -437,7 +453,9 @@ with portfolio_tab:
         load_latest_snapshot(DATA_DIR, ticker)
         for ticker in sorted({position["symbol"] for position in positions})
     ]
-    quotes = pd.concat(quote_frames, ignore_index=True) if quote_frames else pd.DataFrame()
+    quotes = (
+        pd.concat(quote_frames, ignore_index=True) if quote_frames else pd.DataFrame()
+    )
     marked = mark_positions(positions, quotes)
     market_value = float(marked["market_value"].sum()) if not marked.empty else 0.0
     unrealized = float(marked["unrealized_pnl"].sum()) if not marked.empty else 0.0

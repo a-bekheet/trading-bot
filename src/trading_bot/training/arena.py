@@ -18,7 +18,7 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v2"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v3"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 
 
@@ -27,8 +27,8 @@ def recurrent_arena_models(
     hidden_size: int = 8,
     initial_hold_bias: float = 0.0,
 ) -> tuple[ModelSpec, ...]:
-    """Return matched recurrent families with dense and sparse action heads."""
-    return tuple(
+    """Return flat controls plus topology-aware surface-GNN agents."""
+    flat_controls = tuple(
         ModelSpec(
             kind=kind,
             encoder="flat",
@@ -40,6 +40,21 @@ def recurrent_arena_models(
         for kind in ("gru", "lstm", "mixture")
         for action_decoder in ("factorized", "single_leg")
     )
+    surface_gnn_agents = tuple(
+        ModelSpec(
+            kind=kind,
+            encoder="surface_graph_set",
+            hidden_size=hidden_size,
+            graph_hidden_size=hidden_size,
+            graph_layers=1,
+            graph_neighbors=1,
+            initial_hold_bias=initial_hold_bias,
+            algorithm="ppo",
+            action_decoder="single_leg",
+        )
+        for kind in ("gru", "lstm", "mixture")
+    )
+    return flat_controls + surface_gnn_agents
 
 
 def run_agent_arena(
@@ -53,9 +68,9 @@ def run_agent_arena(
     env_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Run independent ticker tournaments and retain explicit failures."""
-    normalized_symbols = tuple(dict.fromkeys(
-        symbol.strip().upper() for symbol in symbols if symbol.strip()
-    ))
+    normalized_symbols = tuple(
+        dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip())
+    )
     if not normalized_symbols:
         raise ValueError("agent arena requires at least one symbol")
     if len(model_specs) < 2:
@@ -76,27 +91,31 @@ def run_agent_arena(
                 env_kwargs=env_kwargs,
             )
         except Exception as error:  # Continue the declared multi-ticker job.
-            failures.append({
-                "symbol": symbol,
-                "error_type": type(error).__name__,
-                "message": str(error),
-            })
+            failures.append(
+                {
+                    "symbol": symbol,
+                    "error_type": type(error).__name__,
+                    "message": str(error),
+                }
+            )
             continue
         folds = summary.get("folds", [])
-        completed.append({
-            "symbol": symbol,
-            "summary": str(output_dir / f"{symbol}-walk-forward.json"),
-            "folds": len(folds),
-            "selected_model_ids": [
-                fold.get("model_selection", {}).get("selected_model_id")
-                for fold in folds
-            ],
-            "heldout_returns": [
-                report.get("total_return")
-                for fold in folds
-                for report in fold.get("test", [])
-            ],
-        })
+        completed.append(
+            {
+                "symbol": symbol,
+                "summary": str(output_dir / f"{symbol}-walk-forward.json"),
+                "folds": len(folds),
+                "selected_model_ids": [
+                    fold.get("model_selection", {}).get("selected_model_id")
+                    for fold in folds
+                ],
+                "heldout_returns": [
+                    report.get("total_return")
+                    for fold in folds
+                    for report in fold.get("test", [])
+                ],
+            }
+        )
 
     artifact = {
         "schema_version": AGENT_ARENA_SCHEMA_VERSION,
@@ -195,11 +214,16 @@ def main() -> None:
         )
     except (ValueError, RuntimeError) as error:
         raise SystemExit(str(error)) from error
-    print(json.dumps({
-        "artifact": str(args.output_dir / "agent-arena.json"),
-        "completed": len(result["completed"]),
-        "failures": len(result["failures"]),
-    }, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "artifact": str(args.output_dir / "agent-arena.json"),
+                "completed": len(result["completed"]),
+                "failures": len(result["failures"]),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -376,6 +376,24 @@ positive edge. The optimized deterministic sparse actor cut its own alternating
 benchmark median by 4.8%, although it remains about 9.6% slower than the
 factorized GRU because exact joint decoding still adds fixed work.
 
+The v0.76 arena moves the structured option surface back into the default
+comparison. Three `surface_graph_set` PPO policies pair GRU, LSTM, and the
+gated mixture with the sparse single-leg decoder, alongside the six flat
+action-policy controls. In the first five-ticker run, surface GNNs won all five
+validation selections, with the gated mixture selected four times and GRU once.
+Their AAPL actor medians were about 343-390 microseconds versus 102-156 for the
+flat candidates. All held-out returns were nevertheless negative (mean
+-0.027%, 14 fills, $2.28 fees), so this is architecture-selection evidence, not
+alpha.
+
+The interface now makes that distinction executable through a fail-closed
+promotion assessment. Positive held-out and doubled-cost returns, per-path
+no-op improvement with statistical support, adequate history, confirmed
+regular-session provenance, and action validity must all pass. The current five
+paths pass none of the economic/evidence gates and remain explicitly
+research-only. Longer provider-confirmed intraday histories now have higher
+priority than expanding the model menu again.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session
