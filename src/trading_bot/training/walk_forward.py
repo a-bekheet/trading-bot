@@ -62,7 +62,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v60"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v61"
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,7 @@ class WalkForwardConfig:
     training_seed_worst_weight: float = 0.25
     training_seed_dispersion_penalty: float = 0.25
     selection_score_tolerance: float = 0.0
+    activation_min_score_advantage: float = 0.0
     test_seeds: tuple[int, ...] = (20_001,)
     bootstrap_samples: int = 2_000
     bootstrap_block_length: int | None = None
@@ -132,6 +133,13 @@ class WalkForwardConfig:
         ):
             raise ValueError(
                 "selection_score_tolerance must be finite and non-negative"
+            )
+        if (
+            not math.isfinite(self.activation_min_score_advantage)
+            or self.activation_min_score_advantage < 0
+        ):
+            raise ValueError(
+                "activation_min_score_advantage must be finite and non-negative"
             )
         if len(self.test_seeds) != 1:
             raise ValueError(
@@ -759,6 +767,61 @@ def _select_seed_robust_group(
     return selected
 
 
+def _validation_no_op_activation_gate(
+    validation_envs: Sequence[OptionsEnv],
+    *,
+    selected_score: float,
+    minimum_score_advantage: float,
+    seed: int,
+) -> dict[str, Any]:
+    """Require the research winner to beat no-op before sandbox activation."""
+    if not validation_envs:
+        raise ValueError("activation gate requires validation environments")
+    if not math.isfinite(selected_score):
+        raise ValueError("activation selected_score must be finite")
+    if (
+        not math.isfinite(minimum_score_advantage)
+        or minimum_score_advantage < 0
+    ):
+        raise ValueError(
+            "activation minimum_score_advantage must be finite and non-negative"
+        )
+    reports = [
+        run_episode(environment, no_op, seed + index)
+        for index, environment in enumerate(validation_envs)
+    ]
+    for report in reports:
+        invariants = (
+            report.total_reward,
+            report.max_drawdown,
+            report.downside_deviation,
+            report.turnover,
+            report.fees,
+            report.executions,
+            report.invalid_actions,
+            report.mean_abs_delta_notional_weight,
+        )
+        if any(abs(float(value)) > 1e-12 for value in invariants):
+            raise RuntimeError(
+                "validation no-op baseline violated zero-risk invariants"
+            )
+    baseline_score = 0.0
+    score_advantage = float(selected_score - baseline_score)
+    activated = score_advantage > minimum_score_advantage
+    return {
+        "scope": "validation_only",
+        "benchmark": "no_op",
+        "rule": "selected_score_strictly_exceeds_no_op_plus_margin",
+        "minimum_score_advantage": minimum_score_advantage,
+        "selected_agent_score": selected_score,
+        "no_op_score": baseline_score,
+        "score_advantage": score_advantage,
+        "activated": activated,
+        "sandbox_policy": "selected_agent" if activated else "no_op",
+        "validation_reports": _reports_to_dict(reports),
+    }
+
+
 def run_walk_forward_training(
     dataset: SnapshotDataset,
     walk_forward_config: WalkForwardConfig,
@@ -1070,6 +1133,20 @@ def run_walk_forward_training(
         )
         winning_run = winning_group["representative"]
         selection_rule = winning_group["selection_rule"]
+        activation_gate = _validation_no_op_activation_gate(
+            (validation_env,),
+            selected_score=winning_group["aggregate"][
+                "robust_training_seed_validation_score"
+            ],
+            minimum_score_advantage=(
+                walk_forward_config.activation_min_score_advantage
+            ),
+            seed=(
+                winning_run["training_seed"]
+                + 10_000
+                + winning_run["selected_episode"]
+            ),
+        )
         candidate_results = [
             {
                 "model_id": run["model_id"],
@@ -1653,6 +1730,7 @@ def run_walk_forward_training(
                     ),
                 },
                 "simplicity_rule": selection_rule,
+                "activation_gate": activation_gate,
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
                     "raw_mean_entropy_objective_ablation",
@@ -1820,6 +1898,15 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "minimum validation-score tolerance for the one-standard-error "
             "simplest-competitive selection rule"
+        ),
+    )
+    parser.add_argument(
+        "--activation-min-score-advantage",
+        type=float,
+        default=0.0,
+        help=(
+            "validation advantage over no-op required to activate the selected "
+            "agent in the sandbox"
         ),
     )
     parser.add_argument(
@@ -2155,6 +2242,9 @@ def _walk_forward_config_from_args(
             args.max_median_inference_latency_us
         ),
         selection_score_tolerance=args.selection_score_tolerance,
+        activation_min_score_advantage=(
+            args.activation_min_score_advantage
+        ),
     )
 
 

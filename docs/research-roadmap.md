@@ -405,6 +405,17 @@ all paths remained negative. Treat that comparison as iterative engineering on
 reused test data, not an out-of-sample alpha improvement; the next credible
 return comparison needs a newly collected, locked regular-session test range.
 
+The v0.78 activation layer stops a validation tournament from operationally
+deploying the least-bad negative policy. It compares the selected seed-robust
+score against deterministic validation no-op and requires a predeclared one-
+basis-point advantage in the default arena. All five current winners failed,
+so the research view still exposes their negative held-out paths while the
+sandbox view abstains. On the reused integration paths this avoided a -0.025%
+mean loss, 14 fills, and $3.32 in fees with no actor call. This is a safety and
+capital-preservation result, not evidence of a positive edge. Future alpha work
+must first produce a policy that activates on locked validation and then passes
+fresh regular-session held-out, no-op, doubled-cost, and statistical gates.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

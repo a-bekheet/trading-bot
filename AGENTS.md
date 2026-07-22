@@ -369,6 +369,16 @@ competitive IDs, and score sacrificed in every artifact. Single-ticker and
 universe commands default the materiality floor to zero unless explicitly
 declared; never tune it from held-out results.
 
+Validation selection does not automatically authorize sandbox execution. After
+the research winner is fixed, evaluate deterministic no-op on validation only
+and require the winner's seed-robust score to strictly exceed the no-op score
+plus `activation_min_score_advantage`. The default arena margin is `1e-4`; the
+general walk-forward commands default to zero. Persist the aligned validation
+report, scores, margin, decision, and sandbox policy. Held-out learned-agent
+evidence remains visible for research, but the operational projection must use
+no-op return, fills, fees, and zero actor latency when the gate abstains.
+Promotion additionally requires that this validation activation gate passed.
+
 The interface promotion status is a strict research-to-deployment gate, not a
 model-selection input. `Promotion ready` requires every held-out path to be
 positive, beat no-op with statistical support, remain positive under doubled

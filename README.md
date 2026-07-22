@@ -103,7 +103,10 @@ rules across tickers, writes one walk-forward artifact per ticker plus
 completed runs. It trains each candidate with three deterministic seed
 replicates. Selection retains every policy within one standard error of the raw
 leader, with a one-basis-point materiality floor, then prefers the existing
-ablation, actor-latency, and complexity ordering.
+ablation, actor-latency, and complexity ordering. A separate validation-only
+gate requires the winner to beat no-op by one basis point before the sandbox
+will invoke it; otherwise the research result stays visible while the active
+policy abstains.
 
 For a one-ticker drill-down with explicit settings:
 
@@ -787,6 +790,23 @@ tiny held-out data has already been inspected across development iterations,
 this comparison is engineering feedback, not fresh alpha evidence. Walk-forward,
 universe walk-forward, and arena schemas advance to v60, v43, and v4; package
 version is 0.77.0.
+
+v0.78 separates the validation-selected research winner from the policy allowed
+to act in the sandbox. A validation-only activation gate runs the deterministic
+no-op baseline on the same validation environment and requires the selected
+agent's seed-robust score to beat it by a predeclared margin. The default arena
+uses one basis point and fails closed on equality. Research checkpoints,
+held-out paths, and diagnostics remain available even when the operational
+surface abstains.
+
+All five current research winners had negative validation advantages, from
+-0.44 to -1.51 basis points, so every sandbox policy chose no-op. On the already
+inspected held-out paths this changed the operational view from a -0.025% mean
+return, 14 fills, $3.32 fees, and 133-microsecond median selected actor latency
+to 0%, zero fills, zero fees, and no actor invocation. This is loss avoidance,
+not alpha: the gate has not yet activated a profitable agent, and the same tiny
+test paths are not fresh evidence. Walk-forward, universe walk-forward, and
+arena schemas advance to v61, v44, and v5; package version is 0.78.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The

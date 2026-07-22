@@ -53,13 +53,14 @@ from trading_bot.training.walk_forward import (
     _select_seed_robust_group,
     _start_sampling_evidence,
     _training_seed_aggregate,
+    _validation_no_op_activation_gate,
     _walk_forward_config_from_args,
     resolve_recurrent_config,
 )
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v43"
+    "research-demo.universe-walk-forward.v44"
 )
 
 
@@ -623,6 +624,20 @@ def run_universe_walk_forward_training(
         )
         winning_run = winning_group["representative"]
         selection_rule = winning_group["selection_rule"]
+        activation_gate = _validation_no_op_activation_gate(
+            validation_envs,
+            selected_score=winning_group["aggregate"][
+                "robust_training_seed_validation_score"
+            ],
+            minimum_score_advantage=(
+                walk_forward_config.activation_min_score_advantage
+            ),
+            seed=(
+                winning_run["training_seed"]
+                + 10_000
+                + winning_run["selected"]["episode"]
+            ),
+        )
         candidate_results = []
         validation_scores = {
             group["representative"]["model_id"]: group["aggregate"][
@@ -1154,6 +1169,7 @@ def run_universe_walk_forward_training(
                     ),
                 },
                 "simplicity_rule": selection_rule,
+                "activation_gate": activation_gate,
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
                     "raw_mean_entropy_objective_ablation",

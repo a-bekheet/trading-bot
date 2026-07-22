@@ -130,12 +130,23 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
         selection_rule = fold.get("model_selection", {}).get(
             "simplicity_rule", {}
         )
+        activation_gate = fold.get("model_selection", {}).get(
+            "activation_gate", {}
+        )
+        activated = bool(activation_gate.get("activated", True))
+        no_op_reports = fold.get("baselines", {}).get("no_op", [])
         selected_latency = _number(
             winner.get("inference_latency", {}).get("median_microseconds")
         )
-        for report in fold.get("test", []):
+        for report_index, report in enumerate(fold.get("test", [])):
             steps = int(report.get("steps", 0))
             executions = int(report.get("executions", 0))
+            sandbox_report = report
+            if not activated and report_index < len(no_op_reports):
+                sandbox_report = no_op_reports[report_index]
+            sandbox_executions = int(sandbox_report.get("executions", 0))
+            research_return = _number(report.get("total_return"))
+            sandbox_return = _number(sandbox_report.get("total_return"))
             records.append(
                 {
                     "Fold": int(fold.get("fold", len(records))),
@@ -153,7 +164,16 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
                     "Competitive candidates": int(
                         selection_rule.get("competitive_candidate_count", 1)
                     ),
-                    "Test return": _number(report.get("total_return")),
+                    "Activation": "Active" if activated else "Abstain",
+                    "Sandbox policy": label if activated else "No Op",
+                    "Sandbox return": sandbox_return,
+                    "Sandbox lift": sandbox_return - research_return,
+                    "Sandbox executions": sandbox_executions,
+                    "Sandbox fees": _number(sandbox_report.get("fees")),
+                    "Sandbox latency (us)": (
+                        selected_latency if activated else 0.0
+                    ),
+                    "Test return": research_return,
                     "Final NAV": _number(report.get("final_nav")),
                     "Max drawdown": _number(report.get("max_drawdown")),
                     "Executions": executions,
@@ -192,6 +212,8 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
         encoders = sorted(set(heldout["Encoder"]))
         architectures = sorted(set(heldout["Architecture"]))
         action_policies = sorted(set(heldout["Action policy"]))
+        activations = sorted(set(heldout["Activation"]))
+        sandbox_policies = sorted(set(heldout["Sandbox policy"]))
         promotion = promotion_assessment(run)
         records.append(
             {
@@ -200,6 +222,17 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
                 "Selected encoder": ", ".join(encoders),
                 "Architecture": ", ".join(architectures),
                 "Action policy": ", ".join(action_policies),
+                "Activation": ", ".join(activations),
+                "Sandbox policy": ", ".join(sandbox_policies),
+                "Sandbox return": float(heldout["Sandbox return"].mean()),
+                "Sandbox lift": float(heldout["Sandbox lift"].mean()),
+                "Sandbox executions": int(
+                    heldout["Sandbox executions"].sum()
+                ),
+                "Sandbox fees": float(heldout["Sandbox fees"].sum()),
+                "Sandbox latency (us)": float(
+                    heldout["Sandbox latency (us)"].mean()
+                ),
                 "Selected latency (us)": float(
                     heldout["Selected latency (us)"].mean()
                 ),
@@ -240,6 +273,7 @@ def promotion_assessment(summary: dict[str, Any]) -> dict[str, Any]:
     double_cost_returns = []
     comparisons = []
     provenances = []
+    activation_gates = []
     invalid_actions = 0
     for fold in summary.get("folds", []):
         agent_reports = fold.get("test", [])
@@ -260,6 +294,9 @@ def promotion_assessment(summary: dict[str, Any]) -> dict[str, Any]:
         comparisons.extend(fold.get("statistical_comparisons", {}).get("no_op", []))
         provenances.append(
             fold.get("test_data_quality", {}).get("execution_provenance", "unknown")
+        )
+        activation_gates.append(
+            fold.get("model_selection", {}).get("activation_gate")
         )
 
     paired_count = min(len(agent_returns), len(no_op_returns))
@@ -286,6 +323,13 @@ def promotion_assessment(summary: dict[str, Any]) -> dict[str, Any]:
             double_cost_returns and min(double_cost_returns) > 0
         ),
         "no_invalid_actions": invalid_actions == 0,
+        "validation_activation_passed": bool(
+            activation_gates
+            and all(
+                isinstance(gate, dict) and gate.get("activated") is True
+                for gate in activation_gates
+            )
+        ),
     }
     labels = {
         "positive_heldout_return": "held-out return is not positive",
@@ -299,6 +343,9 @@ def promotion_assessment(summary: dict[str, Any]) -> dict[str, Any]:
         ),
         "positive_under_double_costs": ("return is not positive under double costs"),
         "no_invalid_actions": "held-out path contains invalid actions",
+        "validation_activation_passed": (
+            "validation no-op activation gate did not pass"
+        ),
     }
     failed = [labels[name] for name, passed in checks.items() if not passed]
     return {

@@ -32,6 +32,7 @@ from trading_bot.training.walk_forward import (
     _parser,
     _select_seed_robust_group,
     _training_seed_aggregate,
+    _validation_no_op_activation_gate,
     _walk_forward_config_from_args,
     resolve_recurrent_config,
     run_walk_forward_training,
@@ -155,6 +156,45 @@ class WalkForwardTrainingTests(TestCase):
                     2,
                     selection_score_tolerance=tolerance,
                 )
+
+    def test_activation_margin_must_be_finite_and_non_negative(self):
+        for margin in (-1.0, float("nan"), float("inf")):
+            with self.subTest(margin=margin), self.assertRaisesRegex(
+                ValueError,
+                "activation_min_score_advantage",
+            ):
+                WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    activation_min_score_advantage=margin,
+                )
+
+    def test_validation_no_op_gate_activates_only_above_margin(self):
+        environment = OptionsEnv(
+            walk_forward_dataset(),
+            slot_count=1,
+            starting_cash=1_000,
+        )
+
+        abstained = _validation_no_op_activation_gate(
+            (environment,),
+            selected_score=0.0001,
+            minimum_score_advantage=0.0001,
+            seed=7,
+        )
+        activated = _validation_no_op_activation_gate(
+            (environment,),
+            selected_score=0.00011,
+            minimum_score_advantage=0.0001,
+            seed=7,
+        )
+
+        self.assertFalse(abstained["activated"])
+        self.assertEqual(abstained["sandbox_policy"], "no_op")
+        self.assertEqual(abstained["no_op_score"], 0.0)
+        self.assertTrue(activated["activated"])
+        self.assertEqual(activated["sandbox_policy"], "selected_agent")
 
     def test_seed_robust_selection_does_not_choose_best_single_run(self):
         spec = ModelSpec(hidden_size=4)
@@ -1111,6 +1151,19 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(
             selection["simplicity_rule"]["minimum_score_tolerance"],
             0.0,
+        )
+        self.assertEqual(selection["activation_gate"]["benchmark"], "no_op")
+        self.assertEqual(
+            selection["activation_gate"]["minimum_score_advantage"],
+            0.0,
+        )
+        self.assertEqual(
+            selection["activation_gate"]["sandbox_policy"],
+            (
+                "selected_agent"
+                if selection["activation_gate"]["activated"]
+                else "no_op"
+            ),
         )
         self.assertTrue(
             all(

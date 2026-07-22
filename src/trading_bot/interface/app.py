@@ -122,32 +122,39 @@ with agent_tab:
                 "Newest run per ticker. Each row uses its own validation "
                 "tournament and separately selected held-out policy."
             )
-            arena_columns = st.columns(6)
+            arena_columns = st.columns(7)
             arena_columns[0].metric("Tickers evaluated", len(arena))
             arena_columns[1].metric(
-                "Total held-out fills", int(arena["Executions"].sum())
+                "Agents activated",
+                int((arena["Activation"] == "Active").sum()),
             )
             arena_columns[2].metric(
-                "Mean demo return",
-                f"{float(arena['Held-out return'].mean()):.3%}",
+                "Mean sandbox return",
+                f"{float(arena['Sandbox return'].mean()):.3%}",
             )
             arena_columns[3].metric(
-                "Surface-GNN winners",
+                "Research GNN winners",
                 int((arena["Selected encoder"] == "Surface Graph Set").sum()),
             )
             arena_columns[4].metric(
-                "Median selected latency",
-                f"{float(arena['Selected latency (us)'].median()):.1f} us",
+                "Sandbox fills", int(arena["Sandbox executions"].sum())
             )
             arena_columns[5].metric(
+                "Median sandbox latency",
+                f"{float(arena['Sandbox latency (us)'].median()):.1f} us",
+            )
+            arena_columns[6].metric(
                 "Promotion-ready paths",
                 int((arena["Promotion"] == "Promotion ready").sum()),
             )
             arena_chart, winner_chart = st.columns((3, 2))
             with arena_chart:
-                st.caption("Held-out return by ticker")
+                st.caption("Research winner versus activated sandbox return")
                 st.bar_chart(
-                    arena.set_index("Ticker")[["Held-out return"]],
+                    arena.set_index("Ticker")[[
+                        "Held-out return",
+                        "Sandbox return",
+                    ]],
                     height=260,
                 )
             with winner_chart:
@@ -167,9 +174,12 @@ with agent_tab:
                 hide_index=True,
                 column_config={
                     "Held-out return": st.column_config.NumberColumn(format="percent"),
+                    "Sandbox return": st.column_config.NumberColumn(format="percent"),
+                    "Sandbox lift": st.column_config.NumberColumn(format="percent"),
                     "Final NAV": st.column_config.NumberColumn(format="$%.2f"),
                     "Max drawdown": st.column_config.NumberColumn(format="percent"),
                     "Fees": st.column_config.NumberColumn(format="$%.2f"),
+                    "Sandbox fees": st.column_config.NumberColumn(format="$%.2f"),
                     "Excess vs no-op": st.column_config.NumberColumn(format="percent"),
                     "Double-cost return": st.column_config.NumberColumn(
                         format="percent"
@@ -197,6 +207,11 @@ with agent_tab:
             for fold in run.get("folds", [])
         ]
         selection_rules = [rule for rule in selection_rules if rule]
+        activation_gates = [
+            fold.get("model_selection", {}).get("activation_gate", {})
+            for fold in run.get("folds", [])
+        ]
+        activation_gates = [gate for gate in activation_gates if gate]
 
         st.markdown(
             '<span class="scope-pill">Validation-ranked agents</span>'
@@ -248,6 +263,22 @@ with agent_tab:
                 "ablation, latency, and complexity tie-breaks. "
                 f"Score traded: {float(rule['score_sacrificed_for_simplicity']) * 10_000:.2f} bp."
             )
+        if activation_gates:
+            gate = activation_gates[0]
+            advantage_bp = float(gate["score_advantage"]) * 10_000
+            required_bp = float(gate["minimum_score_advantage"]) * 10_000
+            if gate["activated"]:
+                st.success(
+                    "Sandbox activation passed: validation advantage over "
+                    f"no-op was {advantage_bp:.2f} bp versus {required_bp:.2f} "
+                    "bp required."
+                )
+            else:
+                st.warning(
+                    "Sandbox abstains and deploys no-op. The research winner's "
+                    f"validation advantage was {advantage_bp:.2f} bp versus "
+                    f"{required_bp:.2f} bp required."
+                )
 
         selected_name = (
             (
@@ -259,27 +290,35 @@ with agent_tab:
             else "Unavailable"
         )
         mean_return = float(heldout["Test return"].mean()) if not heldout.empty else 0.0
-        executions = int(heldout["Executions"].sum()) if not heldout.empty else 0
-        selected_latency = (
-            float(heldout["Selected latency (us)"].mean())
+        activation = (
+            str(heldout.iloc[0]["Activation"])
+            if not heldout.empty
+            else "Unavailable"
+        )
+        sandbox_return = (
+            float(heldout["Sandbox return"].mean())
             if not heldout.empty
             else 0.0
         )
-        metric_columns = st.columns(7)
+        sandbox_executions = (
+            int(heldout["Sandbox executions"].sum())
+            if not heldout.empty
+            else 0
+        )
+        sandbox_latency = (
+            float(heldout["Sandbox latency (us)"].mean())
+            if not heldout.empty
+            else 0.0
+        )
+        metric_columns = st.columns(8)
         metric_columns[0].metric("Agents compared", len(leaderboard))
-        metric_columns[1].metric("Selected agent", selected_name)
-        metric_columns[2].metric("Held-out return", f"{mean_return:.3%}")
-        metric_columns[3].metric("Held-out fills", executions)
-        metric_columns[4].metric(
-            "Fastest candidate",
-            f"{leaderboard['Median latency (us)'].min():.1f} us"
-            if not leaderboard.empty
-            else "n/a",
-        )
-        metric_columns[5].metric("Evidence", evidence["grade"])
-        metric_columns[6].metric(
-            "Selected latency", f"{selected_latency:.1f} us"
-        )
+        metric_columns[1].metric("Research winner", selected_name)
+        metric_columns[2].metric("Activation", activation)
+        metric_columns[3].metric("Research return", f"{mean_return:.3%}")
+        metric_columns[4].metric("Sandbox return", f"{sandbox_return:.3%}")
+        metric_columns[5].metric("Sandbox fills", sandbox_executions)
+        metric_columns[6].metric("Sandbox latency", f"{sandbox_latency:.1f} us")
+        metric_columns[7].metric("Evidence", evidence["grade"])
 
         st.subheader("Agent leaderboard")
         st.caption(
@@ -306,7 +345,7 @@ with agent_tab:
         fold_result = heldout[heldout["Fold"] == selected_fold]
         if not fold_result.empty:
             report = fold_result.iloc[0]
-            st.subheader("Held-out result")
+            st.subheader("Research-winner held-out result")
             result_columns = st.columns(6)
             result_columns[0].metric("Final NAV", f"${report['Final NAV']:,.2f}")
             result_columns[1].metric("Return", f"{report['Test return']:.3%}")

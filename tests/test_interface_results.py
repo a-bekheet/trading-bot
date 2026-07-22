@@ -145,6 +145,10 @@ class InterfaceResultTests(TestCase):
         self.assertEqual(heldout.iloc[0]["Encoder"], "Flat")
         self.assertEqual(heldout.iloc[0]["Architecture"], "Flat / Gru")
         self.assertEqual(heldout.iloc[0]["Competitive candidates"], 1)
+        self.assertEqual(heldout.iloc[0]["Activation"], "Active")
+        self.assertEqual(heldout.iloc[0]["Sandbox policy"], "GRU Agent")
+        self.assertAlmostEqual(heldout.iloc[0]["Sandbox return"], 0.01)
+        self.assertEqual(heldout.iloc[0]["Sandbox executions"], 1)
         self.assertEqual(heldout.iloc[0]["Action policy"], "Factorized multi-leg")
         self.assertAlmostEqual(heldout.iloc[0]["Test return"], 0.01)
         self.assertEqual(heldout.iloc[0]["Fills / decision"], 0.5)
@@ -179,6 +183,12 @@ class InterfaceResultTests(TestCase):
         nvda["folds"][0]["model_selection"]["candidates"][1]["model"]["encoder"] = (
             "surface_graph_set"
         )
+        nvda["folds"][0]["model_selection"]["activation_gate"] = {
+            "activated": False,
+        }
+        nvda["folds"][0]["baselines"] = {
+            "no_op": [{"total_return": 0.0, "executions": 0, "fees": 0.0}],
+        }
 
         overview = arena_overview([aapl_new, aapl_old, nvda])
 
@@ -189,6 +199,11 @@ class InterfaceResultTests(TestCase):
         self.assertEqual(overview.iloc[1]["Selected encoder"], "Surface Graph Set")
         self.assertEqual(overview.iloc[1]["Architecture"], "Surface Graph Set / Lstm")
         self.assertEqual(overview.iloc[1]["Action policy"], "Sparse single-leg")
+        self.assertEqual(overview.iloc[1]["Activation"], "Abstain")
+        self.assertEqual(overview.iloc[1]["Sandbox policy"], "No Op")
+        self.assertEqual(overview.iloc[1]["Sandbox return"], 0.0)
+        self.assertAlmostEqual(overview.iloc[1]["Sandbox lift"], -0.01)
+        self.assertEqual(overview.iloc[1]["Sandbox executions"], 0)
         self.assertEqual(overview.iloc[1]["Promotion"], "Research only")
 
     def test_promotion_gate_requires_all_deployment_evidence(self):
@@ -214,6 +229,7 @@ class InterfaceResultTests(TestCase):
         fold["test_data_quality"] = {
             "execution_provenance": "provider_confirmed_regular",
         }
+        fold["model_selection"]["activation_gate"] = {"activated": True}
 
         accepted = promotion_assessment(summary)
 
