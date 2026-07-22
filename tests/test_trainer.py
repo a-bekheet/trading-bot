@@ -56,6 +56,7 @@ from trading_bot.training.trainer import (
     selection_score,
     train_actor_critic,
 )
+from trading_bot.training.walk_forward import ModelSpec
 from tests.test_training_env import demo_dataset, three_snapshot_dataset
 
 
@@ -95,10 +96,12 @@ class TrainerTests(TestCase):
         self.assertEqual(float(forced_only.detach()), 0.0)
         torch.testing.assert_close(advantages.grad, torch.zeros(3))
 
-        action_masks = torch.tensor([
-            [[True, True, False], [True, False, False]],
-            [[True, False, False], [True, False, False]],
-        ])
+        action_masks = torch.tensor(
+            [
+                [[True, True, False], [True, False, False]],
+                [[True, False, False], [True, False, False]],
+            ]
+        )
         torch.testing.assert_close(
             _actor_objective_mask(action_masks, "components"),
             torch.tensor([[True, False], [False, False]]),
@@ -225,6 +228,7 @@ class TrainerTests(TestCase):
             graph_hidden_size=4,
             graph_layers=1,
             attention_heads=2,
+            critic_layer_norm=True,
         )
         training = TrainingConfig(
             episodes=1,
@@ -243,11 +247,12 @@ class TrainerTests(TestCase):
 
         self.assertEqual(restored.config.encoder, "attention_set")
         self.assertEqual(restored.config.attention_heads, 2)
+        self.assertTrue(restored.config.critic_layer_norm)
+        self.assertIsInstance(restored.value_norm, torch.nn.LayerNorm)
         self.assertEqual(manifest["schema_version"], CHECKPOINT_SCHEMA_VERSION)
-        self.assertTrue(all(
-            torch.isfinite(parameter).all()
-            for parameter in restored.parameters()
-        ))
+        self.assertTrue(
+            all(torch.isfinite(parameter).all() for parameter in restored.parameters())
+        )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_set_policy_trains_and_round_trips_checkpoint(self):
@@ -289,18 +294,175 @@ class TrainerTests(TestCase):
         self.assertEqual(restored.config.graph_neighbors, 0)
         self.assertIsNotNone(restored.mixture_gate)
         self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
-        self.assertTrue(all(
-            torch.isfinite(parameter).all()
-            for parameter in restored.parameters()
-        ))
+        self.assertTrue(
+            all(torch.isfinite(parameter).all() for parameter in restored.parameters())
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_surface_graph_lstm_trains_with_reinforce_and_round_trips(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        recurrent = ModelSpec(
+            kind="lstm",
+            encoder="surface_graph_set",
+            hidden_size=4,
+            graph_hidden_size=4,
+            graph_layers=1,
+            graph_neighbors=1,
+            algorithm="reinforce",
+        ).build(env)
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            algorithm="reinforce",
+            evaluation_interval=1,
+            seed=45,
+        )
+
+        model, metrics = train_actor_critic(env, recurrent, training)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "surface-graph-set.pt"
+            save_checkpoint(path, model, env, recurrent, training, metrics)
+            restored, _ = load_checkpoint(path)
+
+        self.assertEqual(restored.config.encoder, "surface_graph_set")
+        self.assertEqual(restored.config.kind, "lstm")
+        self.assertEqual(restored.config.graph_neighbors, 1)
+        self.assertTrue(
+            any(".neighbor." in name for name, _ in restored.named_parameters())
+        )
+        self.assertTrue(
+            all(torch.isfinite(parameter).all() for parameter in restored.parameters())
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_delta_hedged_auxiliary_target_trains_on_regular_fresh_endpoints(self):
+        source = three_snapshot_dataset()
+        snapshots = []
+        for index, snapshot in enumerate(source.snapshots):
+            frame = snapshot.frame.copy()
+            frame["underlyingPrice"] = 330.0 + index
+            frame["regularMarketPrice"] = 330.0 + index
+            frame["marketState"] = "REGULAR"
+            frame["regularMarketSession"] = 1.0
+            frame["marketStateCoverage"] = 1.0
+            frame["underlyingQuoteTime"] = frame["collectedAt"]
+            frame["underlyingQuoteTimeSource"] = "regularMarketTime"
+            frame["underlyingQuoteAgeSeconds"] = 0.0
+            frame["underlyingQuoteAgeCoverage"] = 1.0
+            snapshots.append(Snapshot(snapshot.timestamp, frame))
+        env = OptionsEnv(
+            SnapshotDataset(tuple(snapshots), source.symbol),
+            slot_count=2,
+        )
+        recurrent = ModelSpec(
+            kind="gru",
+            encoder="flat",
+            hidden_size=4,
+        ).build(env)
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=2,
+            evaluation_interval=1,
+            random_start=False,
+            auxiliary_coefficient=0.05,
+            seed=66,
+        )
+        target_index = AUXILIARY_TARGET_FEATURES.index(
+            "medianContractDeltaHedgedSpotReturn"
+        )
+        torch.manual_seed(training.seed)
+        initial = build_recurrent_actor_critic(recurrent)
+        initial_target_weight = initial.auxiliary.weight[target_index].detach().clone()
+
+        model, metrics = train_actor_critic(env, recurrent, training)
+
+        self.assertEqual(
+            metrics[0]["auxiliary_target_coverage"]["t+1"][
+                "medianContractDeltaHedgedSpotReturn"
+            ],
+            1.0,
+        )
+        self.assertFalse(
+            torch.equal(
+                initial_target_weight,
+                model.auxiliary.weight[target_index].detach(),
+            )
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_delta_neutrality_shapes_training_only_with_bounded_exposure(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        recurrent = ModelSpec(
+            kind="gru",
+            encoder="flat",
+            hidden_size=4,
+        ).build(env)
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=2,
+            evaluation_interval=1,
+            random_start=False,
+            delta_neutrality_coefficient=0.001,
+            seed=67,
+        )
+
+        with patch(
+            "trading_bot.training.trainer.delta_notional_weight",
+            return_value=20.0,
+        ):
+            _, metrics = train_actor_critic(env, recurrent, training)
+
+        metric = metrics[0]
+        expected_penalty = -0.001 * 10.0 * metric["steps"]
+        self.assertAlmostEqual(
+            metric["reward_components"]["delta_neutrality"],
+            expected_penalty,
+        )
+        self.assertAlmostEqual(
+            metric["total_reward"],
+            metric["raw_total_reward"] + expected_penalty,
+        )
+        self.assertEqual(metric["mean_abs_delta_notional_weight"], 20.0)
+        self.assertEqual(metric["max_abs_delta_notional_weight"], 20.0)
+        self.assertEqual(metric["delta_notional_weight_coverage"], 1.0)
+        self.assertEqual(
+            metric["evaluation_total_reward"],
+            metric["evaluation_by_symbol"][env.dataset.symbol]["total_reward"],
+        )
 
     def test_cli_selects_single_or_top50_training_universe(self):
         single = _parser().parse_args(["--symbol", "msft"])
         universe = _parser().parse_args(["--universe", "top50"])
         sparse = _parser().parse_args(["--action-decoder", "single_leg"])
-        attention = _parser().parse_args([
-            "--encoder", "attention_set", "--attention-heads", "2",
-        ])
+        attention = _parser().parse_args(
+            [
+                "--encoder",
+                "attention_set",
+                "--attention-heads",
+                "2",
+            ]
+        )
+        auxiliary = _parser().parse_args(
+            [
+                "--auxiliary-target-exclusion",
+                "medianContractDeltaHedgedSpotReturn",
+                "--delta-neutrality-coefficient",
+                "0.0001",
+                "--learning-rate",
+                "0.001",
+                "--value-clip",
+                "0.1",
+                "--value-coefficient",
+                "0.4",
+                "--gradient-clip",
+                "0.3",
+                "--critic-layer-norm",
+            ]
+        )
 
         self.assertEqual(_symbols_from_args(single), ("MSFT",))
         self.assertEqual(single.slot_assignment, "stable")
@@ -313,31 +475,53 @@ class TrainerTests(TestCase):
         self.assertEqual(attention.encoder, "attention_set")
         self.assertEqual(attention.attention_heads, 2)
         self.assertEqual(
-            _environment_kwargs_from_args(single)[
-                "reward_drawdown_penalty"
-            ],
+            auxiliary.auxiliary_target_exclusion,
+            ["medianContractDeltaHedgedSpotReturn"],
+        )
+        self.assertEqual(auxiliary.delta_neutrality_coefficient, 0.0001)
+        self.assertEqual(auxiliary.learning_rate, 0.001)
+        self.assertEqual(auxiliary.value_clip, 0.1)
+        self.assertEqual(auxiliary.value_coefficient, 0.4)
+        self.assertEqual(auxiliary.gradient_clip, 0.3)
+        self.assertTrue(auxiliary.critic_layer_norm)
+        self.assertEqual(
+            _environment_kwargs_from_args(single)["reward_drawdown_penalty"],
             0.0,
         )
-        risk_args = _parser().parse_args([
-            "--burn-in-steps", "13",
-            "--reward-drawdown-penalty", "2.5",
-            "--reward-downside-penalty", "1.5",
-        ])
+        risk_args = _parser().parse_args(
+            [
+                "--burn-in-steps",
+                "13",
+                "--reward-drawdown-penalty",
+                "2.5",
+                "--reward-downside-penalty",
+                "1.5",
+            ]
+        )
         risk_environment = _environment_kwargs_from_args(risk_args)
         self.assertEqual(risk_args.burn_in_steps, 13)
         self.assertEqual(risk_environment["reward_drawdown_penalty"], 2.5)
         self.assertEqual(risk_environment["reward_downside_penalty"], 1.5)
         self.assertEqual(risk_environment["portfolio_valuation"], "liquidation")
         self.assertEqual(
-            _environment_kwargs_from_args(_parser().parse_args([
-                "--portfolio-valuation", "midpoint",
-            ]))["portfolio_valuation"],
+            _environment_kwargs_from_args(
+                _parser().parse_args(
+                    [
+                        "--portfolio-valuation",
+                        "midpoint",
+                    ]
+                )
+            )["portfolio_valuation"],
             "midpoint",
         )
         self.assertTrue(
-            _parser().parse_args([
-                "--allow-collateralized-option-shorts",
-            ]).allow_collateralized_option_shorts
+            _parser()
+            .parse_args(
+                [
+                    "--allow-collateralized-option-shorts",
+                ]
+            )
+            .allow_collateralized_option_shorts
         )
         self.assertEqual(sparse.action_decoder, "single_leg")
         self.assertEqual(
@@ -351,13 +535,15 @@ class TrainerTests(TestCase):
     def test_benchmarks_streaming_policy_inference_without_changing_mode(self):
         env = OptionsEnv(three_snapshot_dataset(), slot_count=1)
         observation, _ = env.reset(seed=3)
-        model = build_recurrent_actor_critic(RecurrentConfig(
-            input_size=observation_vector(observation).shape[0],
-            slot_count=1,
-            action_slot_count=env.action_shape[0],
-            action_count=env.action_shape[1],
-            hidden_size=4,
-        ))
+        model = build_recurrent_actor_critic(
+            RecurrentConfig(
+                input_size=observation_vector(observation).shape[0],
+                slot_count=1,
+                action_slot_count=env.action_shape[0],
+                action_count=env.action_shape[1],
+                hidden_size=4,
+            )
+        )
         model.train()
 
         report = benchmark_recurrent_inference(
@@ -429,35 +615,31 @@ class TrainerTests(TestCase):
     def test_streaming_policy_can_reset_snapshot_restore_and_fork_every_kind(self):
         env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
         first, _ = env.reset(seed=97)
-        second, _, _, _, _ = env.step(
-            np.zeros(env.action_shape[0], dtype=np.int64)
-        )
+        second, _, _, _, _ = env.step(np.zeros(env.action_shape[0], dtype=np.int64))
 
         def tensors(value):
             if isinstance(value, dict):
                 return tuple(
-                    tensor
-                    for key in sorted(value)
-                    for tensor in tensors(value[key])
+                    tensor for key in sorted(value) for tensor in tensors(value[key])
                 )
             if isinstance(value, tuple):
-                return tuple(
-                    tensor for item in value for tensor in tensors(item)
-                )
+                return tuple(tensor for item in value for tensor in tensors(item))
             return (value,)
 
         for kind in ("gru", "lstm", "hybrid", "mixture"):
             with self.subTest(kind=kind):
-                model = build_recurrent_actor_critic(RecurrentConfig(
-                    input_size=observation_vector(first).size,
-                    slot_count=2,
-                    action_count=env.action_shape[1],
-                    action_slot_count=env.action_shape[0],
-                    hidden_size=4,
-                    layers=2,
-                    dropout=0.5,
-                    kind=kind,
-                ))
+                model = build_recurrent_actor_critic(
+                    RecurrentConfig(
+                        input_size=observation_vector(first).size,
+                        slot_count=2,
+                        action_count=env.action_shape[1],
+                        action_slot_count=env.action_shape[0],
+                        hidden_size=4,
+                        layers=2,
+                        dropout=0.5,
+                        kind=kind,
+                    )
+                )
                 model.eval()
                 policy = recurrent_policy(model, 2)
                 self.assertIsInstance(policy, StreamingRecurrentPolicy)
@@ -469,10 +651,12 @@ class TrainerTests(TestCase):
                 branch_point = policy.snapshot()
                 mutable_copy = policy.snapshot()
                 tensors(mutable_copy.hidden_state)[0].add_(1_000)
-                self.assertFalse(torch.equal(
-                    tensors(mutable_copy.hidden_state)[0],
-                    tensors(policy.snapshot().hidden_state)[0],
-                ))
+                self.assertFalse(
+                    torch.equal(
+                        tensors(mutable_copy.hidden_state)[0],
+                        tensors(policy.snapshot().hidden_state)[0],
+                    )
+                )
                 branch = policy.fork()
                 expected_second_action = policy(second)
                 branch_second_action = branch(second)
@@ -503,12 +687,59 @@ class TrainerTests(TestCase):
                 np.testing.assert_array_equal(policy(first), first_action)
 
     @skipUnless(torch is not None, "install the optional ml extra")
+    def test_streaming_flat_ablation_precompaction_is_action_equivalent(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset(seed=68)
+        for masked, expected_slice in (
+            ((0, 2, 4), None),
+            ((1, 2, 3), (1, 4)),
+        ):
+            with self.subTest(masked=masked):
+                config = RecurrentConfig(
+                    input_size=observation_vector(observation).size,
+                    slot_count=2,
+                    action_count=env.action_shape[1],
+                    action_slot_count=env.action_shape[0],
+                    hidden_size=8,
+                    masked_input_indices=masked,
+                )
+                model = build_recurrent_actor_critic(config)
+                model.eval()
+                raw = torch.from_numpy(observation_vector(observation)).view(
+                    1,
+                    1,
+                    -1,
+                )
+                mask = torch.from_numpy(observation.action_mask).unsqueeze(0)
+                with torch.inference_mode():
+                    expected, _ = model.act(raw, mask, deterministic=True)
+
+                policy = recurrent_policy(model, 2)
+                batched = batched_recurrent_policy(model, 2, 2)
+                actual = policy(observation)
+
+                self.assertEqual(
+                    policy._contiguous_mask_slice,
+                    expected_slice,
+                )
+                self.assertEqual(
+                    batched._contiguous_mask_slice,
+                    expected_slice,
+                )
+                np.testing.assert_array_equal(
+                    actual,
+                    expected.squeeze(0).numpy(),
+                )
+                np.testing.assert_array_equal(
+                    batched((observation, observation)),
+                    np.repeat(expected.numpy(), 2, axis=0),
+                )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
     def test_streaming_policy_rejects_state_contamination_and_bad_snapshots(self):
         env = OptionsEnv(three_snapshot_dataset(), slot_count=1)
         first, _ = env.reset(seed=101)
-        second, _, _, _, _ = env.step(
-            np.zeros(env.action_shape[0], dtype=np.int64)
-        )
+        second, _, _, _, _ = env.step(np.zeros(env.action_shape[0], dtype=np.int64))
         config = RecurrentConfig(
             input_size=observation_vector(first).size,
             slot_count=1,
@@ -572,9 +803,12 @@ class TrainerTests(TestCase):
                 "finite floating point",
             ),
         ):
-            with self.subTest(message=message), self.assertRaisesRegex(
-                ValueError,
-                message,
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(
+                    ValueError,
+                    message,
+                ),
             ):
                 policy.restore(bad_state)
         with self.assertRaisesRegex(TypeError, "RecurrentPolicyState"):
@@ -608,28 +842,26 @@ class TrainerTests(TestCase):
         def tensors(value):
             if isinstance(value, dict):
                 return tuple(
-                    tensor
-                    for key in sorted(value)
-                    for tensor in tensors(value[key])
+                    tensor for key in sorted(value) for tensor in tensors(value[key])
                 )
             if isinstance(value, tuple):
-                return tuple(
-                    tensor for item in value for tensor in tensors(item)
-                )
+                return tuple(tensor for item in value for tensor in tensors(item))
             return (value,)
 
         for kind in ("gru", "lstm", "hybrid", "mixture"):
             with self.subTest(kind=kind):
-                model = build_recurrent_actor_critic(RecurrentConfig(
-                    input_size=observation_vector(first).size,
-                    slot_count=2,
-                    action_count=env.action_shape[1],
-                    action_slot_count=env.action_shape[0],
-                    hidden_size=4,
-                    layers=2,
-                    dropout=0.5,
-                    kind=kind,
-                ))
+                model = build_recurrent_actor_critic(
+                    RecurrentConfig(
+                        input_size=observation_vector(first).size,
+                        slot_count=2,
+                        action_count=env.action_shape[1],
+                        action_slot_count=env.action_shape[0],
+                        hidden_size=4,
+                        layers=2,
+                        dropout=0.5,
+                        kind=kind,
+                    )
+                )
                 model.eval()
                 serial = [recurrent_policy(model, 2) for _ in range(3)]
                 batched = batched_recurrent_policy(model, 2, 3)
@@ -646,14 +878,16 @@ class TrainerTests(TestCase):
                 batched.reset([1])
                 serial[1].reset()
                 observations = (second, first, second)
-                expected = np.stack([
-                    policy(observation)
-                    for policy, observation in zip(
-                        serial,
-                        observations,
-                        strict=True,
-                    )
-                ])
+                expected = np.stack(
+                    [
+                        policy(observation)
+                        for policy, observation in zip(
+                            serial,
+                            observations,
+                            strict=True,
+                        )
+                    ]
+                )
                 np.testing.assert_array_equal(batched(observations), expected)
                 self.assertEqual(batched.steps, (2, 1, 2))
 
@@ -670,7 +904,7 @@ class TrainerTests(TestCase):
                     ):
                         self.assertEqual(combined.device.type, "cpu")
                         torch.testing.assert_close(
-                            combined[:, index:index + 1],
+                            combined[:, index : index + 1],
                             isolated,
                         )
 
@@ -693,16 +927,16 @@ class TrainerTests(TestCase):
     def test_batched_policy_rejects_cross_cursor_contamination(self):
         env = OptionsEnv(three_snapshot_dataset(), slot_count=1)
         first, _ = env.reset(seed=104)
-        second, _, _, _, _ = env.step(
-            np.zeros(env.action_shape[0], dtype=np.int64)
+        second, _, _, _, _ = env.step(np.zeros(env.action_shape[0], dtype=np.int64))
+        model = build_recurrent_actor_critic(
+            RecurrentConfig(
+                input_size=observation_vector(first).size,
+                slot_count=1,
+                action_count=env.action_shape[1],
+                action_slot_count=env.action_shape[0],
+                hidden_size=4,
+            )
         )
-        model = build_recurrent_actor_critic(RecurrentConfig(
-            input_size=observation_vector(first).size,
-            slot_count=1,
-            action_count=env.action_shape[1],
-            action_slot_count=env.action_shape[0],
-            hidden_size=4,
-        ))
         with self.assertRaisesRegex(ValueError, "model.eval"):
             batched_recurrent_policy(model, 2, 2)
         model.eval()
@@ -719,9 +953,7 @@ class TrainerTests(TestCase):
         policy.reset([1])
         partial = policy.snapshot()
         self.assertEqual(partial.steps, (1, 0))
-        self.assertTrue(
-            torch.count_nonzero(partial.hidden_state[:, 1, :]) == 0
-        )
+        self.assertTrue(torch.count_nonzero(partial.hidden_state[:, 1, :]) == 0)
         contaminated = partial.hidden_state.clone()
         contaminated[:, 1, :] = 1
         for state, message in (
@@ -742,9 +974,12 @@ class TrainerTests(TestCase):
                 "non-negative",
             ),
         ):
-            with self.subTest(message=message), self.assertRaisesRegex(
-                ValueError,
-                message,
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(
+                    ValueError,
+                    message,
+                ),
             ):
                 policy.restore(state)
         with self.assertRaisesRegex(TypeError, "BatchedRecurrentPolicyState"):
@@ -752,9 +987,12 @@ class TrainerTests(TestCase):
         with self.assertRaisesRegex(ValueError, "positive integer"):
             BatchedStreamingRecurrentPolicy(model, 2, 0)
         for indices in ((0, 0), (-1,), (2,), (True,)):
-            with self.subTest(indices=indices), self.assertRaisesRegex(
-                ValueError,
-                "unique valid",
+            with (
+                self.subTest(indices=indices),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "unique valid",
+                ),
             ):
                 policy.reset(indices)
 
@@ -781,13 +1019,15 @@ class TrainerTests(TestCase):
     def test_evaluation_restores_model_mode_after_episode_failure(self):
         env = OptionsEnv(demo_dataset(), slot_count=1)
         observation, _ = env.reset(seed=103)
-        model = build_recurrent_actor_critic(RecurrentConfig(
-            input_size=observation_vector(observation).size,
-            slot_count=1,
-            action_count=env.action_shape[1],
-            action_slot_count=env.action_shape[0],
-            hidden_size=4,
-        ))
+        model = build_recurrent_actor_critic(
+            RecurrentConfig(
+                input_size=observation_vector(observation).size,
+                slot_count=1,
+                action_count=env.action_shape[1],
+                action_slot_count=env.action_shape[0],
+                hidden_size=4,
+            )
+        )
         self.assertTrue(model.training)
 
         with (
@@ -831,85 +1071,129 @@ class TrainerTests(TestCase):
             sequence_length=2,
             evaluation_interval=1,
             seed=11,
+            delta_neutrality_coefficient=0.001,
             auxiliary_coefficient=0.05,
+            auxiliary_target_exclusions=("medianContractDeltaHedgedSpotReturn",),
         )
 
         torch.manual_seed(training.seed)
         initial_auxiliary_weight = (
-            build_recurrent_actor_critic(recurrent)
-            .auxiliary.weight.detach().clone()
+            build_recurrent_actor_critic(recurrent).auxiliary.weight.detach().clone()
         )
 
         model, metrics = train_actor_critic(env, recurrent, training)
 
         self.assertEqual(len(metrics), 2)
         self.assertTrue(all(math.isfinite(item["loss"]) for item in metrics))
-        self.assertTrue(all(
-            math.isclose(
-                sum(item["reward_components"].values()),
-                item["total_reward"],
+        self.assertTrue(
+            all(
+                math.isclose(
+                    sum(item["reward_components"].values()),
+                    item["total_reward"],
+                )
+                for item in metrics
             )
-            for item in metrics
-        ))
-        self.assertTrue(all(
-            item["reward_components"]["drawdown"] <= 0
-            and item["reward_components"]["downside"] <= 0
-            for item in metrics
-        ))
+        )
+        self.assertTrue(
+            all(
+                item["reward_components"]["drawdown"] <= 0
+                and item["reward_components"]["downside"] <= 0
+                for item in metrics
+            )
+        )
         self.assertTrue(all(item["ppo_updates"] >= 1 for item in metrics))
         self.assertTrue(all(0 <= item["clip_fraction"] <= 1 for item in metrics))
         self.assertTrue(all(math.isfinite(item["approx_kl"]) for item in metrics))
         self.assertTrue(all(math.isfinite(item["auxiliary_loss"]) for item in metrics))
         self.assertTrue(all(item["auxiliary_loss"] >= 0 for item in metrics))
-        self.assertTrue(all(
-            item["auxiliary_target_coverage"]["t+1"]["underlyingReturn"] == 1
-            for item in metrics
-        ))
-        self.assertTrue(all(math.isfinite(item["evaluation_total_reward"]) for item in metrics))
-        self.assertTrue(all(math.isfinite(item["evaluation_selection_score"]) for item in metrics))
-        self.assertTrue(all(0 <= item["requested_action_rate"] <= 1 for item in metrics))
+        self.assertTrue(
+            all(
+                item["auxiliary_target_coverage"]["t+1"]["underlyingReturn"] == 1
+                for item in metrics
+            )
+        )
+        self.assertTrue(
+            all(
+                item["auxiliary_target_coverage"]["t+1"][
+                    "medianContractDeltaHedgedSpotReturn"
+                ]
+                == 0
+                and item["auxiliary_target_exclusions"]
+                == ["medianContractDeltaHedgedSpotReturn"]
+                for item in metrics
+            )
+        )
+        self.assertTrue(
+            all(math.isfinite(item["evaluation_total_reward"]) for item in metrics)
+        )
+        self.assertTrue(
+            all(math.isfinite(item["evaluation_selection_score"]) for item in metrics)
+        )
+        self.assertTrue(
+            all(0 <= item["requested_action_rate"] <= 1 for item in metrics)
+        )
         self.assertTrue(all(0 <= item["slot_churn_rate"] <= 1 for item in metrics))
         self.assertTrue(all(item["transition_seconds_mean"] == 60 for item in metrics))
         self.assertTrue(all(item["effective_gamma_mean"] > 0.99 for item in metrics))
-        self.assertTrue(all(
-            math.isclose(
-                item["entropy_bonus"],
-                training.entropy_coefficient * item["entropy"],
+        self.assertTrue(
+            all(
+                math.isclose(
+                    item["entropy_bonus"],
+                    training.entropy_coefficient * item["entropy"],
+                )
+                for item in metrics
             )
-            for item in metrics
-        ))
-        self.assertTrue(all(
-            0 <= item["feasible_normalized_action_entropy"] <= 1
-            and item["raw_action_entropy"] >= 0
-            and 0 <= item["explorable_action_factor_fraction"] <= 1
-            and item["entropy_objective"] == "feasible_normalized"
-            for item in metrics
-        ))
-        self.assertTrue(all(
-            item["reward_rms"] >= 0
-            and item["return_target_rms"] >= 0
-            and item["return_target_max_abs"] >= 0
-            and item["value_residual_rms"] >= 0
-            and item["actor_head_gradient_norm"] >= 0
-            and item["critic_head_gradient_norm"] >= 0
-            and all(math.isfinite(item[name]) for name in (
-                "reward_rms",
-                "return_target_mean",
-                "return_target_std",
-                "return_target_rms",
-                "return_target_max_abs",
-                "value_residual_rms",
-                "actor_head_gradient_norm",
-                "critic_head_gradient_norm",
-            ))
-            for item in metrics
-        ))
+        )
+        self.assertTrue(
+            all(
+                0 <= item["feasible_normalized_action_entropy"] <= 1
+                and item["raw_action_entropy"] >= 0
+                and 0 <= item["explorable_action_factor_fraction"] <= 1
+                and item["entropy_objective"] == "feasible_normalized"
+                for item in metrics
+            )
+        )
+        self.assertTrue(
+            all(
+                item["reward_rms"] >= 0
+                and item["return_target_rms"] >= 0
+                and item["return_target_max_abs"] >= 0
+                and item["value_residual_rms"] >= 0
+                and item["actor_head_gradient_norm"] >= 0
+                and item["critic_head_gradient_norm"] >= 0
+                and all(
+                    math.isfinite(item[name])
+                    for name in (
+                        "reward_rms",
+                        "return_target_mean",
+                        "return_target_std",
+                        "return_target_rms",
+                        "return_target_max_abs",
+                        "value_residual_rms",
+                        "actor_head_gradient_norm",
+                        "critic_head_gradient_norm",
+                    )
+                )
+                for item in metrics
+            )
+        )
         self.assertEqual(sum(item["selected_checkpoint"] for item in metrics), 1)
-        self.assertTrue(all(torch.isfinite(parameter).all() for parameter in model.parameters()))
-        self.assertFalse(torch.equal(
-            initial_auxiliary_weight,
-            model.auxiliary.weight.detach(),
-        ))
+        self.assertTrue(
+            all(torch.isfinite(parameter).all() for parameter in model.parameters())
+        )
+        self.assertFalse(
+            torch.equal(
+                initial_auxiliary_weight,
+                model.auxiliary.weight.detach(),
+            )
+        )
+        excluded_index = AUXILIARY_TARGET_FEATURES.index(
+            "medianContractDeltaHedgedSpotReturn"
+        )
+        torch.testing.assert_close(
+            initial_auxiliary_weight[excluded_index],
+            model.auxiliary.weight.detach()[excluded_index],
+        )
         with TemporaryDirectory() as directory:
             path = Path(directory) / "model.pt"
             save_checkpoint(path, model, env, recurrent, training, metrics)
@@ -920,33 +1204,39 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["schema_version"], CHECKPOINT_SCHEMA_VERSION)
         self.assertEqual(sidecar["mode"], "research_demo")
         self.assertEqual(sidecar["algorithm"], "stateful_factorized_ppo")
-        self.assertEqual(sidecar["action_policy"], {
-            "factorization": "independent_masked_rows",
-            "initial_hold_bias": 5.0,
-            "hard_order_cap": None,
-            "likelihood": "exact_joint_product",
-            "ppo_surrogate": "joint_clipped_ratio",
-        })
-        self.assertEqual(sidecar["policy_optimization"], {
-            "action_distribution_likelihood": "exact_factorized_product",
-            "optimization_log_likelihood_aggregation": "joint",
-            "ppo_importance_ratio": "joint",
-            "reinforce_score_function": None,
-            "entropy_objective": "feasible_normalized",
-            "entropy_reduction": (
-                "mean_per_decision_over_explorable_factors_normalized_by_log_feasible_actions"
-            ),
-            "actor_credit_assignment": {
-                "choice_definition": "at_least_one_decoder_factor_has_multiple_feasible_actions",
-                "advantage_normalization": "choice_steps_only",
-                "policy_surrogate": "explorable_support_only",
-                "entropy": "explorable_support_only",
-                "kl_and_clip_diagnostics": "explorable_support_only",
-                "critic_returns": "all_chronological_transitions",
-                "recurrent_context": "all_chronological_transitions",
-                "auxiliary_targets": "all_available_chronological_transitions",
+        self.assertEqual(
+            sidecar["action_policy"],
+            {
+                "factorization": "independent_masked_rows",
+                "initial_hold_bias": 5.0,
+                "hard_order_cap": None,
+                "likelihood": "exact_joint_product",
+                "ppo_surrogate": "joint_clipped_ratio",
             },
-        })
+        )
+        self.assertEqual(
+            sidecar["policy_optimization"],
+            {
+                "action_distribution_likelihood": "exact_factorized_product",
+                "optimization_log_likelihood_aggregation": "joint",
+                "ppo_importance_ratio": "joint",
+                "reinforce_score_function": None,
+                "entropy_objective": "feasible_normalized",
+                "entropy_reduction": (
+                    "mean_per_decision_over_explorable_factors_normalized_by_log_feasible_actions"
+                ),
+                "actor_credit_assignment": {
+                    "choice_definition": "at_least_one_decoder_factor_has_multiple_feasible_actions",
+                    "advantage_normalization": "choice_steps_only",
+                    "policy_surrogate": "explorable_support_only",
+                    "entropy": "explorable_support_only",
+                    "kl_and_clip_diagnostics": "explorable_support_only",
+                    "critic_returns": "all_chronological_transitions",
+                    "recurrent_context": "all_chronological_transitions",
+                    "auxiliary_targets": "all_available_chronological_transitions",
+                },
+            },
+        )
         self.assertEqual(
             sidecar["critic_balance_diagnostic"]["schema_version"],
             CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION,
@@ -984,18 +1274,46 @@ class TrainerTests(TestCase):
                 },
             },
         )
-        self.assertEqual(sidecar["auxiliary_prediction"], {
-            "enabled": True,
-            "coefficient": 0.05,
-            "targets": list(AUXILIARY_TARGET_FEATURES),
-            "horizons": [1],
-            "target_semantics": "cumulative_change_from_policy_state",
-            "availability": "endpoint_point_in_time_coverage_mask",
-            "contract_matching": "contract_id_at_both_endpoints",
-            "contract_aggregation": "cross_sectional_median",
-            "contract_minimum_coverage": 0.5,
-            "inference_path": "excluded_from_policy_inference",
-        })
+        self.assertEqual(
+            sidecar["auxiliary_prediction"],
+            {
+                "enabled": True,
+                "coefficient": 0.05,
+                "targets": list(AUXILIARY_TARGET_FEATURES),
+                "excluded_targets": [
+                    "medianContractDeltaHedgedSpotReturn",
+                ],
+                "horizons": [1],
+                "target_semantics": "cumulative_change_from_policy_state",
+                "availability": "endpoint_point_in_time_coverage_mask",
+                "contract_matching": "contract_id_at_both_endpoints",
+                "contract_aggregation": "cross_sectional_median",
+                "delta_hedged_target": {
+                    "hedge_delta": "current_endpoint",
+                    "underlying_move": "future_minus_current",
+                    "normalization": "current_underlying_spot",
+                    "rehedging": "none_between_endpoints",
+                    "financing_and_dividends": "excluded",
+                    "session_requirement": "explicit_regular_at_both_endpoints",
+                    "underlying_quote_age_coverage": "required_at_both_endpoints",
+                    "max_underlying_quote_age_seconds": 1_200.0,
+                },
+                "contract_minimum_coverage": 0.5,
+                "inference_path": "excluded_from_policy_inference",
+            },
+        )
+        self.assertEqual(
+            sidecar["delta_neutrality_training_objective"],
+            {
+                "enabled": True,
+                "coefficient": 0.001,
+                "exposure": ("absolute_portfolio_delta_times_spot_divided_by_nav"),
+                "maximum_abs_exposure_for_training": 10.0,
+                "scope": "training_rewards_only",
+                "evaluation_rewards": "unshaped_executable_net_liquidation",
+                "inference_path": "unchanged",
+            },
+        )
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
         self.assertEqual(sidecar["selection"]["metric"], "evaluation_selection_score")
         self.assertEqual(
@@ -1005,6 +1323,8 @@ class TrainerTests(TestCase):
                 "drawdown_penalty": 0.0,
                 "downside_penalty": 0.0,
                 "turnover_penalty": 0.0,
+                "absolute_beta_penalty": 0.0,
+                "delta_notional_penalty": 0.0,
                 "cross_ticker_std_penalty": 0.0,
                 "worst_ticker_weight": 0.0,
             },
@@ -1034,7 +1354,7 @@ class TrainerTests(TestCase):
             },
         )
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v23")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v29")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
@@ -1050,7 +1370,7 @@ class TrainerTests(TestCase):
             sidecar["environment"]["reward_downside_penalty"],
             1.0,
         )
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v18")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v24")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
@@ -1157,10 +1477,12 @@ class TrainerTests(TestCase):
         )
         self.assertGreater(len(set(expected_starts)), 1)
         self.assertTrue(all(item["steps"] == 2 for item in metrics))
-        self.assertTrue(all(
-            item["rollout_end_index"] - item["rollout_start_index"] == 2
-            for item in metrics
-        ))
+        self.assertTrue(
+            all(
+                item["rollout_end_index"] - item["rollout_start_index"] == 2
+                for item in metrics
+            )
+        )
         self.assertEqual(
             [item["burn_in_steps"] for item in metrics],
             [min(3, start) for start in expected_starts],
@@ -1169,15 +1491,19 @@ class TrainerTests(TestCase):
             [item["burn_in_start_index"] for item in metrics],
             [start - min(3, start) for start in expected_starts],
         )
-        self.assertTrue(all(
-            item["rollout_start_sampling_effective"] == "uniform"
-            for item in metrics
-        ))
-        self.assertTrue(all(
-            item["rollout_start_sampling_fallback_reason"]
-            == "insufficient_fully_covered_distinct_volatility_starts"
-            for item in metrics
-        ))
+        self.assertTrue(
+            all(
+                item["rollout_start_sampling_effective"] == "uniform"
+                for item in metrics
+            )
+        )
+        self.assertTrue(
+            all(
+                item["rollout_start_sampling_fallback_reason"]
+                == "insufficient_fully_covered_distinct_volatility_starts"
+                for item in metrics
+            )
+        )
 
     def test_volatility_stratified_start_pools_are_causal_and_balanced(self):
         source = demo_dataset().snapshots[0].frame
@@ -1200,18 +1526,14 @@ class TrainerTests(TestCase):
         first_rng = np.random.default_rng(19)
         second_rng = np.random.default_rng(19)
         first = [
-            _sample_rollout_bounds(12, 2, True, first_rng, pools)[0]
-            for _ in range(300)
+            _sample_rollout_bounds(12, 2, True, first_rng, pools)[0] for _ in range(300)
         ]
         second = [
             _sample_rollout_bounds(12, 2, True, second_rng, pools)[0]
             for _ in range(300)
         ]
         self.assertEqual(first, second)
-        counts = [
-            sum(start in pool for start in first)
-            for pool in pools
-        ]
+        counts = [sum(start in pool for start in first) for pool in pools]
         self.assertTrue(all(70 <= count <= 130 for count in counts))
 
         for snapshot in snapshots:
@@ -1260,34 +1582,40 @@ class TrainerTests(TestCase):
             ),
         )
 
-        self.assertTrue(all(
-            item["rollout_start_sampling_requested"]
-            == "volatility_stratified"
-            for item in metrics
-        ))
-        self.assertTrue(all(
-            item["rollout_start_sampling_effective"]
-            == "volatility_stratified"
-            for item in metrics
-        ))
-        self.assertTrue(all(
-            item["rollout_start_regime_bin_count"] == 3
-            and item["rollout_start_regime_bin"] in {0, 1, 2}
-            for item in metrics
-        ))
+        self.assertTrue(
+            all(
+                item["rollout_start_sampling_requested"] == "volatility_stratified"
+                for item in metrics
+            )
+        )
+        self.assertTrue(
+            all(
+                item["rollout_start_sampling_effective"] == "volatility_stratified"
+                for item in metrics
+            )
+        )
+        self.assertTrue(
+            all(
+                item["rollout_start_regime_bin_count"] == 3
+                and item["rollout_start_regime_bin"] in {0, 1, 2}
+                for item in metrics
+            )
+        )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_burn_in_batches_causal_context_without_gradients_or_positions(self):
         env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
         observation, _ = env.reset(seed=5)
-        model = build_recurrent_actor_critic(RecurrentConfig(
-            input_size=observation_vector(observation).size,
-            slot_count=2,
-            action_count=env.action_shape[1],
-            action_slot_count=env.action_shape[0],
-            hidden_size=4,
-            kind="hybrid",
-        ))
+        model = build_recurrent_actor_critic(
+            RecurrentConfig(
+                input_size=observation_vector(observation).size,
+                slot_count=2,
+                action_count=env.action_shape[1],
+                action_slot_count=env.action_shape[0],
+                hidden_size=4,
+                kind="hybrid",
+            )
+        )
 
         warmed, hidden = _burn_in_recurrent_context(
             env,
@@ -1388,12 +1716,32 @@ class TrainerTests(TestCase):
             TrainingConfig(selection_min_delta=float("nan"))
         with self.assertRaisesRegex(ValueError, "auxiliary_coefficient"):
             TrainingConfig(auxiliary_coefficient=-0.1)
+        with self.assertRaisesRegex(ValueError, "delta_neutrality_coefficient"):
+            TrainingConfig(delta_neutrality_coefficient=float("nan"))
         for invalid in ((), (0,), (2, 1), (1, 1)):
-            with self.subTest(invalid=invalid), self.assertRaisesRegex(
-                ValueError,
-                "auxiliary_horizons",
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "auxiliary_horizons",
+                ),
             ):
                 TrainingConfig(auxiliary_horizons=invalid)
+        with self.assertRaisesRegex(ValueError, "exclusions must be unique"):
+            TrainingConfig(
+                auxiliary_target_exclusions=(
+                    "underlyingReturn",
+                    "underlyingReturn",
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "unknown auxiliary"):
+            TrainingConfig(auxiliary_target_exclusions=("futureLeak",))
+        with self.assertRaisesRegex(ValueError, "remove every target"):
+            TrainingConfig(auxiliary_target_exclusions=AUXILIARY_TARGET_FEATURES)
+        with self.assertRaisesRegex(ValueError, "require auxiliary_coefficient"):
+            TrainingConfig(
+                auxiliary_target_exclusions=("medianContractDeltaHedgedSpotReturn",)
+            )
         with self.assertRaisesRegex(ValueError, "max_steps"):
             TrainingConfig(
                 max_steps=3,
@@ -1402,6 +1750,8 @@ class TrainerTests(TestCase):
             )
         with self.assertRaisesRegex(ValueError, "risk penalties"):
             TrainingConfig(selection_drawdown_penalty=-1)
+        with self.assertRaisesRegex(ValueError, "risk penalties"):
+            TrainingConfig(selection_abs_beta_penalty=-1)
         with self.assertRaisesRegex(ValueError, "risk penalties"):
             TrainingConfig(selection_cross_ticker_std_penalty=-1)
         with self.assertRaisesRegex(ValueError, "time_aware_discounting"):
@@ -1424,15 +1774,21 @@ class TrainerTests(TestCase):
                 start_sampling="volatility_stratified",
             )
         for invalid in (-1, 1.5, True):
-            with self.subTest(invalid=invalid), self.assertRaisesRegex(
-                ValueError,
-                "burn_in_steps",
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "burn_in_steps",
+                ),
             ):
                 TrainingConfig(burn_in_steps=invalid)
         for invalid in (-0.1, 1.1, float("nan")):
-            with self.subTest(invalid=invalid), self.assertRaisesRegex(
-                ValueError,
-                "worst_ticker_weight",
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "worst_ticker_weight",
+                ),
             ):
                 TrainingConfig(selection_worst_ticker_weight=invalid)
 
@@ -1476,19 +1832,20 @@ class TrainerTests(TestCase):
             "dimensionwise_ablation",
         )
         self.assertEqual(
-            manifest["policy_optimization"][
-                "optimization_log_likelihood_aggregation"
-            ],
+            manifest["policy_optimization"]["optimization_log_likelihood_aggregation"],
             "dimensionwise_ablation",
         )
         for invalid_config, invalid_model in (
             (replace(training, algorithm="reinforce"), base),
             (training, replace(base, action_decoder="single_leg")),
         ):
-            with self.subTest(
-                algorithm=invalid_config.algorithm,
-                decoder=invalid_model.action_decoder,
-            ), self.assertRaisesRegex(ValueError, "requires"):
+            with (
+                self.subTest(
+                    algorithm=invalid_config.algorithm,
+                    decoder=invalid_model.action_decoder,
+                ),
+                self.assertRaisesRegex(ValueError, "requires"),
+            ):
                 train_actor_critic(env, invalid_model, invalid_config)
 
     @skipUnless(torch is not None, "install the optional ml extra")
@@ -1533,18 +1890,28 @@ class TrainerTests(TestCase):
             max_drawdown=0.01,
             downside_deviation=0.002,
             turnover=0.5,
+            return_beta_to_underlying=0.4,
+            return_beta_coverage=1.0,
+            mean_abs_delta_notional_weight=0.2,
+            delta_notional_weight_coverage=1.0,
         )
         config = TrainingConfig(
             selection_drawdown_penalty=1.0,
             selection_downside_penalty=2.0,
             selection_turnover_penalty=0.1,
+            selection_abs_beta_penalty=0.02,
+            selection_delta_notional_penalty=0.03,
         )
 
         score = selection_score(report, config)
 
-        self.assertAlmostEqual(score, -0.044)
+        self.assertAlmostEqual(score, -0.058)
         report.max_drawdown = -0.01
         with self.assertRaisesRegex(ValueError, "risk metrics"):
+            selection_score(report, config)
+        report.max_drawdown = 0.01
+        report.return_beta_coverage = 0.0
+        with self.assertRaisesRegex(ValueError, "covered validation beta"):
             selection_score(report, config)
 
     def test_aggregate_selection_score_penalizes_fragile_ticker_results(self):
@@ -1578,11 +1945,13 @@ class TrainerTests(TestCase):
                 "critic_head_gradient_norm": critic,
             }
 
-        evidence = critic_balance_diagnostics((
-            metric("AAA", 2, 1, 1, 2, 3, 4, 8),
-            metric("AAA", 1, 3, 4, 8, 9, 2, 6),
-            metric("BBB", 3, 2, 0, 0, 1, 1, 0),
-        ))
+        evidence = critic_balance_diagnostics(
+            (
+                metric("AAA", 2, 1, 1, 2, 3, 4, 8),
+                metric("AAA", 1, 3, 4, 8, 9, 2, 6),
+                metric("BBB", 3, 2, 0, 0, 1, 1, 0),
+            )
+        )
 
         self.assertEqual(
             evidence["schema_version"],
@@ -1609,9 +1978,7 @@ class TrainerTests(TestCase):
             6.5,
         )
         self.assertEqual(
-            evidence["per_symbol"]["AAA"][
-                "critic_to_actor_head_gradient_ratio"
-            ],
+            evidence["per_symbol"]["AAA"]["critic_to_actor_head_gradient_ratio"],
             2.6,
         )
         self.assertEqual(
@@ -1619,9 +1986,7 @@ class TrainerTests(TestCase):
             ["BBB"],
         )
         self.assertTrue(evidence["cross_symbol"]["imbalance_detected"])
-        self.assertTrue(
-            evidence["cross_symbol"]["normalization_ablation_recommended"]
-        )
+        self.assertTrue(evidence["cross_symbol"]["normalization_ablation_recommended"])
 
         with self.assertRaisesRegex(ValueError, "above one"):
             critic_balance_diagnostics(
@@ -1633,9 +1998,7 @@ class TrainerTests(TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             critic_balance_diagnostics(({"training_symbol": "AAA"},))
         with self.assertRaisesRegex(ValueError, "non-negative integers"):
-            critic_balance_diagnostics((
-                metric("AAA", -1, 1, 1, 1, 1, 1, 1),
-            ))
+            critic_balance_diagnostics((metric("AAA", -1, 1, 1, 1, 1, 1, 1),))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_shared_policy_balances_isolated_ticker_episodes_and_validation(self):
@@ -1706,9 +2069,7 @@ class TrainerTests(TestCase):
                 config,
                 metrics,
             )
-            manifest = json.loads(
-                path.with_suffix(".pt.json").read_text()
-            )
+            manifest = json.loads(path.with_suffix(".pt.json").read_text())
         self.assertEqual(
             set(manifest["training_environment_fingerprints"]),
             {"AAA", "BBB"},
@@ -1954,9 +2315,7 @@ class TrainerTests(TestCase):
                             hidden_size=4,
                             kind=kind,
                             action_decoder=action_decoder,
-                            auxiliary_target_count=(
-                                2 * len(AUXILIARY_TARGET_FEATURES)
-                            ),
+                            auxiliary_target_count=(2 * len(AUXILIARY_TARGET_FEATURES)),
                             auxiliary_horizons=(1, 2),
                         )
                         training = TrainingConfig(
@@ -1967,6 +2326,9 @@ class TrainerTests(TestCase):
                             evaluation_interval=1,
                             auxiliary_coefficient=0.05,
                             auxiliary_horizons=(1, 2),
+                            auxiliary_target_exclusions=(
+                                "medianContractDeltaHedgedSpotReturn",
+                            ),
                             algorithm=algorithm,
                             seed=71,
                         )
@@ -1982,6 +2344,15 @@ class TrainerTests(TestCase):
                             2 * len(AUXILIARY_TARGET_FEATURES),
                         )
                         self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
+                        self.assertTrue(
+                            all(
+                                metrics[0]["auxiliary_target_coverage"][f"t+{horizon}"][
+                                    "medianContractDeltaHedgedSpotReturn"
+                                ]
+                                == 0
+                                for horizon in (1, 2)
+                            )
+                        )
                         self.assertEqual(metrics[0]["action_decoder"], action_decoder)
                         self.assertEqual(
                             metrics[0]["action_likelihood_factors"],
@@ -1999,8 +2370,7 @@ class TrainerTests(TestCase):
                             metrics[0]["factorized_ppo_objective"],
                             (
                                 "joint"
-                                if algorithm == "ppo"
-                                and action_decoder == "factorized"
+                                if algorithm == "ppo" and action_decoder == "factorized"
                                 else "exact_joint"
                             ),
                         )
@@ -2055,9 +2425,13 @@ class TrainerTests(TestCase):
         self.assertEqual(restored.config.auxiliary_horizons, (1, 2))
         self.assertEqual(manifest["auxiliary_prediction"]["horizons"], [1, 2])
         self.assertEqual(manifest["training"]["algorithm"], "reinforce")
-        self.assertEqual(manifest["algorithm"], "stateful_single_leg_joint_reinforce_baseline")
+        self.assertEqual(
+            manifest["algorithm"], "stateful_single_leg_joint_reinforce_baseline"
+        )
         self.assertEqual(manifest["action_policy"]["maximum_orders_per_step"], 1)
-        self.assertEqual(manifest["action_policy"]["likelihood"], "exact_joint_categorical")
+        self.assertEqual(
+            manifest["action_policy"]["likelihood"], "exact_joint_categorical"
+        )
         self.assertEqual(
             manifest["policy_optimization"]["reinforce_score_function"],
             "joint_log_likelihood",
@@ -2067,14 +2441,17 @@ class TrainerTests(TestCase):
     def test_rejects_checkpoint_with_incompatible_feature_transform(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "old.pt"
-            torch.save({
-                "state_dict": {},
-                "manifest": {
-                    "schema_version": CHECKPOINT_SCHEMA_VERSION,
-                    "feature_vector_schema": "raw.v0",
-                    "model": {},
+            torch.save(
+                {
+                    "state_dict": {},
+                    "manifest": {
+                        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                        "feature_vector_schema": "raw.v0",
+                        "model": {},
+                    },
                 },
-            }, path)
+                path,
+            )
 
             with self.assertRaisesRegex(ValueError, "feature-vector schema"):
                 load_checkpoint(path)
@@ -2160,14 +2537,8 @@ class TrainerTests(TestCase):
     def test_rollout_segments_are_seeded_bounded_and_regime_diverse(self):
         first_rng = np.random.default_rng(31)
         second_rng = np.random.default_rng(31)
-        first = [
-            _sample_rollout_bounds(100, 30, True, first_rng)
-            for _ in range(20)
-        ]
-        second = [
-            _sample_rollout_bounds(100, 30, True, second_rng)
-            for _ in range(20)
-        ]
+        first = [_sample_rollout_bounds(100, 30, True, first_rng) for _ in range(20)]
+        second = [_sample_rollout_bounds(100, 30, True, second_rng) for _ in range(20)]
 
         self.assertEqual(first, second)
         self.assertGreater(len({start for start, _ in first}), 1)

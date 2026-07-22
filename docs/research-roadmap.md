@@ -35,12 +35,14 @@ Every candidate must eventually pass:
 
 | Evidence | Useful idea for this repository | Decision |
 | --- | --- | --- |
+| [Latency and the Look-Ahead Bias in Trade and Quote Data (2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5907665) and [Co-Movements of Index Options and Futures Quotes](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=690722) | Event reporting latency can reorder trade/quote observations and stale option quotes can distort price and hedge inputs. Neither paper validates Yahoo timestamps or a profitable age threshold. | Persist session-matched underlying price/time provenance. Expose causal quote age with coverage, independently mask explicitly stale new risk, and retain a configurable threshold plus `data_freshness` ablation. Treat missing legacy timestamps as unknown rather than fresh. |
+| [Operator Deep Smoothing for Implied Volatility (ICLR 2025)](https://arxiv.org/abs/2406.11520) | A graph neural operator can map dynamically sampled intraday option observations to smooth no-arbitrage surfaces and remain robust to input subsampling. Reconstruction quality does not establish trading alpha. | The implemented `surface_graph_set` now tests a smaller observed-contract hypothesis: local forward-log-moneyness/DTE edges plus nearest opposite-side coordinate counterparts. It neither reconstructs quotes nor enforces parity. Defer a reconstruction auxiliary task until sufficient timestamped intraday history exists, and never feed reconstructed quotes into execution. |
 | [A Closer Look at Invalid Action Masking in Policy Gradient Algorithms (2020)](https://arxiv.org/abs/2006.14171), [Excluding the Irrelevant (2024)](https://arxiv.org/abs/2406.03704), and [Improving Stochastic Action-Constrained RL via Truncated Distributions (2025)](https://arxiv.org/abs/2511.22406) | Action constraints change the policy distribution whose log probability and entropy must be optimized; state-specific relevant sets can improve learning efficiency. None establishes option-trading alpha or the repository's normalization rule. | Keep exact masked categorical likelihoods. Normalize actor advantages and aggregate policy, entropy, KL, and clipping only where the decoder has multiple feasible choices. Retain every transition for recurrent context, returns, critic learning, and available auxiliary targets. Preserve raw explorable entropy and require a matched entropy ablation. |
 | [Dimension-Wise Importance Sampling Weight Clipping for Sample-Efficient Reinforcement Learning (ICML 2019)](https://proceedings.mlr.press/v97/han19b.html) | Per-dimension PPO clipping is a distinct high-dimensional control algorithm intended to trade variance against clipping bias; it is not the likelihood ratio of the complete sampled action. | Make the exact product-policy joint ratio the factorized PPO default and retain dimension-wise clipping only as a named validation ablation. Use the exact joint score function for REINFORCE and record the ratio count in every run. |
 | [SANOS: A Strictly Arbitrage-Free Neural Option Surface (2026)](https://arxiv.org/abs/2601.11209) | Bid/ask spreads belong directly in no-arbitrage constraints; midpoint-only checks can manufacture violations that cannot be traded. | Add causal bid/ask-aware adjacent-strike vertical and convexity diagnostics with explicit coverage. Treat them as state-quality signals and test their marginal value through `static_arbitrage`; do not automatically trade or reward them. |
-| [Volatility Surface Reconstruction using Deep Learning under No-Arbitrage Constraints (2026)](https://arxiv.org/abs/2605.24031) | In a sparse/noisy reconstruction study, coordinate-aware attention and explicit calendar/butterfly penalties reduce reconstruction and consistency errors. Reconstruction accuracy does not imply a profitable trading representation. | Keep the compact masked attention candidate and add observed-strike butterfly diagnostics. Defer reconstructed quotes and calendar constraints until the repository has forward-consistent European-equivalent inputs and enough history for separate reconstruction validation. |
+| [Volatility Surface Reconstruction using Deep Learning under No-Arbitrage Constraints (2026)](https://arxiv.org/abs/2605.24031) | In a sparse/noisy reconstruction study, coordinate-aware architectures and explicit calendar/butterfly penalties reduce reconstruction and consistency errors. Reconstruction accuracy does not imply a profitable trading representation. | Keep the compact masked attention candidate and observed-strike butterfly diagnostics. The implemented same-expiry/side leave-one-out smile residual gives policies an observed local deviation without reconstructing quotes; retain it only through matched `contract_smile_residual` validation ablations. Defer reconstructed quotes and calendar constraints until the repository has forward-consistent European-equivalent inputs and enough history for separate reconstruction validation. |
 | [Recurrent Experience Replay in Distributed Reinforcement Learning (ICLR 2019)](https://deepmind.google/research/publications/recurrent-experience-replay-in-distributed-reinforcement-learning/) | Recurrent training on partial sequences must address inaccurate boundary hidden states; a prefix can reconstruct state before loss-bearing transitions. | Random training windows now use a bounded causal no-op prefix, one batched no-gradient recurrent call, explicit metrics, and a validation-only disabled ablation. This is on-policy context reconstruction, not replay. |
-| [AlphaZeroBeta: Deep Reinforcement Learning for Market-Neutral Portfolios (2026)](https://arxiv.org/abs/2607.18001) | A current finance study combines recurrent PPO, transaction-cost-aware objectives, and rolling walk-forward evaluation, but its reported equity-index results do not establish option alpha here. | Keep recurrent PPO in the tournament, require cost stress and walk-forward evidence, and treat market-neutrality controls as a later declared objective rather than importing performance claims. |
+| [AlphaZeroBeta: Deep Reinforcement Learning for Market-Neutral Portfolios (2026)](https://arxiv.org/abs/2607.18001) | A current finance study combines recurrent PPO, transaction-cost-aware objectives, and rolling walk-forward evaluation, but its reported equity-index results do not establish option alpha here. | Add an optional bounded train-only absolute Delta-notional occupancy cost as a causal market-neutral proxy. Keep validation/test reward unshaped, report realized underlying beta/correlation and Delta weight with coverage, and require a matched zero-coefficient candidate. Allow predeclared validation penalties only when the corresponding neutrality metric is covered. |
 | [Adaptive and Regime-Aware RL for Portfolio Optimization (2025)](https://arxiv.org/abs/2509.14385) | The study compares PPO and recurrent policies under latent regime changes and stress, but its portfolio results do not establish that reweighting option trajectories improves hedging. | Add training-only sampling across fully covered causal realized-volatility quantiles, an explicit uniform fallback, and a matched validation ablation. Keep validation/test chronology and weights unchanged. |
 | [Sizing the Risk: Kelly, VIX, and Hybrid Approaches in Put-Writing (2025)](https://arxiv.org/abs/2508.16598) | The preprint treats implied-versus-realized volatility and volatility-regime scaling as interacting inputs for put-writing size, but its SPXW backtest does not establish portability to equity options. | Add bounded prior-only ATM-IV and volatility-premium normalization as two compact state candidates. Keep sizing bounded by collateral and require the named normalization ablation, costs, and held-out folds before retaining either signal. |
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
@@ -48,11 +50,11 @@ Every candidate must eventually pass:
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Causal realized-volatility horizons, walk-forward evaluation, and explicit per-contract position quantity/cost/P&L state implement this lesson. |
 | [Deep Hedging with Market Impact (2024)](https://arxiv.org/abs/2402.13326) | Under costs and price impact, learned hedges can damp or delay rebalancing instead of following a frictionless target continuously. | Explicit position-age and last-trade-age clocks make holding and rebalance cadence observable and removable through `position_lifecycle`. Current top-of-book data has no depth or impact model, so do not infer optimal no-trade regions yet. |
 | [Excluding the Irrelevant: Focusing RL through Continuous Action Masking (2024)](https://arxiv.org/abs/2406.03704) | State-dependent relevant-action sets can improve PPO learning efficiency and predictability in constrained control tasks, but the paper studies continuous control rather than trading. | Keep exact discrete feasibility masks and expose only compact per-side feasible-bucket fractions to recurrent state and value estimation. Require the `action_feasibility` ablation before attributing sample-efficiency or return lift. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, include realistic transaction costs and limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v18`, executable net-liquidation wealth, compact volatility, session, and action-capacity state, stable contract/position identity and lifecycle, Greek budgets, collateral, cost stress, and paired moving-block intervals implement the state/risk lesson. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, include realistic transaction costs and limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v24`, executable net-liquidation wealth, compact clock/systematic/volatility/session/freshness/action-capacity state, stable contract/position identity and lifecycle, Greek budgets, collateral, cost stress, and paired moving-block intervals implement the state/risk lesson. |
 | [Deep Hedging of Derivatives Using Reinforcement Learning (2021)](https://arxiv.org/abs/2103.16409) | Accounting P&L and cash-flow objectives differ under transaction costs, so the valuation convention is part of the learning problem. | Default every training, selection, baseline, and held-out report to executable net liquidation value. Persist legacy midpoint mode only for declared reproduction, and never compare runs whose valuation contracts differ. |
 | [How Many Random Seeds? Statistical Power Analysis in Deep Reinforcement Learning Experiments (2018)](https://arxiv.org/abs/1806.08295) | Random seeds quantify stochastic training variability and determine statistical power; a seed label does not make an otherwise identical deterministic trajectory independent. | Require one evaluation seed for each deterministic policy/path pair. Add multiple independently trained policies only as a predeclared training-seed experiment, and retain path-level dependence in inference. |
 | [Deep Reinforcement Learning at the Edge of the Statistical Precipice (2021)](https://arxiv.org/abs/2108.13264) | Point estimates from a few expensive training runs hide substantial uncertainty; robust aggregate metrics and intervals are preferable to best-run reporting. | Train predeclared seed replicates, rank architectures with mean/worst/dispersion validation aggregation, and deploy the median-representative checkpoint rather than the best seed. Add intervals only when the run count supports them. |
-| [TOPPO: Rethinking PPO for Multi-Task Reinforcement Learning with Critic Balancing (2026)](https://arxiv.org/abs/2605.11473) and [Multi-task Deep Reinforcement Learning with PopArt (2018)](https://arxiv.org/abs/1809.04474) | Shared PPO critics can suffer task-scale and gradient-conditioning imbalance; per-task target normalization, critic normalization, and balanced aggregation are distinct interventions. The 2026 evidence is from Meta-World+, not financial markets. | Keep actor batching independent from critic changes. First collect concurrent multi-ticker gradient and return-scale diagnostics; only then add PopArt, critic LayerNorm, or gradient balancing as separately named validation ablations. Do not import the combined method or its performance claim wholesale. |
+| [TOPPO: Rethinking PPO for Multi-Task Reinforcement Learning with Critic Balancing (2026)](https://arxiv.org/abs/2605.11473) and [Multi-task Deep Reinforcement Learning with PopArt (2018)](https://arxiv.org/abs/1809.04474) | Shared PPO critics can suffer task-scale and gradient-conditioning imbalance; per-task target normalization, critic normalization, and balanced aggregation are distinct interventions. The 2026 evidence is from Meta-World+, not financial markets. | Ticker-level scale diagnostics are implemented. Critic-only LayerNorm is now a named enabled/disabled validation candidate with no actor operation. Keep PopArt and gradient balancing separate; do not import the combined method or its performance claim wholesale. |
 | [Towards Applicable Reinforcement Learning: Improving the Generalization and Sample Efficiency with Policy Ensemble (2022)](https://arxiv.org/abs/2205.09284) | Jointly trained diverse policy ensembles can improve exploration and generalization, but an ensemble adds optimization and inference complexity. | Use independent seed replicates for robust validation now while deploying one median-representative recurrent policy. Consider a learned ensemble only if validation lift survives its explicit N-model latency comparison. |
 | [GT-Score: A Robust Objective Function for Reducing Overfitting in Financial Reinforcement Learning (2026)](https://arxiv.org/abs/2602.00080) | Financial RL evaluation should combine performance, significance, consistency, and downside across multiple walk-forward splits and training seeds to resist data snooping. | Exact held-out path counts, block-bootstrap units, and independently trained seed aggregation are implemented. Add predeclared repeated time splits before treating a score or confidence interval as alpha evidence. |
 | [Deep Hedging with Options Using the Implied Volatility Surface (revised 2025)](https://arxiv.org/abs/2504.06208) | Joint return/surface dynamics, multiple hedge instruments, variance-risk-premium state, and transaction costs can create useful state-dependent no-trade regions. | Keep whole-surface factors, option-plus-share actions, and sparse action priors. The collateralized short-put carry baseline now prevents attributing a simple IV-versus-realized rule to RL. |
@@ -63,13 +65,14 @@ Every candidate must eventually pass:
 | [Structured Policy Initialization for Large Discrete Actions (2026)](https://arxiv.org/abs/2601.04441) | Independence can create incoherent combinatorial actions, while learning full action structure can be slow and unstable; a pretrained structure model can improve convergence. | Keep the exact single-leg structural baseline lightweight. Consider learned multi-leg action structure only after sufficient trajectories exist for pretraining and the single-leg restriction is demonstrably too limiting. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Self-attention can contextualize sparse option quotes across log-moneyness and maturity, while the paper's SABR pretraining supplied an important financial prior. | The attention set candidate now learns only observed cross-contract relations inside the trading policy. Defer SABR pretraining or reconstructed quotes until sufficient surface history and explicit arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
-| [When does Self-Prediction help? Understanding Auxiliary Tasks in Reinforcement Learning (2024)](https://arxiv.org/abs/2406.17718) and [Bridging State and History Representations (2024)](https://arxiv.org/abs/2401.08898) | Predictive auxiliary objectives can improve RL history representations, but their value depends on observation structure and distractions rather than being universal. | A masked multi-horizon Smooth-L1 head supervises compact market changes plus permutation-invariant median matched-contract quote/IV dynamics only on training transitions. Keep it only through matched one-step and disabled validation ablations. |
+| [Volatility Surfaces and Expected Option Returns (revised 2025)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4869272) and [Asset Pricing Results in Options Markets: True, Spurious, or Overlooked? (revised 2025)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5192589) | Surface models may contain information about future delta-hedged option returns, but hedge timing and underlying microstructure can create spurious measured premiums. | Add a train-only matched-contract endpoint target using current Delta against the later spot move, no future rehedging, and spot normalization. Require explicit regular-session and fresh-underlying provenance at both endpoints so pre-market spot moves against stale chains are masked. It is not an execution return. Require the named target-removal validation ablation before attributing benefit. |
+| [When does Self-Prediction help? Understanding Auxiliary Tasks in Reinforcement Learning (2024)](https://arxiv.org/abs/2406.17718) and [Bridging State and History Representations (2024)](https://arxiv.org/abs/2401.08898) | Predictive auxiliary objectives can improve RL history representations, but their value depends on observation structure and distractions rather than being universal. | A masked multi-horizon Smooth-L1 head supervises compact market changes plus permutation-invariant median matched-contract quote, IV, and current-Delta-hedged dynamics only on training transitions. Keep it only through matched one-step, target-removal, and disabled validation ablations. |
 | [Data-Efficient RL with Self-Predictive Representations (2020)](https://arxiv.org/abs/2007.05929) | Predicting multiple future steps can improve representation learning under limited interaction, though its evidence comes from visual-control domains rather than markets. | Support predeclared cumulative snapshot horizons with endpoint masks and compare multi-horizon, one-step, and disabled heads using validation only. |
 | [Still Competitive: Revisiting Recurrent Models for Irregular Time Series Prediction (2025)](https://arxiv.org/abs/2510.16161) | Explicit time-triggered mechanisms can make simple recurrent models competitive on irregular series at low overhead. | Add causal prior-snapshot elapsed time plus coverage once in the market vector before considering a continuous-time recurrent cell; validate through the named `time_context` ablation. |
 | [Time-Aware Q-Networks (2021)](https://arxiv.org/abs/2105.02580) and [Semi-Markov Offline RL (2022)](https://arxiv.org/abs/2203.09365) | Irregular decision intervals affect both state estimation and the discount applied to future value; treating variable-duration transitions as fixed-step MDP transitions can change the learned objective. | PPO and REINFORCE now compose gamma, and GAE lambda where applicable, over elapsed wall-clock time relative to a declared reference interval. Retain fixed-step semantics as a matched validation ablation. |
 | [Multi-Horizon Echo State Network Prediction of Intraday Stock Returns (2025)](https://arxiv.org/abs/2504.19623) | Compact recurrent models can predict intraday returns at multiple horizons without the cost of a large generic architecture. | Expose causal 4/16-snapshot cumulative log returns to the existing GRU/LSTM families before adding another recurrent family; require the named `price_trend` ablation. |
-| [A New Option Momentum: The Role of the Systematic Component (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4404190) | Transaction-cost-robust option momentum is concentrated in a systematic component, while past prices have limited influence relative to risk and quality characteristics. | Treat price trend as a small optional state contribution, keep surface risk/quality features, and remove trend unless it earns validation lift after costs. |
-| [Intraday Volatility-Smile Geometry and Option Returns (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5893362) | Intraday smile geometry contains return information beyond lagged option returns and liquidity controls in the study sample. | The repository already exposes compact ATM, wing, and term geometry. Add matched executable contract quote/IV changes as controls, then require both geometry and dynamics removal tests rather than expanding the recurrent model on the paper's result alone. |
+| [A New Option Momentum: The Role of the Systematic Component (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4404190) | Transaction-cost-robust option momentum is concentrated in a systematic component, while past prices have limited influence relative to risk and quality characteristics. | Add one cheap provider-timestamped benchmark return/volatility and ticker-relative-return block with coverage and a named ablation. This is market context, not the paper's latent systematic decomposition. Keep own-price trend small and remove either block unless it earns validation lift after costs. |
+| [Intraday Volatility-Smile Geometry and Option Returns (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5893362) | Intraday smile curvature, cross-strike deviations, and ATM richness contain return information beyond lagged option returns and liquidity controls in the study sample, with reported concentration in the final half-hour. | Keep the executable OTM quadratic fit and add one Eastern capture-day fraction with coverage so recurrent policies can test time-of-day interaction. Require `smile_fit`, `intraday_clock`, wing, and dynamics removals; capture time never infers session state or establishes alpha. |
 | [Binary Tree Option Pricing Under Market Microstructure Effects (2025)](https://arxiv.org/abs/2507.16701) | Bid/ask structure and serially dependent returns matter for option pricing under microstructure effects. | Use bid/ask midpoint return and relative-spread change only when the same contract has executable quotes at both endpoints. Keep coverage explicit and avoid last-trade momentum. |
 | [Hybrid Recurrent Expert Gating for Financial Time Series (2026)](https://doi.org/10.1016/j.procs.2026.06.366) | A learnable gate can vary the contribution of recurrent experts across nonstationary regimes, but its daily-price forecasting evidence does not establish trading or RL benefit. | Add a compact scalar-gated GRU-LSTM mixture as a declared candidate while preserving GRU, LSTM, and concatenated-hybrid baselines, parameter budgets, latency gates, and held-out selection. |
 
@@ -134,10 +137,19 @@ extra backward pass. Reward and return-target scales, value residuals, and exact
 pre-clip gradients of the disjoint actor and critic output heads are aggregated
 with their correct transition or optimizer-update weights. The shared recurrent
 trunk is deliberately labeled unattributed. A 10x engineering threshold can
-recommend, but never select, a future normalization ablation. In a tiny real
+recommend, but never select, a normalization ablation. In a tiny real
 five-ticker mixture smoke, return-target and critic-head-gradient scale ratios
 were 3.57x and 9.25x, so no method was promoted. This is insufficient-history
 evidence for restraint, not evidence that critic imbalance is absent.
+
+Critic-only LayerNorm is now the first executable normalization candidate. It
+normalizes recurrent features only before the value head, leaves policy and
+auxiliary representations unchanged, and is paired with a validation-only
+disabled candidate in both walk-forward runners. The first two-fold AAPL smoke
+tied at zero reward and selected disabled twice; its critic residual and head
+gradient were also worse with normalization. The candidate therefore remains
+available but unpromoted. PopArt and gradient aggregation remain separate future
+experiments that require stronger concurrent multi-ticker evidence.
 
 That universe walk-forward runner is now executable. It combines independent
 per-ticker chronological splits with a global wall-clock separation check,
@@ -273,7 +285,7 @@ still requires sufficient market paths and seed-robust validation.
 An optional exact single-leg decoder now replaces the 33 independent row
 categoricals with one masked categorical over hold or one row/action pair. It
 trains under both PPO and REINFORCE with GRU, LSTM, hybrid, mixture, flat,
-graph, graph-set, and attention-set encoders; set-policy option scores remain
+graph, graph-set, surface-graph-set, and attention-set encoders; set-policy option scores remain
 permutation equivariant. It
 reduces the default flat-hybrid head by 8,224 parameters but measured roughly
 11% slower in batch-one deterministic inference because the joint category must
@@ -292,6 +304,16 @@ selected the smaller Deep Sets model, while the 32-slot attention benchmark was
 materially slower. The implementation enables a controlled hypothesis test; it
 does not promote attention or establish surface-reconstruction quality.
 
+The optional `surface_graph_set` encoder adds an interpretable topology between
+the similarity graph and global attention. Same-side neighbors are selected only
+in standardized forward-log-moneyness/DTE coordinates, and each valid contract
+adds its nearest opposite-side coordinate counterpart. IV remains node content,
+the union uses one shared message operator, and all graph-set permutation,
+padding, recurrent, action-decoder, and empty-surface guarantees remain intact.
+At zero local neighbors the counterpart relation remains; zero-neighbor
+`graph_set` is the true Deep Sets control. This representation does not impose
+put-call parity or make a surface-reconstruction or alpha claim.
+
 The gated recurrent mixture keeps independent GRU and LSTM causal states but
 compresses their outputs through one state-dependent scalar convex gate before
 all heads. Equal initialization avoids favoring either expert. It reduces
@@ -300,7 +322,247 @@ inference on both flat and graph-set layouts, so it remains a tournament
 candidate subject to the same latency ceiling rather than replacing GRU or the
 concatenated hybrid.
 
-The `dimensionless.v18` policy transform retains batched signed contract
+The `dimensionless.v20` policy transform added one compact systematic-context
+market block: provider-timestamped benchmark return, 4/16-observation return and
+realized volatility, ticker-relative return, quote age, and coverage. It adds no
+per-contract repetition or new model block, but its wider market input adds
+recurrent input weights and must remain subject to parameter and latency gates.
+Legacy or repeated benchmark timestamps stay unavailable rather than becoming
+flat returns. This does not reproduce the option-momentum paper's latent factor
+model or establish alpha.
+
+The `dimensionless.v21` transform adds four front-expiry fitted-smile scalars
+once per market snapshot. One standardized quadratic uses only executable OTM
+calls and puts, requires five unique strikes with bilateral ATM support, and
+observed support through +/-0.05, then reports fixed-radius curvature, relative
+RMSE, a leave-one-out relative ATM
+residual, and coverage. The fit is performed during dataset engineering, not
+inside the actor. It remains a `smile_fit` removal candidate rather than a
+pricing surface or alpha result.
+
+The `dimensionless.v22` transform adds only Eastern capture-day fraction and
+timestamp coverage once per snapshot. It is current-only, DST-aware, and
+removable through `intraday_clock`; provider session state and execution masking
+stay independent. Five recent large-cap integration samples had complete clock
+coverage but no provider-confirmed regular-session snapshots, so the first
+two-fold AAPL ablation tie is plumbing evidence rather than a test of the
+paper's reported late-session concentration.
+
+The v0.73 agent-results surface makes research output inspectable before adding
+more hypotheses. Walk-forward v59 stores the fixed winner's held-out NAV path,
+decisions, fills, baselines, and execution-provenance coverage. Streamlit keeps
+the three-agent validation tournament separate from the selected policy's test
+result and marks tiny or legacy-session paths as exploratory. The first AAPL
+GRU/LSTM/gated-mixture integration run selected the mixture, then lost 0.121%
+over two held-out transitions with 13 simulated fills and $7.40 in fees. That
+negative, legacy-session result is useful end-to-end evidence but not alpha.
+
+The v0.74 multi-ticker arena turns that single-run view into a comparable agent
+surface. One command applies the same flat PPO GRU, LSTM, and gated-mixture
+budgets to AAPL, NVDA, MSFT, AMZN, and GOOG, preserving validation-only selection
+and separately opened tests for each ticker. The first arena selected GRU on
+three tickers, LSTM on one, and the mixture on one; all five held-out paths were
+negative after costs, with 42 fills across 15 transitions. This is actionable
+negative evidence: larger recurrent mixtures did not dominate, and the next
+research cycle should prioritize better regular-session data and longer paths
+before increasing architecture complexity.
+
+The v0.75 arena adds a matched action-surface experiment for every recurrent
+family. Exact single-leg policies won validation on all five initial tickers;
+versus the prior factorized arena, held-out fills fell from 42 to 7, fees from
+$20.48 to $2.98, and mean loss from 0.154% to 0.025%. The improvement is mainly
+cost and turnover control, not forecast alpha, and GOOG's zero return is not a
+positive edge. The optimized deterministic sparse actor cut its own alternating
+benchmark median by 4.8%, although it remains about 9.6% slower than the
+factorized GRU because exact joint decoding still adds fixed work.
+
+The v0.76 arena moves the structured option surface back into the default
+comparison. Three `surface_graph_set` PPO policies pair GRU, LSTM, and the
+gated mixture with the sparse single-leg decoder, alongside the six flat
+action-policy controls. In the first five-ticker run, surface GNNs won all five
+validation selections, with the gated mixture selected four times and GRU once.
+Their AAPL actor medians were about 343-390 microseconds versus 102-156 for the
+flat candidates. All held-out returns were nevertheless negative (mean
+-0.027%, 14 fills, $2.28 fees), so this is architecture-selection evidence, not
+alpha.
+
+The interface now makes that distinction executable through a fail-closed
+promotion assessment. Positive held-out and doubled-cost returns, per-path
+no-op improvement with statistical support, adequate history, confirmed
+regular-session provenance, and action validity must all pass. The current five
+paths pass none of the economic/evidence gates and remain explicitly
+research-only. Longer provider-confirmed intraday histories now have higher
+priority than expanding the model menu again.
+
+The v0.77 selection rule addresses the first arena's false-precision failure.
+Every default policy now has three training-seed replicates. Candidates within
+one standard error of the best seed-robust validation score, subject to a
+predeclared one-basis-point materiality floor, form a competitive pool; only
+then do latency and simplicity break ties. This reduced the five selected
+policies from five GNNs to two and cut median selected actor latency from about
+382 to 133 microseconds. Mean held-out loss moved from 0.027% to 0.025%, while
+all paths remained negative. Treat that comparison as iterative engineering on
+reused test data, not an out-of-sample alpha improvement; the next credible
+return comparison needs a newly collected, locked regular-session test range.
+
+The v0.78 activation layer stops a validation tournament from operationally
+deploying the least-bad negative policy. It compares the selected seed-robust
+score against deterministic validation no-op and requires a predeclared one-
+basis-point advantage in the default arena. All five current winners failed,
+so the research view still exposes their negative held-out paths while the
+sandbox view abstains. On the reused integration paths this avoided a -0.025%
+mean loss, 14 fills, and $3.32 in fees with no actor call. This is a safety and
+capital-preservation result, not evidence of a positive edge. Future alpha work
+must first produce a policy that activates on locked validation and then passes
+fresh regular-session held-out, no-op, doubled-cost, and statistical gates.
+
+The v0.80 arena now advances with the collector. The former step size of 100
+left the fast single-fold run anchored to the earliest 13 states even after each
+ticker had accumulated substantially more deduplicated history. The default now
+constructs one latest chronological fold, expands training through every earlier
+eligible state, preserves the validation/test tail and embargoes, and stores
+each invocation in a timestamped directory. The first corrected tail was wholly
+provider-confirmed pre-market, so all policies correctly tied at zero with no
+fills. This supersedes the old negative legacy-fallback paths as the current
+operational view but supplies no feature or return evidence; wait for a locked
+regular-session range before the next economic comparison.
+
+The v0.81 pre-training gate now refuses to spend an arena budget when that
+latest tail cannot possibly contain an executable decision. It requires every
+validation/test state to be provider-confirmed regular, have a fresh timestamped
+underlying quote, and contain a positive non-crossed option quote. Raw material
+snapshot loading lets an unready five-ticker job stop in 1.48 seconds instead of
+roughly 47 seconds of model training, while its timestamped manifest exposes the
+missing evidence in Streamlit. This gate does not make data sufficient or a
+policy profitable; it prevents masked pre-market paths from masquerading as an
+agent comparison and preserves compute for the first locked regular-session
+experiment.
+
+The v0.81 Agent Lab projects the last successful artifacts as operating objects
+rather than experiment rows. Each ticker has a stable selected-agent identity,
+checkpoint, recurrent core, flat or surface-GNN topology, activation state,
+latency, held-out outcome, and explicit decision tape. Research actions and
+sandbox actions remain separate so a validation guard cannot make a saved model
+appear to have vanished. On the current five-ticker artifact this exposes 75
+candidate configurations, including 30 surface-GNN challengers and 225 training-
+seed replicates, while honestly showing five guarded flat-GRU winners and 15
+held-out HOLD decisions. The next economic result still requires a locked
+regular-session tail; UI visibility is not evidence of alpha.
+
+The v0.82 state makes surface dynamics invariant to collector cadence without
+changing the action or execution model. Four covered factor changes are divided
+by causal elapsed hours, clipped at plus or minus two volatility units per hour,
+and isolated in `surface_velocity`. The default tournament adds exact flat and
+surface-GNN GRU/LSTM/gated-mixture removals, bringing the five-ticker comparison
+to 105 configurations and 315 independently trained seed replicates. This is an
+inference from the IV-surface-feedback literature: explicit shock speed may help
+a compact recurrent model, but only a locked validation comparison can retain
+it and only untouched held-out paths can speak to economic performance. Initial
+random-policy timing was noise-level for flat GRU and unchanged in parameter
+count for the masked surface-GNN path, so the feature clears the latency bar for
+the next regular-session arena. The current five-ticker profile has only 9-12
+ATM/wing-change-covered states per ticker and essentially no term-slope velocity
+coverage, so a validation tie or ablation win is plausible and must be retained
+rather than rationalized away. The first AAPL plumbing run did tie all six
+velocity pairs at zero on a PRE tail and selected a 105.4-microsecond flat GRU;
+the locked command then rejected all five tickers in 1.6 seconds. This verifies
+integration and gate preservation only, not the feature hypothesis.
+
+The v0.83 automation layer closes the gap between continuous collection and a
+tangible trained-agent result. A lightweight watcher applies the exact locked
+arena readiness contract every minute and launches the isolated 12-candidate,
+three-seed tournament only when all five tickers share a ready New York session
+tail. Matched single-leg PPO and Monte-Carlo REINFORCE GRU/LSTM/mixture controls
+test algorithmic lift on validation without changing the deployment graph.
+Completion is keyed by session, ordered ticker set, and run-contract version,
+so later collector cycles do not spend another 180 training replicas.
+An atomic heartbeat exposes waiting, running, error, complete, and up-to-date
+states in the Agent Lab while retaining the last successful artifact. This
+improves operational reproducibility and time-to-result; it does not weaken the
+regular/fresh/executable gate or constitute return evidence.
+
+The v0.84 eligibility correction prevents a subtle but consequential false
+start. Requiring only a seven-state regular validation/test tail still allowed
+the six-state expanding training partition to consist entirely of pre-market
+observations, where the environment disables execution and PPO has no trading
+choice to learn from. The locked arena now filters material snapshots before
+splitting and requires thirteen regular, fresh, executable states per ticker:
+six training, three validation, and four test. Source and exclusion counts stay
+visible, while the explicit plumbing override retains its unfiltered behavior.
+This delays the first arena but changes it from a guaranteed no-learning run to
+the first minimally actionable integration experiment; thirteen intraday states
+remain far too small for an alpha claim.
+
+The v0.85 paper-agent runtime turns selected artifacts into persistent operating
+objects without weakening those research gates. Every newest per-ticker winner
+is restored from its exact SHA-256-bound checkpoint, receives its own portfolio
+and recurrent cursor, and advances once per eligible post-test snapshot. A
+single SQLite transaction commits environment state, JSON-safe hidden state,
+and a unique decision ledger, making restarts idempotent. Recurrent warm-up uses
+only pre-deployment context and executes no orders. Guarded policies continue to
+emit inspectable research actions while the sandbox substitutes HOLD; only an
+activated winner can create simulated fills. A change-aware background watcher
+avoids checkpoint reloads when neither market data nor selections changed, and
+the Agent Lab shows current runtime state, paper equity, proposals, and fills.
+This is tangible paper operation, not live brokerage or evidence of alpha; old
+checkpoint schemas and pre-v0.84 noneligible cutoffs deliberately fail closed.
+
+The v0.86 online-accounting layer separates a tangible decision from a known
+economic outcome. Every proposal stores its pre-trade NAV. The newest action
+remains pending because no future market state exists; when the next real
+eligible snapshot arrives, the same atomic cycle finalizes its account return
+as next-mark NAV divided by decision NAV minus one. Batched catch-up decisions
+whose next observations already exist finalize immediately. The Agent Lab now
+reports pending/finalized counts, outcome hit rate, online maximum drawdown, and
+an equity curve containing only causal next marks. This prevents a duplicated
+terminal frame or same-snapshot execution cost from being presented as a
+forward result, while retaining current paper equity and the raw RL reward for
+audit.
+
+The v0.86 interface pass separates operation from diagnosis. Overview provides
+a compact market/runtime/training health read, Agent Desk focuses on one saved
+policy and its real online outcomes, Trade surfaces the simulated order ticket
+before the full Greek-enriched chain, and Portfolio combines positions with the
+fill audit trail. Arena readiness, candidate fleets, feature ablations, and raw
+held-out provenance remain available under Research through progressive
+disclosure. This changes discoverability and decision speed only; it does not
+upgrade exploratory evidence or imply alpha.
+
+v0.87 adds an uncertainty surface to tangible paper decisions without changing
+their actions. The actor-only forward path optionally returns its already
+computed logits; the runtime stores mean maximum probability and feasible-set
+normalized entropy only across factors where a choice existed. Agent Desk shows
+confidence with an explicit non-calibration warning and the ledger retains both
+metrics for later outcome calibration. The extra softmax is used only when a
+real decision is recorded, while warm-up and latency benchmarks keep the lean
+action-only path. Deployment activation now also requires the exact
+representative checkpoint, not only its seed-robust architecture aggregate, to
+beat no-op on validation. This prevents a stable group score from masking weak
+weights selected for deployment.
+
+v0.88 removes diagnostic models from the operational critical path. The locked
+arena retains 12 genuine policy candidates: six flat PPO recurrent/decoder
+controls, three PPO recurrent surface-GNNs, and three flat single-leg
+REINFORCE controls. Smile-residual and surface-velocity removals remain exact,
+named walk-forward experiments, but they no longer double a once-per-session
+agent-selection job. This reduces the five-ticker contract from 360 to 180
+training replicas while preserving all recurrent, GNN, decoder, and RL
+algorithm families. Identical actor graphs are also timed once per fold rather
+than once per training seed; every reused record declares its measured seed.
+Neither optimization changes validation scores, held-out access, or the
+activation gate.
+
+v0.89 fixes the cross-ticker input race observed in the first strict live run.
+Sequential training had allowed the final ticker to load one collection cycle
+later than the first four. The watcher now refuses to inspect or launch while a
+collector append cycle is active, and the arena loads every declared ticker
+before training any candidate. It verifies every source file's size and
+modification timestamp across the freeze and aborts all training on a change.
+The arena artifact records this input-freeze window. Per-ticker paths remain
+distinct, but one operational run can no longer
+quietly mix data revisions caused by its own training duration.
+
+The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session
 features without changing the 41-field contract state. Explicit non-regular
@@ -427,18 +689,23 @@ retaining the reweighting. This is a regime-coverage hypothesis, not alpha.
 - Retain the sparse stable-slot and empty-option-portfolio fast paths. Padding
   alone must not trigger repeated ranking, while newly visible contracts and
   every held-option settlement must preserve the full deterministic path.
-- Keep the 41-field contract state under `dimensionless.v18` as the current
+- Keep the 43-field contract state under `dimensionless.v24` as the current
   model: current per-slot quantity, average entry price, and executable
   unrealized return plus opening and last-adjustment clocks prevent portfolio
   and lifecycle aliasing, while matched bid/ask and
-  IV dynamics plus static-arbitrage scores separate observed change and surface
-  consistency from missing coverage. Test these through the named
+  IV dynamics, local leave-one-out smile residual, and static-arbitrage scores
+  separate observed change and surface consistency from missing coverage. Test
+  these through the named
   `position_state`, `position_lifecycle`, `contract_dynamics`, and
-  `static_arbitrage` removal candidates;
+  `contract_smile_residual`, and `static_arbitrage` removal candidates;
   volatility-regime state still belongs once in the market vector.
 - Retain explicit provider market-session state and coverage through the named
   `market_session` ablation. Never infer exchange state from capture timestamps,
   and never let an ablation disable the independent non-regular execution mask.
+- Retain provider quote age and coverage once per market vector through the
+  `data_freshness` ablation. Keep the configurable stale-data execution guard
+  independent of the policy feature ablation and report legacy missing
+  provenance rather than treating it as fresh.
 - Retain compact option and underlying buy/sell feasibility fractions only if
   `action_feasibility` does not win validation. The exact mask remains the sole
   execution authority; do not expand the recurrent input with every mask bit
@@ -453,13 +720,27 @@ retaining the reweighting. This is a regime-coverage hypothesis, not alpha.
   regime features.
 - Retain 4/16-snapshot cumulative return only if the `price_trend` removal
   candidate fails to improve validation selection score after costs.
+- Retain the compact provider-timestamped benchmark return/volatility and
+  ticker-relative-return block only if `systematic_context` does not win
+  validation. Treat SPY as a regime proxy rather than a systematic-option-return
+  decomposition, and never let missing benchmark data affect execution.
 - Retain the implemented ATM/wing, executable-quote, and Greek coverage instead
   of substituting plausible-looking market values.
 - Ablate the implemented executable ATM term slope/curvature and prior-snapshot
   ATM, wing, and term-slope changes before retaining them in a paper strategy.
+- Retain the executable OTM fitted-smile curvature, relative fit error, and
+  leave-one-out ATM residual only if the compact `smile_fit` removal candidate
+  loses on validation after costs. Never interpret fit error from sparse or
+  non-executable quotes as a return signal.
+- Compare the bounded Delta-neutrality training objective against its matched
+  zero-coefficient candidate on unshaped validation reward. Predeclare whether
+  absolute beta or mean Delta-notional weight is a selection penalty, require
+  full metric coverage, and inspect both directional exposure and return lift.
 - Compare the implemented multi-horizon recurrent auxiliary loss against both
-  its matched one-step and zero-coefficient candidates; never infer benefit
-  from training-loss reduction alone.
+  its matched one-step and zero-coefficient candidates. Compare the new
+  current-Delta-hedged target against a matched loss-mask exclusion before
+  attributing any benefit to volatility-specific supervision; never infer
+  benefit from training-loss reduction alone.
 - Retain episode-stable contract indices and explicit continuity unless the
   ranked-slot comparison wins validation; inspect churn before interpreting any
   recurrent or graph result.
@@ -469,7 +750,7 @@ retaining the reweighting. This is a regime-coverage hypothesis, not alpha.
 
 ### 4. Earn relational and surface complexity
 
-The dense GNN connects valid contracts by IV, delta, log-moneyness, and DTE
+The similarity GNN connects valid contracts by IV, delta, log-moneyness, and DTE
 before the GRU/LSTM temporal layer. Its role is cross-contract structure; the
 recurrent layer handles time. The implemented `graph_set` variant replaces the
 slot-dependent flattened policy with validity-masked mean/max pooling and a
@@ -486,6 +767,8 @@ should compare:
 - Flat GRU versus GNN-GRU at matched parameter and latency budgets.
 - Zero-neighbor Deep Sets versus neighbor-message graph sets in the same
   validation-only tournament.
+- Similarity `graph_set` versus `surface_graph_set` at matched width and
+  neighbors, with separate parameter and streaming-latency gates.
 - Fixed-neighbor `graph_set` versus the implemented masked `attention_set` under
   matched parameter and latency budgets.
 - Per-ticker training versus the shared graph-set policy with ticker/regime
@@ -493,7 +776,7 @@ should compare:
 - Raw normalized surface features versus causal PCA, then a compact VAE or
   neural-process surface latent only after the data volume supports it.
 
-The flat, flattened-graph, graph-set, attention-set, and recurrent-family tournament plumbing,
+The flat, flattened-graph, graph-set, surface-graph-set, attention-set, and recurrent-family tournament plumbing,
 exact parameter-cap matching, and a standardized streaming batch-one inference
 benchmark are implemented. Each fold reports median, p95, and mean latency with
 runtime context from a training observation. Timing is informational by default; a
@@ -530,6 +813,14 @@ advances. This improves rollout and paper-agent throughput without changing PPO
 or REINFORCE objectives. It also provides the execution substrate for future
 concurrent multi-ticker diagnostics, but critic balancing remains a separate
 validation experiment rather than an assumed alpha enhancement.
+
+Flat removal candidates now use two contiguous NumPy slice copies when their
+masked inputs form one interval and retain generic indexed compaction otherwise.
+The change leaves batch-one latency effectively flat and reduced synchronized
+batch-16 latency by 0.80% in the matched local AAPL measurement. Reusable output
+buffers were rejected after making both measured paths slower. Keep this as a
+narrow rollout-throughput optimization; it does not change model semantics or
+justify weakening the batch-one deployment gate.
 
 Named feature-removal candidates now mask surface wings, volatility regime,
 data quality, or derived contract-surface inputs inside the recurrent model.

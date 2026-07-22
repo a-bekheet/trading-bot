@@ -63,6 +63,45 @@ class WalkForwardSplitTests(TestCase):
         self.assertEqual(folds[1].train_start, 3)
         self.assertEqual(folds[1].train_end, 15)
 
+    def test_latest_only_uses_all_available_pre_validation_history(self):
+        folds = walk_forward_splits(
+            53,
+            min_train_size=10,
+            max_train_size=20,
+            validation_size=4,
+            test_size=3,
+            embargo=2,
+            step_size=100,
+            latest_only=True,
+        )
+
+        self.assertEqual(
+            [fold.to_dict() for fold in folds],
+            [{
+                "fold": 0,
+                "train_start": 22,
+                "train_end": 42,
+                "validation_start": 44,
+                "validation_end": 48,
+                "test_start": 50,
+                "test_end": 53,
+                "embargo": 2,
+            }],
+        )
+
+    def test_latest_only_returns_no_fold_when_tail_leaves_too_little_training(self):
+        self.assertEqual(
+            walk_forward_splits(
+                16,
+                min_train_size=10,
+                validation_size=3,
+                test_size=2,
+                embargo=1,
+                latest_only=True,
+            ),
+            (),
+        )
+
     def test_rejects_invalid_sizes(self):
         with self.assertRaisesRegex(ValueError, "partition sizes"):
             walk_forward_splits(

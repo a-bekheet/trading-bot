@@ -25,6 +25,9 @@ class SnapshotIdentityTests(TestCase):
                 "ask": 0.04,
                 "impliedVolatility": 0.9531254687499999,
                 "underlyingPrice": 327.74,
+                "underlyingPriceSource": "regularMarketPrice",
+                "underlyingQuoteTime": "2026-07-21T20:00:01Z",
+                "underlyingQuoteTimeSource": "regularMarketTime",
                 "marketState": "REGULAR",
                 "riskFreeRate": 0.037300000190734865,
                 "greekModel": "black-scholes-merton",
@@ -44,6 +47,9 @@ class SnapshotIdentityTests(TestCase):
                 "ask": 0.22,
                 "impliedVolatility": 0.201234567890625,
                 "underlyingPrice": 327.74,
+                "underlyingPriceSource": "regularMarketPrice",
+                "underlyingQuoteTime": "2026-07-21T20:00:01Z",
+                "underlyingQuoteTimeSource": "regularMarketTime",
                 "marketState": "REGULAR",
                 "riskFreeRate": 0.037300000190734865,
                 "greekModel": "black-scholes-merton",
@@ -77,8 +83,14 @@ class SnapshotIdentityTests(TestCase):
         changed_quote.loc[0, "bid"] += 0.01
         changed_session = recomputed.copy()
         changed_session["marketState"] = "CLOSED"
+        changed_provider_time = recomputed.copy()
+        changed_provider_time["underlyingQuoteTime"] = "2026-07-21T20:00:02Z"
 
         original = material_snapshot_fingerprint(frame)
         self.assertEqual(original, material_snapshot_fingerprint(recomputed))
         self.assertNotEqual(original, material_snapshot_fingerprint(changed_quote))
         self.assertNotEqual(original, material_snapshot_fingerprint(changed_session))
+        self.assertNotEqual(
+            original,
+            material_snapshot_fingerprint(changed_provider_time),
+        )

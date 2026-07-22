@@ -10,6 +10,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from trading_bot.market_data.freshness import (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+    underlying_quote_age,
+)
 from trading_bot.market_data.market_state import (
     market_state_features,
     normalize_market_state,
@@ -55,6 +59,7 @@ PORTFOLIO_FEATURES = (
 PORTFOLIO_GREEK_SLICE = slice(3, 7)
 OPTION_CONTRACT_MULTIPLIER = 100
 PORTFOLIO_VALUATION_MODES = ("liquidation", "midpoint")
+ENV_STATE_SCHEMA_VERSION = "research-demo.options-env-state.v1"
 
 
 @dataclass
@@ -139,6 +144,9 @@ class OptionsEnv:
         max_abs_gamma: float | None = None,
         max_abs_theta: float | None = None,
         max_abs_vega: float | None = None,
+        max_underlying_quote_age_seconds: float | None = (
+            DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS
+        ),
     ):
         if slot_count < 1 or max_quantity < 1:
             raise ValueError("slot_count and max_quantity must be positive")
@@ -175,6 +183,17 @@ class OptionsEnv:
         }
         if any(limit is not None and limit <= 0 for limit in limits.values()):
             raise ValueError("Greek risk limits must be positive when provided")
+        if (
+            max_underlying_quote_age_seconds is not None
+            and (
+                not math.isfinite(max_underlying_quote_age_seconds)
+                or max_underlying_quote_age_seconds <= 0
+            )
+        ):
+            raise ValueError(
+                "max_underlying_quote_age_seconds must be positive and finite "
+                "when provided"
+            )
         if manifest is not None and manifest.schema_version != EnvManifest().schema_version:
             raise ValueError("environment manifest schema is incompatible")
         self.dataset = dataset
@@ -196,6 +215,9 @@ class OptionsEnv:
         self.reward_drawdown_penalty = reward_drawdown_penalty
         self.reward_downside_penalty = reward_downside_penalty
         self.risk_limits = limits
+        self.max_underlying_quote_age_seconds = (
+            max_underlying_quote_age_seconds
+        )
         manifest_values = {
             "symbol": dataset.symbol,
             "slot_count": slot_count,
@@ -219,6 +241,9 @@ class OptionsEnv:
             "max_abs_gamma": max_abs_gamma,
             "max_abs_theta": max_abs_theta,
             "max_abs_vega": max_abs_vega,
+            "max_underlying_quote_age_seconds": (
+                max_underlying_quote_age_seconds
+            ),
         }
         self.manifest = (
             replace(manifest, **manifest_values)
@@ -258,6 +283,7 @@ class OptionsEnv:
                     "reward_downside_penalty",
                     "max_abs_delta", "max_abs_gamma", "max_abs_theta",
                     "max_abs_vega",
+                    "max_underlying_quote_age_seconds",
                 )
                 if key in kwargs
             })
@@ -271,6 +297,183 @@ class OptionsEnv:
     def underlying_action_quantities(self) -> np.ndarray:
         positive = np.arange(1, self.max_quantity + 1) * self.underlying_lot_size
         return np.concatenate((np.array([0]), positive, -positive)).astype(np.int64)
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """Return a JSON-safe paper-portfolio state for process handoff.
+
+        Model weights and recurrent hidden state deliberately live outside this
+        payload.  A deployment layer must bind this state to an exact checkpoint
+        before restoring it.
+        """
+        return {
+            "schema_version": ENV_STATE_SCHEMA_VERSION,
+            "symbol": self.dataset.symbol,
+            "environment_contract": {
+                "slot_count": self.slot_count,
+                "slot_assignment": self.slot_assignment,
+                "max_quantity": self.max_quantity,
+                "allow_collateralized_option_shorts": (
+                    self.allow_collateralized_option_shorts
+                ),
+                "starting_cash": self.starting_cash,
+                "commission_per_contract": self.commission_per_contract,
+                "spread_multiplier": self.spread_multiplier,
+                "portfolio_valuation": self.portfolio_valuation,
+                "underlying_lot_size": self.underlying_lot_size,
+                "max_abs_underlying_shares": self.max_abs_underlying_shares,
+                "underlying_commission_per_share": (
+                    self.underlying_commission_per_share
+                ),
+                "underlying_slippage_bps": self.underlying_slippage_bps,
+                "max_underlying_quote_age_seconds": (
+                    self.max_underlying_quote_age_seconds
+                ),
+                "risk_limits": self.risk_limits,
+            },
+            "cursor": {
+                "index": self._index,
+                "timestamp": self.dataset.snapshots[self._index].timestamp,
+            },
+            "cash": float(self._cash),
+            "positions": {
+                symbol: {
+                    "quantity": int(position.quantity),
+                    "average_price": float(position.average_price),
+                    "greeks": [float(value) for value in position.greeks],
+                    "option_type": position.option_type,
+                    "strike": float(position.strike),
+                    "expiration": position.expiration,
+                    "last_liquidation_price": float(
+                        position.last_liquidation_price
+                    ),
+                    "opened_index": int(position.opened_index),
+                    "last_trade_index": int(position.last_trade_index),
+                }
+                for symbol, position in sorted(self._positions.items())
+            },
+            "underlying_shares": int(self._underlying_shares),
+            "contract_home_slots": {
+                symbol: int(slot)
+                for symbol, slot in sorted(self._contract_home_slots.items())
+            },
+            "peak_nav": float(self._peak_nav),
+            "max_drawdown": float(self._max_drawdown),
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> tuple[Observation, dict[str, Any]]:
+        """Restore a compatible JSON-safe portfolio state at its timestamp."""
+        if not isinstance(state, dict):
+            raise TypeError("environment state must be a dictionary")
+        if state.get("schema_version") != ENV_STATE_SCHEMA_VERSION:
+            raise ValueError("environment state schema is incompatible")
+        if str(state.get("symbol", "")).upper() != self.dataset.symbol:
+            raise ValueError("environment state symbol is incompatible")
+        expected_contract = self.snapshot_state()["environment_contract"]
+        if state.get("environment_contract") != expected_contract:
+            raise ValueError("environment state contract is incompatible")
+
+        cursor = state.get("cursor")
+        if not isinstance(cursor, dict) or not cursor.get("timestamp"):
+            raise ValueError("environment state cursor is invalid")
+        matching_indices = [
+            index
+            for index, snapshot in enumerate(self.dataset.snapshots)
+            if snapshot.timestamp == cursor["timestamp"]
+        ]
+        if not matching_indices:
+            raise ValueError("environment state cursor is absent from dataset")
+        # A live runner may append one identical terminal snapshot so the
+        # environment can execute the newest action.  Always restore the first
+        # occurrence, which is the actual market observation.
+        self._index = matching_indices[0]
+
+        cash = state.get("cash")
+        underlying_shares = state.get("underlying_shares")
+        peak_nav = state.get("peak_nav")
+        max_drawdown = state.get("max_drawdown")
+        numeric = (cash, peak_nav, max_drawdown)
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in numeric
+        ):
+            raise ValueError("environment state contains invalid account values")
+        if float(cash) < 0 or float(peak_nav) <= 0 or float(max_drawdown) < 0:
+            raise ValueError("environment state account invariants are violated")
+        if (
+            isinstance(underlying_shares, bool)
+            or not isinstance(underlying_shares, int)
+            or abs(underlying_shares) > self.max_abs_underlying_shares
+        ):
+            raise ValueError("environment state underlying position is invalid")
+
+        positions_payload = state.get("positions", {})
+        if not isinstance(positions_payload, dict):
+            raise ValueError("environment state positions are invalid")
+        positions: dict[str, Position] = {}
+        for symbol, payload in positions_payload.items():
+            if not isinstance(symbol, str) or not symbol or not isinstance(payload, dict):
+                raise ValueError("environment state position entry is invalid")
+            try:
+                position = Position(**payload)
+            except TypeError as error:
+                raise ValueError("environment state position schema is invalid") from error
+            if (
+                isinstance(position.quantity, bool)
+                or not isinstance(position.quantity, int)
+                or position.quantity == 0
+                or not math.isfinite(float(position.average_price))
+                or position.average_price <= 0
+                or isinstance(position.opened_index, bool)
+                or not isinstance(position.opened_index, int)
+                or isinstance(position.last_trade_index, bool)
+                or not isinstance(position.last_trade_index, int)
+                or not 0 <= position.opened_index <= position.last_trade_index
+                or position.last_trade_index > self._index
+                or not math.isfinite(float(position.strike))
+                or position.strike < 0
+                or not math.isfinite(float(position.last_liquidation_price))
+                or position.last_liquidation_price < 0
+            ):
+                raise ValueError("environment state position values are invalid")
+            position.greeks = tuple(float(value) for value in position.greeks)
+            if len(position.greeks) != len(GREEK_NAMES) or not all(
+                math.isfinite(value) for value in position.greeks
+            ):
+                raise ValueError("environment state position Greeks are invalid")
+            positions[symbol] = position
+
+        home_slots = state.get("contract_home_slots", {})
+        if not isinstance(home_slots, dict) or any(
+            not isinstance(symbol, str)
+            or isinstance(slot, bool)
+            or not isinstance(slot, int)
+            or slot < 0
+            or slot >= self.slot_count
+            for symbol, slot in home_slots.items()
+        ):
+            raise ValueError("environment state slot map is invalid")
+
+        self._cash = float(cash)
+        self._positions = positions
+        self._underlying_shares = underlying_shares
+        self._contract_home_slots = dict(home_slots)
+        self._peak_nav = float(peak_nav)
+        self._max_drawdown = float(max_drawdown)
+        self._cached_index = -1
+        self._cached_observation = None
+        self._cached_info = {}
+        self._cached_slots = []
+        frame = self._current_frame()
+        slots = self._slots(frame)
+        observation, info = self._observation(frame, slots)
+        self._cache_state(observation, info, slots)
+        info.update({
+            "restored": True,
+            "manifest_fingerprint": self.manifest.fingerprint,
+        })
+        return observation, info
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         self._rng = np.random.default_rng(seed)
@@ -416,6 +619,7 @@ class OptionsEnv:
                         })
 
         for slot, encoded in enumerate(orders[:self.slot_count]):
+            encoded = int(encoded)
             if encoded == 0:
                 continue
             if encoded < 0 or encoded > 2 * self.max_quantity:
@@ -784,6 +988,39 @@ class OptionsEnv:
         session_tradeable = (
             market_state_coverage < 0.5 or regular_market_session >= 0.5
         )
+        raw_quote_age, raw_quote_age_coverage = underlying_quote_age(
+            first.get("collectedAt"),
+            first.get("underlyingQuoteTime"),
+        )
+        quote_age = float(
+            first.get("underlyingQuoteAgeSeconds", raw_quote_age) or 0.0
+        )
+        quote_age_coverage = float(
+            first.get(
+                "underlyingQuoteAgeCoverage",
+                raw_quote_age_coverage,
+            )
+            or 0.0
+        )
+        if raw_quote_age_coverage >= 0.5:
+            quote_age = raw_quote_age
+            quote_age_coverage = raw_quote_age_coverage
+        if (
+            not math.isfinite(quote_age)
+            or quote_age < 0
+            or not math.isfinite(quote_age_coverage)
+            or quote_age_coverage < 0.5
+        ):
+            quote_age = 0.0
+            quote_age_coverage = 0.0
+        else:
+            quote_age_coverage = 1.0
+        freshness_tradeable = (
+            quote_age_coverage < 0.5
+            or self.max_underlying_quote_age_seconds is None
+            or quote_age <= self.max_underlying_quote_age_seconds
+        )
+        market_tradeable = session_tradeable and freshness_tradeable
         action_mask = np.zeros(self.action_shape, dtype=bool)
         for index, contract in enumerate(slots):
             if contract is None:
@@ -791,7 +1028,7 @@ class OptionsEnv:
             if not valid[index]:
                 continue
             action_mask[index, 0] = True
-            if not session_tradeable:
+            if not market_tradeable:
                 continue
             ask = self._execution_price(contract, "buy")
             bid = self._execution_price(contract, "sell")
@@ -880,7 +1117,7 @@ class OptionsEnv:
                     )
                 )
             action_mask[underlying_slot, encoded] = (
-                session_tradeable
+                market_tradeable
                 and price > 0
                 and fill_allowed
                 and self._risk_allowed(exposures, greek_change)
@@ -956,6 +1193,20 @@ class OptionsEnv:
                 "fallback": (
                     "legacy_unknown_permits_research_demo_fills"
                     if market_state_coverage < 0.5
+                    else None
+                ),
+            },
+            "market_data_freshness": {
+                "quote_time": first.get("underlyingQuoteTime"),
+                "quote_time_source": first.get("underlyingQuoteTimeSource"),
+                "price_source": first.get("underlyingPriceSource"),
+                "age_seconds": quote_age,
+                "coverage": quote_age_coverage,
+                "max_age_seconds": self.max_underlying_quote_age_seconds,
+                "trading_enabled": freshness_tradeable,
+                "fallback": (
+                    "legacy_unknown_permits_research_demo_fills"
+                    if quote_age_coverage < 0.5
                     else None
                 ),
             },

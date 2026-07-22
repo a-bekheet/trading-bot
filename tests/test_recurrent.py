@@ -53,6 +53,25 @@ class RecurrentTests(TestCase):
             "attention_heads": 2,
         })
 
+    @classmethod
+    def surface_graph_set_config(
+        cls,
+        *,
+        kind: str = "gru",
+        graph_neighbors: int = 2,
+        action_decoder: str = "factorized",
+    ) -> RecurrentConfig:
+        return RecurrentConfig(**{
+            **cls.graph_set_config(
+                kind=kind,
+                graph_neighbors=graph_neighbors,
+                action_decoder=action_decoder,
+            ).__dict__,
+            "encoder": "surface_graph_set",
+            "graph_relation_indices": (0, 1),
+            "graph_option_side_index": 2,
+        })
+
     def test_positional_hidden_size_remains_backward_compatible(self):
         config = RecurrentConfig(5, 2, 3, 8)
         self.assertEqual(config.hidden_size, 8)
@@ -88,6 +107,73 @@ class RecurrentTests(TestCase):
             RecurrentConfig(5, 2, 3, auxiliary_horizons=(2, 1))
         with self.assertRaisesRegex(ValueError, "attention_heads"):
             RecurrentConfig(5, 2, 3, attention_heads=0)
+        with self.assertRaisesRegex(ValueError, "critic_layer_norm"):
+            RecurrentConfig(5, 2, 3, critic_layer_norm=1)
+        with self.assertRaisesRegex(ValueError, "critic width"):
+            RecurrentConfig(
+                5,
+                2,
+                3,
+                hidden_size=1,
+                critic_layer_norm=True,
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_critic_layer_norm_changes_only_the_value_branch(self):
+        base = RecurrentConfig(
+            7,
+            2,
+            3,
+            action_slot_count=3,
+            hidden_size=4,
+        )
+        torch.manual_seed(19)
+        plain = build_recurrent_actor_critic(base)
+        torch.manual_seed(19)
+        normalized = build_recurrent_actor_critic(RecurrentConfig(**{
+            **base.__dict__,
+            "critic_layer_norm": True,
+        }))
+        sequence = torch.randn(2, 3, base.input_size)
+        action_mask = torch.ones(2, 3, 3, 3, dtype=torch.bool)
+
+        plain_logits, _ = plain.policy_sequence(sequence, action_mask)
+        normalized_logits, _ = normalized.policy_sequence(
+            sequence,
+            action_mask,
+        )
+        _, plain_values, _ = plain.forward_sequence(sequence, action_mask)
+        _, normalized_values, _ = normalized.forward_sequence(
+            sequence,
+            action_mask,
+        )
+
+        torch.testing.assert_close(normalized_logits, plain_logits)
+        self.assertFalse(torch.equal(normalized_values, plain_values))
+        self.assertIsInstance(plain.value_norm, torch.nn.Identity)
+        self.assertIsInstance(normalized.value_norm, torch.nn.LayerNorm)
+        self.assertEqual(
+            sum(parameter.numel() for parameter in normalized.parameters())
+            - sum(parameter.numel() for parameter in plain.parameters()),
+            2 * base.hidden_size,
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_surface_graph_requires_coordinates_and_option_side(self):
+        base = self.graph_set_config().__dict__
+        with self.assertRaisesRegex(ValueError, "relation coordinates"):
+            build_recurrent_actor_critic(RecurrentConfig(**{
+                **base,
+                "encoder": "surface_graph_set",
+                "graph_relation_indices": (),
+                "graph_option_side_index": 2,
+            }))
+        with self.assertRaisesRegex(ValueError, "option-side index"):
+            build_recurrent_actor_critic(RecurrentConfig(**{
+                **base,
+                "encoder": "surface_graph_set",
+                "graph_option_side_index": None,
+            }))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_auxiliary_head_is_train_only_and_preserves_policy_outputs(self):
@@ -169,6 +255,14 @@ class RecurrentTests(TestCase):
                 self.assertEqual(auxiliary_calls, [])
 
         for config in (
+            RecurrentConfig(
+                5,
+                2,
+                3,
+                action_slot_count=3,
+                hidden_size=8,
+                action_decoder="single_leg",
+            ),
             self.graph_set_config(),
             self.attention_set_config(action_decoder="single_leg"),
         ):
@@ -182,6 +276,7 @@ class RecurrentTests(TestCase):
                     config.action_count,
                     dtype=torch.bool,
                 )
+                mask[:, 0, 1] = False
                 full_logits, _, _ = model(sequence, mask)
                 value_calls = []
                 value_handle = model.value.register_forward_hook(
@@ -238,6 +333,16 @@ class RecurrentTests(TestCase):
             sum(parameter.numel() for parameter in model.parameters()),
             sum(parameter.numel() for parameter in full.parameters()),
         )
+
+        compact = sequence.index_select(-1, model._active_input_indices)
+        compact_logits, compact_values, _ = model.forward_sequence(
+            compact,
+            mask,
+        )
+        torch.testing.assert_close(first_logits, compact_logits)
+        torch.testing.assert_close(first_values, compact_values)
+        with self.assertRaisesRegex(ValueError, "raw or precompacted"):
+            model.forward_sequence(sequence[..., :4], mask)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_recurrent_variants_have_safe_masked_action_shapes(self):
@@ -653,6 +758,7 @@ class RecurrentTests(TestCase):
 
         for config in (
             self.graph_set_config(),
+            self.surface_graph_set_config(),
             self.attention_set_config(),
         ):
             with self.subTest(encoder=config.encoder):
@@ -711,6 +817,7 @@ class RecurrentTests(TestCase):
 
         for config in (
             self.graph_set_config(action_decoder="single_leg"),
+            self.surface_graph_set_config(action_decoder="single_leg"),
             self.attention_set_config(action_decoder="single_leg"),
         ):
             with self.subTest(encoder=config.encoder):
@@ -750,6 +857,7 @@ class RecurrentTests(TestCase):
 
         for config in (
             self.graph_set_config(),
+            self.surface_graph_set_config(),
             self.attention_set_config(),
         ):
             with self.subTest(encoder=config.encoder):
@@ -773,15 +881,15 @@ class RecurrentTests(TestCase):
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_set_encoders_streaming_matches_full_sequence_for_every_variant(self):
-        for encoder in ("graph_set", "attention_set"):
+        for encoder in ("graph_set", "surface_graph_set", "attention_set"):
             for kind in ("gru", "lstm", "hybrid", "mixture"):
                 with self.subTest(encoder=encoder, kind=kind):
                     torch.manual_seed(41)
-                    config = (
-                        self.graph_set_config(kind=kind)
-                        if encoder == "graph_set"
-                        else self.attention_set_config(kind=kind)
-                    )
+                    config = {
+                        "graph_set": self.graph_set_config,
+                        "surface_graph_set": self.surface_graph_set_config,
+                        "attention_set": self.attention_set_config,
+                    }[encoder](kind=kind)
                     model = build_recurrent_actor_critic(config)
                     model.eval()
                     sequence = torch.randn(1, 5, 20)
@@ -812,22 +920,91 @@ class RecurrentTests(TestCase):
                     )
 
     @skipUnless(torch is not None, "install the optional ml extra")
-    def test_attention_set_is_finite_for_an_empty_surface(self):
-        torch.manual_seed(42)
-        model = build_recurrent_actor_critic(self.attention_set_config())
-        sequence = torch.randn(2, 3, 20)
-        sequence[..., -3:] = 0
-        action_mask = torch.zeros(2, 3, 4, 3, dtype=torch.bool)
-        action_mask[..., 0] = True
+    def test_set_encoders_are_finite_for_an_empty_surface(self):
+        for config in (
+            self.surface_graph_set_config(),
+            self.attention_set_config(),
+        ):
+            with self.subTest(encoder=config.encoder):
+                torch.manual_seed(42)
+                model = build_recurrent_actor_critic(config)
+                sequence = torch.randn(2, 3, 20)
+                sequence[..., -3:] = 0
+                action_mask = torch.zeros(2, 3, 4, 3, dtype=torch.bool)
+                action_mask[..., 0] = True
 
-        logits, values, auxiliary, _ = (
-            model.forward_sequence_with_auxiliary(sequence, action_mask)
+                logits, values, auxiliary, _ = (
+                    model.forward_sequence_with_auxiliary(sequence, action_mask)
+                )
+
+                self.assertTrue(torch.isfinite(logits[..., 0]).all())
+                self.assertTrue(torch.isneginf(logits[..., 1:]).all())
+                self.assertTrue(torch.isfinite(values).all())
+                self.assertTrue(torch.isfinite(auxiliary).all())
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_surface_graph_routes_nearest_cross_side_counterparts(self):
+        config = RecurrentConfig(
+            25,
+            4,
+            3,
+            action_slot_count=5,
+            hidden_size=8,
+            encoder="surface_graph_set",
+            contract_feature_count=4,
+            market_feature_count=2,
+            portfolio_feature_count=3,
+            graph_hidden_size=4,
+            graph_layers=1,
+            graph_neighbors=0,
+            graph_relation_indices=(0, 1),
+            graph_option_side_index=2,
+        )
+        model = build_recurrent_actor_critic(config)
+        layer = model.graph_message_layers[0]
+        with torch.no_grad():
+            layer["self"].weight.zero_()
+            layer["self"].bias.zero_()
+            layer["neighbor"].weight.copy_(torch.eye(4))
+
+        sequence = torch.zeros(1, 1, 25)
+        # Coordinates, signed Delta (call/put side), and message-only feature.
+        contracts = torch.tensor([[
+            [0.00, 0.1, 0.5, 1.0],
+            [0.01, 0.1, -0.0, 2.0],
+            [1.00, 0.5, 0.5, 3.0],
+            [1.01, 0.5, -0.0, 4.0],
+        ]])
+        sequence[..., 2:18] = contracts.reshape(1, 1, 16)
+        sequence[..., -4:] = 1
+        _, baseline = model._graph_encode(sequence)
+
+        changed_near = sequence.clone()
+        changed_near[..., 2 + 1 * 4 + 3] = 20.0
+        _, near = model._graph_encode(changed_near)
+        changed_far = sequence.clone()
+        changed_far[..., 2 + 3 * 4 + 3] = 40.0
+        _, far = model._graph_encode(changed_far)
+
+        self.assertFalse(torch.equal(near[..., 0, :], baseline[..., 0, :]))
+        torch.testing.assert_close(far[..., 0, :], baseline[..., 0, :])
+        self.assertFalse(torch.equal(far[..., 2, :], baseline[..., 2, :]))
+        self.assertTrue(any(
+            ".neighbor." in name for name, _ in model.named_parameters()
+        ))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_fixed_graph_reuses_nonpersistent_diagonal_buffer(self):
+        model = build_recurrent_actor_critic(
+            self.surface_graph_set_config()
         )
 
-        self.assertTrue(torch.isfinite(logits[..., 0]).all())
-        self.assertTrue(torch.isneginf(logits[..., 1:]).all())
-        self.assertTrue(torch.isfinite(values).all())
-        self.assertTrue(torch.isfinite(auxiliary).all())
+        self.assertEqual(
+            tuple(model._graph_diagonal.shape),
+            (1, model.config.slot_count, model.config.slot_count),
+        )
+        self.assertEqual(model._graph_diagonal.dtype, torch.bool)
+        self.assertNotIn("_graph_diagonal", model.state_dict())
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_set_uses_fewer_parameters_than_flattened_graph(self):

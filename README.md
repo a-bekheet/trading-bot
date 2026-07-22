@@ -53,13 +53,57 @@ nearest three expirations. Use `--expirations 1` for the lowest-latency mode or
 collect-options --once --expirations 1
 ```
 
-The collector fingerprints the raw quote surface, spot, dividend yield, and
-risk-free rate before appending. If those inputs are unchanged, it records the
+The collector fingerprints the raw quote surface, spot, dividend yield,
+risk-free rate, and provider-timestamped benchmark observation before
+appending. If those inputs are unchanged, it records the
 successful observation in the heartbeat but does not append rows whose only
-differences would be elapsed time and recomputed Greeks. The training loader
+differences would be elapsed time and recomputed Greeks. SPY is fetched once per
+cycle by default and copied into each ticker snapshot; use
+`--benchmark-symbol` to change the declared proxy. Benchmark failure is
+fail-soft and leaves explicit zero coverage while ticker collection continues.
+The training loader
 applies the same consecutive-deduplication rule to older CSVs, preventing stale
 closed-market quotes from becoming synthetic RL transitions. A changed rate,
-spot, contract set, or quote remains a new snapshot.
+spot, contract set, quote, or timestamped benchmark observation remains a new
+snapshot.
+
+Continuous collection treats `--interval` as a start-to-start cadence. The
+roughly two-minute top-50 fetch duration is subtracted before sleeping instead
+of being added to every interval. This preserves the requested observation
+spacing while unchanged-surface fingerprinting still prevents duplicate rows.
+
+v0.87 records the deterministic policy's mean maximum probability and
+normalized entropy over action factors that had more than one feasible choice.
+These diagnostics appear beside each online decision in Agent Desk and make a
+collapsed or indecisive policy visible; they are not calibrated probabilities
+of profit and do not independently authorize execution. Sandbox activation now
+also requires both the seed-robust validation score and the exact deployed
+checkpoint's validation score to clear the no-op margin. A strong aggregate can
+therefore no longer activate weak representative weights.
+
+v0.88 separates operational policy selection from feature-diagnostic research.
+The locked arena now compares 12 deployable PPO/REINFORCE agents per ticker and
+keeps every GRU, LSTM, gated-mixture, flat, sparse single-leg, factorized, and
+surface-GNN family. The 12 feature-removal configurations remain available in
+the general walk-forward CLI but no longer double the once-per-session live job.
+The arena therefore falls from 360 to 180 independently trained replicas. Each
+fold also benchmarks an identical recurrent actor graph once and reuses that
+measurement across training seeds, recording the measured seed and each reuse;
+weights do not change the dense execution graph. These changes reduce
+time-to-agent without weakening the three-seed validation or held-out gate.
+
+v0.89 closes the live input-race found during the first strict five-ticker run.
+The arena now loads every ticker dataset into one frozen in-memory boundary
+before training the first policy, and records the freeze window and loaded
+symbols in `agent-arena.json`. The watcher also waits while the collector is
+actively appending CSVs, and the arena rejects the whole freeze if any source
+size or modification timestamp changes while inputs load. A later ticker can
+therefore no longer observe a newer collection cycle merely because earlier
+ticker models took longer to train.
+
+v0.89.1 makes option execution records JSON-safe at the environment boundary.
+Encoded NumPy action quantities are converted to Python integers before fills,
+so an activated paper agent can atomically persist its first sandbox order.
 
 ## Explore data
 
@@ -67,9 +111,128 @@ spot, contract set, or quote remains a new snapshot.
 streamlit run src/trading_bot/interface/app.py
 ```
 
-The interface lets you choose a ticker, inspect its latest call or put
-snapshot, and submit fake option orders. Paper buys fill at the saved ask and
-paper sells fill at the saved bid.
+The interface is organized around five focused jobs. **Overview** is the compact
+operating dashboard for market eligibility, service health, measured outcomes,
+and fleet status. **Agent Desk** gives one ticker and one selected policy the
+full screen: model identity, activation gate, inference latency, online equity,
+and recent decisions. **Trade** puts a paper order ticket before the full option
+chain, while **Portfolio** combines marked positions and fill history. Dense
+walk-forward evidence, arena readiness, candidate rankings, GNN comparisons,
+feature ablations, and provenance live under **Research** rather than crowding
+the operating views.
+
+Saved runs under `data/agent_runs/` still expose the newest selected policy for
+every ticker with a stable ID, checkpoint, recurrent core, flat/GNN topology,
+activation state, latency, held-out return, and latest action. Candidate
+rankings remain validation-only; only the fixed winner is opened on the
+held-out slice. A conservative promotion gate requires positive held-out and
+doubled-cost returns, improvement over no-op with statistical support, adequate
+history, regular-session provenance, and no invalid actions.
+
+The workspace also shows a persistent paper-agent loop. Each selected checkpoint
+gets an isolated account, exact checkpoint hash, recurrent hidden-state cursor,
+and idempotent decision ledger in `data/agent_paper.db`. The loop records the
+model's proposed orders on each new regular, fresh, executable post-evaluation
+snapshot. A winner that did not clear the validation activation gate is still
+visible, but its actual sandbox order is forced to HOLD. Each newest decision
+stays pending until a real next eligible observation finalizes its return; the
+interface plots only those causal account marks and reports online drawdown and
+outcome hit rate separately from research-test evidence.
+
+Paper buys fill at the saved ask and paper sells fill at the saved bid.
+
+Run the reproducible five-ticker recurrent-agent arena used by the interface:
+
+```bash
+agent-arena
+```
+
+By default it independently compares PPO GRU, LSTM, and gated-mixture agents on
+AAPL, NVDA, MSFT, AMZN, and GOOG. Every flat recurrent family gets factorized
+multi-leg and exact sparse single-leg policies. Three additional
+`surface_graph_set` agents pair the sparse decoder with local strike/expiry and
+opposite-side message passing. Three matched flat single-leg Monte-Carlo
+REINFORCE challengers add GRU, LSTM, and gated-mixture algorithm controls, for
+12 deployable candidates per ticker. Feature-removal models remain available
+through `train-walk-forward --ablation`; they are intentionally excluded from
+the operational arena because diagnostics should not double the time to a
+tangible selected policy. Repeat
+`--symbol` to choose another set. The command keeps identical budgets and split
+rules across tickers and uses the latest possible chronological fold, assigning
+all earlier eligible history to training. Each invocation gets a timestamped
+directory under `data/agent_runs/recurrent-arena`, containing one walk-forward
+artifact per ticker plus `agent-arena.json`, so later runs cannot overwrite
+earlier evidence. A per-ticker failure does not discard completed runs. It
+trains each candidate with three deterministic seed
+replicates. Selection retains every policy within one standard error of the raw
+leader, with a one-basis-point materiality floor, then prefers the existing
+ablation, actor-latency, and complexity ordering. A separate validation-only
+gate requires the winner to beat no-op by one basis point before the sandbox
+will invoke it; otherwise the research result stays visible while the active
+policy abstains. Before any model is trained, the default arena filters to
+provider-confirmed regular states with a fresh underlying timestamp and an
+executable option quote, then requires enough eligible states for all three
+partitions: six training, three validation, and four held-out test. An unready
+run writes a readiness manifest and exits successfully without training; use
+`--allow-unready-tail` only for an explicit plumbing experiment.
+
+On macOS, the readiness-aware training loop can run without an open terminal:
+
+```bash
+arena-service install
+```
+
+It checks the same strict five-ticker gate every 60 seconds, trains the full
+180-replica arena once for each New York market session whose data becomes
+ready, and records its heartbeat in `data/_arena_watch_status.json`. It will not
+retrain on every collector cycle. The Agent Results tab displays whether it is
+waiting, running, complete, or already current. `arena-watch --once` performs a
+single check; `arena-service uninstall` stops and removes the LaunchAgent.
+The watcher defers both readiness inspection and launch while the collector
+status is `running`; after launch, all five inputs are frozen before model
+training begins.
+
+After a compatible arena finishes, advance the selected policies once:
+
+```bash
+paper-agents --data-dir data
+```
+
+On macOS, install the change-aware paper loop alongside the collector and arena
+watcher:
+
+```bash
+paper-agent-service install
+```
+
+It checks inputs every 30 seconds but reloads checkpoints only when a CSV or
+walk-forward summary changed. Its atomic heartbeat is
+`data/_paper_agent_watch_status.json`; stdout/stderr remain under `data/`.
+`paper-agent-watch --once` is the auditable one-cycle form, and
+`paper-agent-service uninstall` removes the service. Old checkpoints whose
+feature/checkpoint schema predates the runtime fail closed and remain visible as
+errors until a current arena produces compatible weights.
+
+For a one-ticker drill-down with explicit settings:
+
+```bash
+train-walk-forward \
+  --symbol AAPL \
+  --output-dir data/agent_runs/aapl-recurrent-tournament \
+  --min-train-size 6 --validation-size 2 --test-size 3 --step-size 100 \
+  --candidate flat:gru --candidate flat:lstm --candidate flat:mixture \
+  --hidden-size 8 --episodes 3 --sequence-length 2 --burn-in-steps 0 \
+  --max-steps 4 --initial-hold-bias 0 --slot-count 8 --max-quantity 1
+```
+
+These commands are visible integration demos, not recommended experiment sizes.
+In the first five-ticker arena, GRU won validation on AMZN, MSFT, and NVDA;
+LSTM won GOOG; and the gated mixture won AAPL. Every selected held-out path lost
+money after costs: returns ranged from -0.046% on NVDA to -0.443% on GOOG.
+The five paths made 42 fills over 15 transitions. Test slices had legacy or
+non-regular-session provenance, so the result demonstrates end-to-end model
+selection, behavior, accounting, and honest failure reporting—not alpha or live
+fillability.
 
 ## Paper portfolio sandbox
 
@@ -92,6 +255,17 @@ trades = broker.trades()
 `broker.buy(...)` and `broker.sell(...)` require explicit contract metadata,
 quantity, and fill price. The paper broker never fetches quotes and has no live
 broker adapter, which keeps execution decisions separate from market data.
+
+Automated policies do not share this manual account. Their separate
+`agent_paper.db` store atomically commits the portfolio state, model-bound
+recurrent cursor, and unique per-snapshot decision. This avoids double fills
+after a restart and prevents one ticker or checkpoint from mutating another
+agent's capital. The newest decision labels its reward as same-snapshot
+execution-only and its economic outcome as pending until a later eligible mark
+exists. Finalized online return is measured from pre-trade decision NAV to that
+next account mark, including simulated spread and fees. Current paper equity is
+the account result. It remains simulated execution only; no code path connects
+the agent store to a live broker.
 
 ## Project structure
 
@@ -170,6 +344,10 @@ env = OptionsEnv.from_directory(
 Snapshot loading adds causal engineered features such as relative spread,
 forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs, IV
 change/skew, ATM term slope, put-call IV spread, and put-call parity residual.
+Each executable contract also receives a same-expiry, same-side quadratic-smile
+leave-one-out IV residual plus coverage. The residual measures rich/cheap
+deviation from the currently observed smile without reconstructing a quote or
+changing execution prices and is removable through `contract_smile_residual`.
 Underlying return, cumulative log return over 4- and 16-snapshot windows,
 elapsed seconds from the causal prior snapshot, and annualized realized
 volatility over the same windows live once in the market vector rather than
@@ -178,7 +356,11 @@ the exact causal history-coverage masks, while explicit gap coverage
 distinguishes a missing or invalid timestamp from a genuine interval.
 Shared price-history coverage remains visible in both `price_trend` and
 `volatility_regime` ablations so a removed signal never removes the policy's
-knowledge that history is sparse.
+knowledge that history is sparse. A compact `systematic_context` block adds the
+provider-timestamped benchmark return, 4/16-observation benchmark return and
+realized volatility, ticker-minus-benchmark return, quote age, and explicit
+coverage. Repeated or backward benchmark timestamps never masquerade as zero
+market returns, and legacy CSVs remain neutral with zero coverage.
 Front-expiry ATM IV and its difference from both realized-volatility
 horizons provide a compact volatility-risk-premium regime signal. The same
 snapshot-level vector carries executable front-expiry 25-delta risk reversal
@@ -187,7 +369,13 @@ across graph nodes. Executable ATM points across expirations now produce a
 market-level term-structure slope and discrete curvature. One-snapshot changes
 in front ATM IV, 25-delta risk reversal/butterfly, and term slope expose surface
 dynamics without asking the recurrent model to reconstruct sparse factors from
-changing contract slots. ATM, wing, term, change, executable-quote, Greek, and
+changing contract slots. Four additional velocities divide those covered
+changes by the causal snapshot gap in hours and clip them to plus or minus two
+volatility units per hour. This lets a compact recurrent policy distinguish a
+fast surface shock from the same change over a long collection interval without
+inferring a division from two inputs. Missing or nonpositive gaps remain neutral,
+and the four values are removable through `surface_velocity`. ATM, wing, term,
+change, executable-quote, Greek, and
 realized-volatility coverage features distinguish missing surfaces from genuine
 zero signals. Wing and term selection ignore zero-bid or otherwise unexecutable
 quotes. The IV-minus-
@@ -238,13 +426,18 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v18` transform. Prices, strikes, and average entry price are
+`dimensionless.v24` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
 become ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields and
-position quantity are log-compressed. Unrealized return uses a signed log transform.
-Cumulative log returns use the same signed bounded transform as one-step return.
+position quantity are log-compressed. Provider underlying-quote age uses the
+same fixed gap transform. Unrealized return uses a signed log transform.
+Cumulative log returns, benchmark returns, and ticker-relative returns use the
+same signed bounded transform as one-step return. Benchmark volatility and age
+reuse the existing volatility and provider-age transforms. Fitted-smile
+curvature and ATM residual use the signed surface transform, while relative
+fit RMSE uses `log1p`.
 Signed contract changes are log-compressed at fixed scales. The `time_context`,
 `price_trend`, `position_state`, `position_lifecycle`, `action_feasibility`, and `contract_dynamics`
 walk-forward ablations preserve the external observation/action contract. Flat
@@ -338,7 +531,9 @@ For every policy state, the shared GRU/LSTM representation predicts bounded
 cumulative spot, front-ATM-IV, 25-delta risk-reversal/butterfly, and ATM
 term-slope changes at each declared snapshot horizon. It also predicts the
 cross-sectional median matched-contract mid-quote return, relative-spread
-change, and IV change. Contract targets match identifiers at both endpoints,
+change, IV change, and current-Delta-hedged option P&L normalized by current
+spot. The last target additionally requires explicit regular-session and fresh
+underlying provenance at both endpoints. Contract targets match identifiers at both endpoints,
 require executable bid/ask quotes, cover at least half of the current valid
 cross-section, and are independent of slot order. Both
 endpoints require point-in-time coverage; incomplete tail horizons are
@@ -621,6 +816,514 @@ streaming inference medians were 124.81 and 120.27 microseconds, and the selecte
 held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
+
+v0.72 gives recurrent agents a causal intraday clock without turning timestamps
+into an execution rule. The market vector now contains the current capture
+timestamp's fraction of the day in `America/New_York` plus explicit timestamp
+coverage. This lets GRU, LSTM, hybrid, and mixture candidates learn regular-hour
+time-of-day effects while Yahoo's provider `marketState` remains the only session
+label and the independent execution mask remains authoritative. The feature does
+not infer holidays, early closes, exchange quote time, or fill contemporaneity.
+
+```bash
+train-walk-forward --symbol AAPL --ablation intraday_clock
+```
+
+The design is motivated by the reported concentration of smile-geometry return
+predictability in the final half-hour in
+[Intraday Volatility-Smile Geometry and Option Returns (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5893362).
+It does not reproduce the paper's 30-minute holding period or high-frequency
+data. An initial sine/cosine/coverage design was simplified to day fraction plus
+coverage because the intended U.S. regular-hours interval does not cross
+midnight. That cut the width-128 flat-GRU increment from 1,158 to 772 parameters.
+
+Across the latest AAPL, NVDA, MSFT, AMZN, and GOOG samples, every retained
+snapshot had valid clock coverage, but none had provider-confirmed regular-session
+coverage. A two-fold, one-episode AAPL smoke therefore tied at zero validation
+reward in both folds and selected one full and one removed model through later
+latency tie-breaks. This verifies plumbing only and provides no alpha evidence.
+An alternating nine-repeat actor benchmark measured 125.125 microseconds for the
+full model and 126.584 for the compact ablation; the wider model is not
+intrinsically faster, so the 1.15% ordering is treated as machine noise.
+Environment, feature-vector, checkpoint, single-ticker walk-forward, and universe
+walk-forward schemas advance to v27, `dimensionless.v22`, v54, v58, and v42.
+Package version is 0.72.0.
+
+v0.73 replaces the interface's model-free landing view with a tangible agent
+results workspace. Walk-forward v59 artifacts retain the selected policy's
+held-out NAV path, per-step decisions, and execution ledger plus baseline paths
+and test-slice execution provenance. The UI presents the candidate leaderboard
+as validation evidence, exposes only the fixed winner as held-out evidence, and
+refuses to turn a tiny or legacy-session demo into an alpha claim. The current
+reproducible AAPL GRU/LSTM/gated-mixture tournament selected the mixture on a
+-0.000424 validation score; it returned -0.121% on two held-out transitions
+with 13 fills and $7.40 in fees. Package version is 0.73.0.
+
+v0.74 adds `agent-arena`, a single reproducible command for applying the same
+GRU/LSTM/gated-mixture PPO tournament to multiple tickers with isolated failure
+records. The Agent Results tab now opens with a cross-ticker scorecard, return
+chart, validation-winner counts, fills, costs, evidence grade, and execution
+provenance before the existing per-run drill-down. The initial five-ticker run
+completed without orchestration failures, selected GRU three times, LSTM once,
+and the gated mixture once, and produced five negative held-out paths. Package
+version is 0.74.0.
+
+v0.75 turns action sparsity into a selected agent property instead of a fixed
+assumption. Each GRU, LSTM, and gated-mixture arena family now competes with
+matched factorized multi-leg and exact single-leg decoders. The sparse decoder
+won validation on all five initial tickers. Relative to the earlier factorized
+arena, held-out fills fell from 42 to 7, fees from $20.48 to $2.98, and mean
+return improved from -0.154% to -0.025%; GOOG moved from -0.443% to flat. These
+paths remain too short and poorly session-covered for an alpha claim.
+
+The deterministic single-leg actor now bypasses training-only safe-row cloning
+and full joint-mask materialization, masks only non-hold logits in place, and
+decodes the winning joint index directly. A nine-repeat alternating AAPL GRU
+benchmark reduced its median from 113.6 to 108.2 microseconds (4.8%) and narrowed
+the overhead versus factorized from 15.9% to 9.6%. Arena schema advances to v2;
+package version is 0.75.0.
+
+v0.76 restores topology-aware GNNs to the tangible default arena after v0.75's
+action-decoder isolation. Surface-GNN GRU, LSTM, and gated-mixture PPO policies
+now compete against all six flat controls using the sparse decoder that won the
+earlier action-surface test. In the first nine-policy five-ticker run, a surface
+GNN won validation on every ticker: the gated mixture on AAPL, AMZN, MSFT, and
+NVDA, and GRU on GOOG. Actor medians on AAPL were roughly 343-390 microseconds
+for the GNNs versus 102-156 for flat candidates, keeping the latency tradeoff
+visible.
+
+That selection result did not translate into profit. All five held-out paths
+were negative, mean return was -0.027%, and 14 fills cost $2.28. The interface
+therefore reports zero promotion-ready paths and shows the exact failed gates
+instead of treating a validation win as alpha. Arena schema advances to v3;
+package version is 0.76.0.
+
+v0.77 makes that larger arena more resistant to marginal validation wins. Every
+default candidate now trains on three seeds. A one-standard-error rule retains
+policies statistically competitive with the raw leader; a declared one-basis-
+point floor prevents a zero-variance result on a tiny validation slice from
+claiming false precision. Existing ablation preferences, actor latency,
+parameter count, and active input count select only within that competitive
+pool. Artifacts store the raw leader, effective tolerance, competitive model
+IDs, selected-score sacrifice, and seed replicates.
+
+On the same five-ticker integration data, this rule selected flat LSTMs for
+AAPL and AMZN, a flat GRU for NVDA, and retained surface-GNN winners for GOOG
+and MSFT. Median selected actor latency fell from about 382 to 133 microseconds,
+a 65% reduction. Mean held-out return improved slightly from -0.027% to -0.025%,
+but every path remained negative and zero passed promotion. Because the same
+tiny held-out data has already been inspected across development iterations,
+this comparison is engineering feedback, not fresh alpha evidence. Walk-forward,
+universe walk-forward, and arena schemas advance to v60, v43, and v4; package
+version is 0.77.0.
+
+v0.78 separates the validation-selected research winner from the policy allowed
+to act in the sandbox. A validation-only activation gate runs the deterministic
+no-op baseline on the same validation environment and requires the selected
+agent's seed-robust score to beat it by a predeclared margin. The default arena
+uses one basis point and fails closed on equality. Research checkpoints,
+held-out paths, and diagnostics remain available even when the operational
+surface abstains.
+
+All five current research winners had negative validation advantages, from
+-0.44 to -1.51 basis points, so every sandbox policy chose no-op. On the already
+inspected held-out paths this changed the operational view from a -0.025% mean
+return, 14 fills, $3.32 fees, and 133-microsecond median selected actor latency
+to 0%, zero fills, zero fees, and no actor invocation. This is loss avoidance,
+not alpha: the gate has not yet activated a profitable agent, and the same tiny
+test paths are not fresh evidence. Walk-forward, universe walk-forward, and
+arena schemas advance to v61, v44, and v5; package version is 0.78.0.
+
+v0.79 adds a causal per-contract volatility-smile residual to both flat
+recurrent and surface-GNN observations. It fits only positive, non-crossed
+current quotes within each expiration and option side, requires five points and
+three unique forward-log-moneyness coordinates, and reports a leverage-adjusted
+leave-one-out residual with explicit coverage. The default arena now evaluates
+15 policies per ticker: nine full-feature agents plus six exact sparse
+`contract_smile_residual` ablations across flat/GNN and GRU/LSTM/mixture.
+
+In the five-ticker integration run, the signal improved 13 of 30 matched
+validation pairs, hurt 14, and tied 3. Mean feature lift was +1.02 bp for the 15
+surface-GNN pairs and -1.04 bp for the 15 flat pairs, so it remains selectable
+rather than mandatory. Winners retained the signal for AMZN and GOOG and
+ablated it for AAPL, MSFT, and NVDA; GOOG and MSFT selected surface-GNN LSTMs.
+Every winner still had a negative validation advantage, from -0.29 to -1.21 bp,
+so all sandbox policies abstained. The already inspected held-out research paths
+averaged -0.023%, with 13 fills and $3.73 in fees; operational return remained
+0%. Median selected actor latency was 118.5 microseconds. These small repeated
+samples are engineering and hypothesis-ranking evidence, not fresh alpha.
+Environment, feature-vector, checkpoint, walk-forward, universe, and arena
+schemas advance to v28, `dimensionless.v23`, v55, v62, v45, and v6; package
+version is 0.79.0.
+
+v0.80 fixes a stale-evidence flaw in the fast default arena. Its previous
+100-snapshot step produced only the earliest possible fold, so a growing live
+collector never moved training, validation, or test forward until 100 additional
+deduplicated states existed. The arena now requests one latest chronological
+fold directly: the validation/test tail remains untouched, embargoes are
+preserved, and every earlier eligible state expands training. General single-
+ticker and shared-universe commands expose the same behavior through
+`--latest-fold-only`; ordinary multi-fold walk-forward remains the default.
+
+On the current five files, this moved training from six states to 20-24 and the
+test interval from roughly 02:42-08:08 UTC to 11:49-12:39 UTC. The new tail was
+provider-confirmed pre-market, so every trade was correctly masked, all 30 smile
+comparisons tied at zero, and the simplicity rule selected full-feature flat
+GRUs at about 102 microseconds median actor latency. Both research and sandbox
+paths returned 0% with no fills or fees. This is currentness and safety evidence,
+not alpha or a useful feature comparison; the running collector must accumulate
+regular-session states before economic evaluation. Default arena invocations
+now write collision-resistant timestamped run directories, while the interface
+shows each held-out time range and preserves prior runs for drill-down.
+Walk-forward, universe, and arena schemas advance to v63, v46, and v7; package
+version is 0.80.0.
+
+v0.81 adds a pre-training economic-evidence gate to the default arena. The
+latest-fold correction exposed that a fully pre-market validation/test tail can
+only produce masked no-op decisions, making 225 training replicates incapable
+of generating useful agent evidence. The arena now checks every validation and
+test state for provider-confirmed regular session, a covered underlying quote no
+older than the environment threshold, and at least one positive non-crossed
+option quote. Unready tickers record exact counts and timestamps in
+`agent-arena.json`; if every ticker is waiting, the command completes without
+calling the trainer. Streamlit shows ready ticker count plus regular, fresh, and
+executable validation/test counts while retaining the last successful agents.
+The Agent Lab makes those retained policies tangible: one card per ticker, a
+registry with checkpoint and model identity, the full recurrent/GNN candidate
+fleet, and a per-step decision tape that distinguishes research HOLD, unfilled
+or blocked intent, and sandbox-enforced HOLD.
+
+The first live preflight found 0/5 tickers ready: all underlying timestamps were
+fresh, but every tail state was pre-market, and AAPL/NVDA also had no executable
+option quote in those partitions. The first gate avoided training in 7.04
+seconds. Loading only raw materially deduplicated snapshots before the gate then
+reduced the same run to 1.48 seconds, 79% faster than the initial gate and about
+97% faster than the roughly 47-second full arena. Full causal feature engineering
+is deferred until a ticker passes. This is compute and evidence hygiene, not
+alpha. The current persisted arena exposes five guarded agents, 75 candidate
+configurations (30 surface-GNN), 225 independently trained seed replicates, and
+15 explicit held-out HOLD decisions; the guard, not missing model artifacts,
+accounts for the zero operational fills. Arena schema advances to v8; package
+version is 0.81.0.
+
+v0.82 adds cadence-normalized IV-surface dynamics as an explicit, ablatable
+agent input. Front ATM IV, 25-delta risk reversal, 25-delta butterfly, and ATM
+term-slope changes are divided by the strictly causal elapsed snapshot time and
+bounded at plus or minus two volatility units per hour. Existing change and
+coverage fields remain intact, so missing history never becomes an observed zero
+velocity and the recurrent model can still learn the raw move separately. This
+is a compact representation hypothesis motivated by recent IV-surface-feedback
+work, not an alpha claim.
+
+The default arena adds six exact `surface_velocity` removals across flat and
+surface-GNN GRU/LSTM/gated-mixture sparse policies, increasing the declared
+tournament from 15 to 21 configurations per ticker and from 225 to 315 training-
+seed replicates across five tickers. A same-machine random-policy benchmark found
+noise-level actor differences: 106.7 microseconds for the full flat GRU versus
+107.5 for its physically compacted ablation, while the full model used 104 more
+parameters. Surface-GNN parameter count was unchanged because market inputs are
+masked in place. Feature engineering for 30 deduplicated AAPL states measured
+1.17 seconds median and remains outside the per-decision path. A five-ticker
+quality profile found 28-32 gap-covered states and 9-12 ATM/wing-change-covered
+states per ticker. Term-slope velocity was unavailable for four tickers and
+covered twice for GOOG; no velocity was non-finite or clipped, no contract key
+duplicated within a snapshot, and each market value was consistent across its
+contract rows. Sparse term coverage is a declared limitation, not a numeric zero
+signal. A declared AAPL `--allow-unready-tail` plumbing run completed all 63
+seed-trained replicas and 21 candidates without failure, selected the full flat
+factorized GRU at 105.4 microseconds, and populated six exact velocity ablation
+pairs. Every validation comparison and held-out return tied at zero because the
+tail was PRE, so the sandbox abstained. The immediately following locked default
+run stopped all five tickers in 1.6 seconds with five expected readiness statuses
+and no trainer invocation. Environment,
+feature-vector, checkpoint, walk-forward, universe, and arena schemas advance to
+v29, `dimensionless.v24`, v56, v64, v47, and v9; package version is 0.82.0.
+
+v0.83 connects continuous collection to tangible training. A user LaunchAgent
+checks the shared arena contract once per minute, launches the isolated
+five-ticker tournament once per eligible New York session, and exposes atomic
+waiting/running/error/complete/up-to-date state in the Agent Lab. Session,
+ordered symbols, and a versioned run contract prevent duplicate 315-replica
+jobs. Package version is 0.83.0.
+
+v0.84 corrects the eligibility boundary discovered while watching the first
+regular snapshots arrive. A regular seven-state validation/test tail did not
+prove that the expanding six-state training partition contained any executable
+states; it could remain entirely pre-market, making policy training actionless.
+The locked arena now filters before splitting and needs thirteen eligible states
+per ticker: six training, three validation, and four test. The live UI shows
+source, eligible, required, and excluded counts. Arena and watcher schemas
+advance to v10 and status/run v2; package version is 0.84.0.
+
+v0.71 adds critic-only LayerNorm as a separately selectable training
+hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The
+normalizer sits between the recurrent representation and value head; policy and
+auxiliary heads keep the unmodified representation, and actor-only deployment
+never calls it. This isolates the critic-conditioning intervention described in
+[TOPPO](https://arxiv.org/abs/2605.11473) without importing its PopArt,
+FairGrad, PCGrad, task heads, or Meta-World+ performance claims.
+
+```bash
+train-universe-walk-forward \
+  --critic-layer-norm \
+  --critic-layer-norm-ablation
+```
+
+The ablation flag adds an otherwise matched disabled candidate to both
+single-ticker and shared-universe selection, records validation reward and score
+lift, and prefers the simpler disabled critic on an exact score tie. LayerNorm
+adds `2 * critic_width` trainable parameters: 256 for a width-128 flat mixture,
+and no actor operation. Identically seeded enabled and disabled models produced
+exactly equal actor logits. A seven-repeat local actor benchmark measured
+216.395 versus 210.125 microseconds median-of-medians; because the actor graphs
+are identical, that ordering is timing noise rather than a speedup. A batch-16,
+eight-step actor-critic forward measured 1,290.979 versus 1,307.333 microseconds,
+a machine-local 1.27% training-forward cost.
+
+In a real two-fold, one-episode AAPL width-eight smoke, enabled and disabled
+candidates both earned zero validation reward in both folds, so the declared
+tie-break selected the disabled critic twice. The normalized candidate also had
+higher value-residual RMS and critic-head gradient norm in this tiny run. This
+verifies the experiment surface but gives no reason to promote LayerNorm and no
+evidence of alpha. Checkpoint, single-ticker walk-forward, and universe
+walk-forward schemas advance to v53, v57, and v41; environment v26 and feature
+schema `dimensionless.v21` are unchanged. Package version is 0.71.0.
+
+v0.70 narrows the deployment cost of contiguous flat feature removals. When a
+named ablation masks one uninterrupted raw-input interval, streaming policies
+now copy the two surviving NumPy slices instead of performing a generic indexed
+gather. Noncontiguous masks retain the generic path, graph encoders remain
+unchanged, and both paths still validate the raw feature width before passing a
+precompacted tensor to the recurrent model.
+
+On the width-128 flat AAPL GRU with the contiguous four-input `smile_fit`
+removal, an alternating seven-repeat benchmark measured 126.917 versus 126.875
+microseconds median-of-medians for batch one and 807.375 versus 800.917
+microseconds for synchronized batch 16. That is effectively unchanged batch-one
+latency and a machine-local 0.80% batch improvement, not a general model-speed
+claim. A reusable `np.take(..., out=...)` buffer experiment was rejected because
+it made batch one 6.32% and batch 16 11.26% slower in the preceding matched
+measurement. Actions, training behavior, model/checkpoint contracts, and schemas
+are unchanged; package version is 0.70.0.
+
+v0.69 adds a compact executable front-smile fit without adding actor-side
+surface reconstruction. For the nearest expiry, it combines current OTM calls
+and puts within 0.35 absolute forward log-moneyness, requires at least five
+unique points with two unique coordinates on each side of ATM, standardizes the
+coordinates, and requires observed support through +/-0.05 before fitting one
+quadratic. Four market scalars expose curvature over +/-0.05 forward
+log-moneyness, relative fit RMSE, the leave-one-out relative ATM residual, and
+binary fit coverage. Only positive bid/ask pairs with `bid <= ask` enter the
+fit; unavailable geometry remains zero with zero coverage.
+
+```bash
+train-walk-forward --symbol AAPL --ablation smile_fit
+```
+
+This is a validation hypothesis motivated by the reported short-horizon return
+information in cross-strike smile curvature, deviations, and ATM richness in
+[Intraday Volatility-Smile Geometry and Option Returns (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5893362).
+It does not reproduce that paper's sample, timing, or portfolio construction and
+does not establish alpha. `smile_fit` is a required removal candidate; the
+feature block never controls execution or quote-validity masks.
+Yahoo does not provide synchronized exchange timestamps for every option
+bid/ask in this feed, so "executable" here means a positive internally valid
+top-of-book pair at capture time, not proof of contemporaneous fillability.
+
+On the current 20-snapshot AAPL integration sample, 10 snapshots had a complete
+executable composite fit and the other 10 stayed uncovered. That is a data-path
+check, not an independent return experiment. At 32 slots and hidden width 128,
+the four scalars add 1,544 parameters to a flat GRU (625,655 versus 624,111,
+about 0.25%). An alternating nine-repeat actor benchmark measured 125.13
+microseconds median-of-medians for the full model and 127.61 for the compact
+ablation; the latter includes feature-compaction overhead, so the ordering is
+not an intrinsic speed claim. The quadratic fit happens during one-time dataset
+engineering, not actor inference. Environment, feature-vector, checkpoint,
+single-ticker walk-forward, and universe walk-forward schemas advance to v26,
+`dimensionless.v21`, v52, v56, and v40. Package version is 0.69.0.
+
+A two-fold, one-episode CLI smoke produced both full and `smile_fit`-removed
+candidates, persisted the four masked inputs and validation lift, selected one
+winner before constructing each test environment, and wrote the v56 artifact.
+Every validation reward was zero on this tiny path, so this proves workflow
+plumbing only and provides no evidence for retaining the features.
+
+v0.68 adds a compact systematic-market context without adding a per-ticker
+request or a learned encoder. The collector fetches one timestamped SPY
+one-minute close per cycle by default and persists the same observation and
+source metadata with each ticker. The policy receives one-step benchmark
+return, 4/16-observation benchmark cumulative return and realized volatility,
+ticker-minus-benchmark return, quote age, and coverage once in its market
+vector. Strictly advancing provider time is required for a benchmark return;
+legacy, repeated, backward, or untimestamped observations remain neutral with
+zero coverage. Changing the declared benchmark resets its rolling history.
+
+```bash
+collect-options --once --benchmark-symbol SPY
+train-walk-forward --symbol AAPL --ablation systematic_context
+```
+
+This is a cheap regime proxy motivated by the revised evidence that more robust
+option momentum is concentrated in a systematic component. It is not that
+paper's latent factor decomposition and does not establish alpha. The named
+ablation must earn its extra input width on validation after costs. Benchmark
+failure is fail-soft, and benchmark state never changes action masks or
+execution. Environment, feature-vector, checkpoint, single-ticker
+walk-forward, and universe walk-forward schemas advance to v25,
+`dimensionless.v20`, v51, v55, and v39. Package version is 0.68.0.
+
+At 32 slots and hidden width 128, the 12-scalar block added 4,632 parameters to
+a flat GRU (624,111 versus 619,479, about 0.75%). An alternating nine-repeat
+local AAPL actor benchmark measured 124.10 microseconds median-of-medians for
+the full input and 125.83 for the compact ablation. Moving flat ablation
+compaction to the NumPy policy boundary reduced the ablated path from 132.54 to
+125.83 microseconds, removing about 5.1% from that path without changing
+actions. The remaining 1.4% difference is small machine-specific overhead, not
+evidence that the wider model is intrinsically faster.
+
+v0.67 adds an optional train-only market-neutrality objective without changing
+the policy input, recurrent architecture, or actor inference path. For the
+post-transition portfolio it computes signed Delta notional weight
+`w_delta = portfolio_delta * spot / NAV` and trains on
+`r_train = r_executable - coefficient * min(abs(w_delta), 10)`. The cap bounds
+bad early-policy leverage, the coefficient defaults to zero, and metrics retain
+raw reward, shaped reward, coverage, exposure, and the penalty separately.
+Validation and test always use unshaped executable net-liquidation returns.
+
+```bash
+train-walk-forward \
+  --symbol AAPL \
+  --delta-neutrality-coefficient 0.0001 \
+  --delta-neutrality-ablation
+```
+
+Use `--delta-neutrality-ablation` with a positive
+`--delta-neutrality-coefficient` to add a matched zero-coefficient candidate.
+The candidate has the same parameters and actor operations; single-ticker and
+shared-universe artifacts report validation reward and score lift against the
+disabled objective. An exact score tie selects the disabled candidate because
+an additional training hyperparameter must earn its place. This implements a
+small options-specific test of the composite market-neutral recurrent-RL idea in
+[AlphaZeroBeta (2026)](https://arxiv.org/abs/2607.18001); its equity-index
+results do not establish portability or alpha here.
+
+Every evaluation report now includes underlying return/volatility, strategy
+return beta and correlation to the underlying with explicit coverage, and mean
+and maximum absolute Delta-notional weight. Validation selection can predeclare
+`--selection-abs-beta-penalty` and
+`--selection-delta-notional-penalty`; a positive coefficient rejects an
+uncovered validation metric instead of treating missing history as zero.
+These diagnostics distinguish directional beta from an option-volatility
+hypothesis, but short paths remain descriptive rather than statistically useful.
+
+The fixed surface graph also reuses one nonpersistent diagonal mask instead of
+allocating `torch.eye` on every decision. A profiler confirms the actor path no
+longer executes `aten::eye`; a matched seven-repeat AAPL surface-graph mixture
+benchmark measured 367.19 microseconds median-of-medians versus the prior
+369.35, a 0.6% reduction within run noise. Checkpoint, single-ticker
+walk-forward, and universe walk-forward schemas advance to v50, v54, and v38;
+environment v24 and `dimensionless.v19` remain unchanged.
+
+The three training CLIs now expose the same core optimizer controls:
+`--learning-rate`, `--ppo-epochs`, `--minibatch-size`, `--clip-ratio`,
+`--value-clip`, `--target-kl`, `--value-coefficient`, and
+`--gradient-clip`. This makes cheap smoke runs and predeclared optimizer
+experiments reproducible without constructing `TrainingConfig` in Python.
+
+A real 18-snapshot AAPL CLI smoke trained the enabled and disabled objectives
+with identical 3,363-parameter flat GRUs. Both produced zero unshaped
+validation reward/score, so the disabled candidate won the declared tie and
+the held-out report retained full Delta-weight coverage. A requested absolute-
+beta selection penalty correctly failed because that short validation segment
+had no covered return beta; the Delta-notional selection path completed. This
+is integration and fail-closed coverage evidence, not neutrality or alpha.
+
+v0.66 adds a train-only delta-hedged option-return target to the recurrent
+auxiliary objective. For matched executable contracts it computes the
+cross-sectional median of
+`((future_mid - current_mid) - current_delta * spot_move) / current_spot`,
+then applies the existing bounded signed-log transform. The hedge uses only the
+Delta available at the policy-state endpoint and is not rebalanced using future
+information. Both endpoints require explicit regular-session state and covered
+provider underlying ages no greater than 1,200 seconds; pre/post-market and
+unknown/stale provenance are masked. It is a volatility-specific representation target, not reward,
+execution P&L, or evidence of alpha; financing, dividends, interim hedging, and
+precise option-quote timestamp alignment remain outside this approximation.
+
+The target follows evidence that volatility-surface representations can contain
+information about future delta-hedged option returns
+([Höfler, revised 2025](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4869272))
+while respecting newer warnings that hedge timing and microstructure can create
+spurious premiums
+([Eberbach et al., revised 2025](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5192589)).
+Use `--auxiliary-target-ablation medianContractDeltaHedgedSpotReturn` in a
+walk-forward run to add a matched candidate that removes only this loss target;
+both single-ticker and shared-universe artifacts report its validation lift
+against the full target set.
+
+The added output contributes 129 train-only parameters at recurrent width 128.
+Actor weights and operations are identical. A seven-repeat, batch-one CPU
+benchmark measured 369.35 microseconds median-of-medians with nine targets and
+364.90 with the previous eight-target head, a 1.2% difference within run noise
+despite no auxiliary-head call. Checkpoint, single-ticker walk-forward, and
+universe walk-forward schemas advance to v49, v53, and v37; environment and
+feature schemas remain v24 and `dimensionless.v19`.
+
+In the current 16-snapshot AAPL sample, a quote-and-spot-only calculation would
+have labeled 9 of 15 transitions available. All were pre-market or lacked the
+required regular/fresh endpoint contract, so the final provenance mask correctly
+excludes all 15 from this target. Synthetic regular-session integration evidence
+confirms the target becomes available and updates its head row when those
+requirements are met.
+
+v0.65 adds `surface_graph_set`, an opt-in, permutation-equivariant graph policy
+whose topology follows the option surface rather than quote values. It builds
+same-side nearest-neighbor edges in standardized forward-log-moneyness and DTE,
+then links every valid contract to its nearest opposite-side coordinate
+counterpart. Implied volatility remains node content and cannot rewire the
+graph. One shared neighbor transform handles both edge classes, keeping the
+representation compact; this is a trading-policy representation hypothesis,
+not put-call-parity enforcement or evidence of alpha.
+
+The design is motivated by the irregular quote geometry and dynamic sampling
+studied in
+[Operator Deep Smoothing for Implied Volatility](https://arxiv.org/abs/2406.11520),
+but it consumes only observed contracts and never reconstructs executable
+quotes. The original IV/delta/moneyness/DTE similarity graph and zero-neighbor
+Deep Sets path remain explicit ablations. On the current 32-slot AAPL layout, a
+matched batch-one CPU benchmark measured 298.75 microseconds median for the
+structured graph versus 273.83 for the similarity graph and 179.13 for Deep
+Sets. Sharing one message operator cut the structured version by about 7.7% and
+2,336 parameters relative to a two-operator prototype. These are machine-specific
+engineering measurements; the structured encoder must win validation after costs
+and satisfy the existing latency gate. Checkpoint, single-ticker walk-forward,
+and universe walk-forward schemas advance to v48, v52, and v36; environment and
+feature schemas remain v24 and `dimensionless.v19`.
+
+v0.64 makes underlying price provenance and freshness causal. Yahoo's explicit
+`PRE`, `REGULAR`, and `POST` states now select the matching provider price/time
+pair instead of always attaching `regularMarketPrice` to every session. CSVs
+persist `underlyingPriceSource`, `underlyingQuoteTime`, and
+`underlyingQuoteTimeSource`; a provider timestamp advance is a material market
+event, while capture-time-only repetition is still deduplicated.
+
+The market vector adds `underlyingQuoteAgeSeconds` and
+`underlyingQuoteAgeCoverage`, with a named `data_freshness` ablation and fixed
+log transform. Explicit quote ages above the configurable 1,200-second default
+mask all simulated option and underlying fills while retaining hold and full recurrent
+and critic chronology. Missing legacy provenance has zero coverage and remains
+research-demo tradeable with a warning. The Streamlit sandbox exposes the same
+age and gate. This is a necessary data-quality control, not evidence that Yahoo
+quotes are executable or that the threshold creates alpha.
+
+The design follows recent evidence that reporting latency can reorder market
+events and cause look-ahead errors
+([Battalio et al., 2026](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5907665))
+and option-market evidence that stale quotes distort observed co-movements used
+in pricing and hedging
+([Fahlenbrach and Sandas](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=690722)).
+Environment, feature, checkpoint, single-ticker walk-forward, and universe
+walk-forward schemas advance to v24, `dimensionless.v19`, v47, v51, and v35.
 
 v0.63 makes actor credit assignment aware of whether the policy had a genuine
 choice. Session-forced holds and any other state where every decoder factor is
@@ -991,11 +1694,16 @@ train-walk-forward \
   --symbol AAPL \
   --selection-drawdown-penalty 1.0 \
   --selection-downside-penalty 1.0 \
-  --selection-turnover-penalty 0.01
+  --selection-turnover-penalty 0.01 \
+  --selection-abs-beta-penalty 0.01 \
+  --selection-delta-notional-penalty 0.01
 ```
 
 The declared score is validation reward minus each coefficient times maximum
-drawdown, downside deviation, or turnover. All quantities are dimensionless.
+drawdown, downside deviation, turnover, absolute underlying beta, or mean
+absolute Delta-notional weight. All quantities are dimensionless. Beta and
+Delta-notional selection penalties require covered validation metrics; they
+fail closed on insufficient history rather than awarding false neutrality.
 Zero remains the default for every coefficient, preserving raw-reward behavior
 until an experiment declares its risk tradeoff. The same score controls
 checkpoint restoration, patience, ablation lift, and tournament ranking; raw
@@ -1039,13 +1747,15 @@ an otherwise matched uniform-start candidate using validation only. This changes
 training exposure, not the policy architecture or inference latency.
 
 Add `--encoder graph` to run masked message passing over the option surface,
-`--encoder graph_set` to use a permutation-equivariant fixed-graph set policy,
-or `--encoder attention_set` to learn masked cross-contract relations before
-temporal encoding:
+`--encoder graph_set` to use a permutation-equivariant similarity-graph set
+policy, `--encoder surface_graph_set` to use causal surface-coordinate
+relations, or `--encoder attention_set` to learn masked cross-contract relations
+before temporal encoding:
 
 ```bash
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
+train-demo --symbol AAPL --encoder surface_graph_set --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder attention_set --attention-heads 4 --kind hybrid --episodes 25
 ```
 
@@ -1067,6 +1777,17 @@ shares policy parameters across slots and tickers. This dense implementation
 avoids a separate graph-framework dependency at the default 32 slots. Keep
 `flat` and flattened `graph` as measured baselines rather than assuming more
 relational structure is automatically better.
+
+`surface_graph_set` keeps the same masked pooling and shared scoring contract,
+but constructs local edges only between calls or only between puts using
+`forwardLogMoneyness` and `dteDays`. Each node also selects its closest valid
+opposite-side contract in those coordinates; the union is symmetrized and
+passed through one shared neighbor projection. Delta's sign identifies option
+side, including negative-zero puts, while IV is message content rather than an
+edge coordinate. With `--graph-neighbors 0`, this encoder retains counterpart
+edges; use zero-neighbor `graph_set` for the true no-adjacency Deep Sets
+baseline. The counterpart edge is structural context only because these equity
+options may be American-style and the environment does not impose exact parity.
 
 `attention_set` retains those set-policy symmetries but replaces hand-built
 nearest-neighbor edges with global learned multi-head attention among valid
@@ -1259,6 +1980,7 @@ train-walk-forward \
   --candidate graph:hybrid:ppo \
   --candidate graph_set:hybrid:ppo \
   --candidate graph_set:hybrid:ppo:0 \
+  --candidate surface_graph_set:hybrid:ppo:3 \
   --candidate attention_set:hybrid:ppo \
   --candidate flat:gru:ppo:single_leg \
   --candidate graph_set:hybrid:ppo:0:single_leg \
@@ -1362,6 +2084,22 @@ For multi-horizon experiments, add `--auxiliary-horizon-ablation` to include a
 matched one-step candidate in the same validation tournament. Artifacts retain
 effective horizons and the one-step candidate's lift relative to the configured
 multi-horizon model.
+Repeat `--auxiliary-target-ablation TARGET` to add a matched candidate that
+removes only one named output from the Smooth-L1 loss mask while preserving the
+same policy, recurrent state, head shape, initialization, and inference path.
+For the volatility-specific target use:
+
+```bash
+train-walk-forward \
+  --symbol AAPL \
+  --auxiliary-coefficient 0.05 \
+  --auxiliary-target-ablation medianContractDeltaHedgedSpotReturn
+```
+
+The excluded target has zero training coverage in its candidate artifact, and
+the candidate reports reward and selection-score lift against the full target
+set. Exact ties retain the full target set because both models have identical
+deployment cost.
 Add `--fixed-step-discount-ablation` to include otherwise matched candidates
 whose gamma and GAE lambda apply once per snapshot rather than per elapsed
 wall-clock interval. The artifact records effective semantics and the fixed-step

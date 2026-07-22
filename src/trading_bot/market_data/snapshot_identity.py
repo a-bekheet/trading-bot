@@ -30,10 +30,18 @@ MATERIAL_SNAPSHOT_COLUMNS = (
     "contractSize",
     "currency",
     "underlyingPrice",
+    "underlyingPriceSource",
+    "underlyingQuoteTime",
+    "underlyingQuoteTimeSource",
     "marketState",
     "riskFreeRate",
     "riskFreeRateSource",
     "dividendYield",
+    "benchmarkSymbol",
+    "benchmarkPrice",
+    "benchmarkPriceSource",
+    "benchmarkQuoteTime",
+    "benchmarkQuoteTimeSource",
     "greekModel",
 )
 

@@ -1,8 +1,9 @@
-"""Install or remove the continuous collector as a macOS LaunchAgent."""
+"""Install the persistent paper-agent watcher as a macOS LaunchAgent."""
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import plistlib
 import subprocess
@@ -11,39 +12,32 @@ import time
 from pathlib import Path
 from typing import Any
 
-from trading_bot.market_data.benchmark import DEFAULT_BENCHMARK_SYMBOL
 
-
-LAUNCH_AGENT_LABEL = "io.github.a-bekheet.trading-bot.collector"
+LAUNCH_AGENT_LABEL = "io.github.a-bekheet.trading-bot.paper-agents"
 
 
 def launch_agent_payload(
     python: Path,
     repo_root: Path,
-    output_dir: Path,
+    data_dir: Path,
+    database: Path,
     *,
-    interval: int,
-    ticker_delay: float,
-    expirations: int,
-    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
+    poll_seconds: float,
 ) -> dict[str, Any]:
-    """Build a deterministic LaunchAgent property list."""
     return {
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": [
             str(python),
             "-m",
-            "trading_bot.market_data.collector",
-            "--output-dir",
-            str(output_dir),
-            "--interval",
-            str(interval),
-            "--ticker-delay",
-            str(ticker_delay),
-            "--benchmark-symbol",
-            benchmark_symbol,
-            "--expirations",
-            str(expirations),
+            "trading_bot.execution.agent_watch",
+            "--repo-root",
+            str(repo_root),
+            "--data-dir",
+            str(data_dir),
+            "--database",
+            str(database),
+            "--poll-seconds",
+            str(poll_seconds),
         ],
         "WorkingDirectory": str(repo_root),
         "RunAtLoad": True,
@@ -51,8 +45,8 @@ def launch_agent_payload(
         "ThrottleInterval": 30,
         "ProcessType": "Background",
         "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
-        "StandardOutPath": str(output_dir / "collector.stdout.log"),
-        "StandardErrorPath": str(output_dir / "collector.stderr.log"),
+        "StandardOutPath": str(data_dir / "paper-agent.stdout.log"),
+        "StandardErrorPath": str(data_dir / "paper-agent.stderr.log"),
     }
 
 
@@ -65,8 +59,7 @@ def _launchctl(*arguments: str, check: bool = True) -> subprocess.CompletedProce
     )
 
 
-def _bootstrap_launch_agent(domain: str, path: Path) -> None:
-    """Retry the short macOS bootout/bootstrap teardown race."""
+def _bootstrap(domain: str, path: Path) -> None:
     last_error: subprocess.CalledProcessError | None = None
     for delay in (0.0, 0.25, 1.0):
         if delay:
@@ -82,33 +75,27 @@ def _bootstrap_launch_agent(domain: str, path: Path) -> None:
 
 def install(
     repo_root: Path,
-    output_dir: Path,
+    data_dir: Path,
+    database: Path,
     *,
-    interval: int,
-    ticker_delay: float,
-    expirations: int,
-    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
+    poll_seconds: float,
 ) -> Path:
     if sys.platform != "darwin":
-        raise RuntimeError("collector-service currently supports macOS only")
+        raise RuntimeError("paper-agent-service currently supports macOS only")
     repo_root = repo_root.resolve()
     if not (repo_root / "pyproject.toml").is_file():
         raise ValueError(f"not a trading-bot repository: {repo_root}")
-    output_dir = (
-        output_dir if output_dir.is_absolute() else repo_root / output_dir
+    data_dir = (data_dir if data_dir.is_absolute() else repo_root / data_dir).resolve()
+    database = (
+        database if database.is_absolute() else repo_root / database
     ).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # Preserve the virtual-environment launcher path. Resolving its symlink can
-    # accidentally select the base interpreter without this project's packages.
-    python = Path(sys.executable).absolute()
+    data_dir.mkdir(parents=True, exist_ok=True)
     payload = launch_agent_payload(
-        python,
+        Path(sys.executable).absolute(),
         repo_root,
-        output_dir,
-        interval=interval,
-        ticker_delay=ticker_delay,
-        expirations=expirations,
-        benchmark_symbol=benchmark_symbol,
+        data_dir,
+        database,
+        poll_seconds=poll_seconds,
     )
     launch_agents = Path.home() / "Library" / "LaunchAgents"
     launch_agents.mkdir(parents=True, exist_ok=True)
@@ -116,16 +103,15 @@ def install(
     temporary = path.with_suffix(".plist.tmp")
     temporary.write_bytes(plistlib.dumps(payload, sort_keys=True))
     temporary.replace(path)
-
     domain = f"gui/{os.getuid()}"
     _launchctl("bootout", f"{domain}/{LAUNCH_AGENT_LABEL}", check=False)
-    _bootstrap_launch_agent(domain, path)
+    _bootstrap(domain, path)
     return path
 
 
 def uninstall() -> Path:
     if sys.platform != "darwin":
-        raise RuntimeError("collector-service currently supports macOS only")
+        raise RuntimeError("paper-agent-service currently supports macOS only")
     path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
     domain = f"gui/{os.getuid()}"
     _launchctl("bootout", f"{domain}/{LAUNCH_AGENT_LABEL}", check=False)
@@ -137,39 +123,34 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("install", "uninstall"))
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
-    parser.add_argument("--output-dir", type=Path, default=Path("data"))
-    parser.add_argument("--interval", type=int, default=900)
-    parser.add_argument("--ticker-delay", type=float, default=1.0)
-    parser.add_argument("--expirations", type=int, default=3)
-    parser.add_argument("--benchmark-symbol", default=DEFAULT_BENCHMARK_SYMBOL)
+    parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    parser.add_argument("--database", type=Path, default=Path("data/agent_paper.db"))
+    parser.add_argument("--poll-seconds", type=float, default=30.0)
     args = parser.parse_args()
-    if (
-        args.interval < 1
-        or args.ticker_delay < 0
-        or args.expirations < 0
-        or not args.benchmark_symbol.strip()
-    ):
-        parser.error(
-            "--interval must be positive; delays and expiration count cannot "
-            "be negative; benchmark symbol cannot be empty"
-        )
+    if not math_is_positive_finite(args.poll_seconds):
+        parser.error("--poll-seconds must be positive and finite")
     try:
         if args.action == "install":
             path = install(
                 args.repo_root,
-                args.output_dir,
-                interval=args.interval,
-                ticker_delay=args.ticker_delay,
-                expirations=args.expirations,
-                benchmark_symbol=args.benchmark_symbol,
+                args.data_dir,
+                args.database,
+                poll_seconds=args.poll_seconds,
             )
             print(f"installed and started {LAUNCH_AGENT_LABEL}: {path}")
         else:
             path = uninstall()
             print(f"stopped and removed {LAUNCH_AGENT_LABEL}: {path}")
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
-        parser.exit(1, f"collector service error: {error}\n")
+        parser.exit(1, f"paper-agent service error: {error}\n")
     return 0
+
+
+def math_is_positive_finite(value: float) -> bool:
+    try:
+        return float(value) > 0 and math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import yfinance as yf
 
+from trading_bot.market_data.freshness import select_underlying_quote
 from trading_bot.market_data.market_state import normalize_market_state
 
 
@@ -17,6 +18,9 @@ class OptionChainSnapshot:
     spot: float
     dividend_yield: float
     market_state: str
+    underlying_price_source: str = ""
+    underlying_quote_time: str | None = None
+    underlying_quote_time_source: str | None = None
 
 
 def _number(value, default: float = 0.0) -> float:
@@ -51,9 +55,12 @@ def fetch_option_chain_snapshot(
         (chain.underlying for _, chain in chains if getattr(chain, "underlying", None)),
         {},
     )
-    spot = _number(underlying.get("regularMarketPrice"))
+    market_state = normalize_market_state(underlying.get("marketState"))
+    quote = select_underlying_quote(underlying, market_state)
+    spot = quote.price if quote is not None else 0.0
     if spot <= 0:
         spot = _number(ticker.fast_info.get("last_price"))
+        quote = None
     if spot <= 0:
         raise ValueError(f"No underlying price found for {symbol}")
 
@@ -63,7 +70,14 @@ def fetch_option_chain_snapshot(
         chains=chains,
         spot=spot,
         dividend_yield=dividend_yield,
-        market_state=normalize_market_state(underlying.get("marketState")),
+        market_state=market_state,
+        underlying_price_source=(
+            quote.price_source if quote is not None else "fastInfo.lastPrice"
+        ),
+        underlying_quote_time=(quote.quote_time if quote is not None else None),
+        underlying_quote_time_source=(
+            quote.quote_time_source if quote is not None else None
+        ),
     )
 
 

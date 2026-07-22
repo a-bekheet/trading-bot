@@ -32,11 +32,13 @@ class RecurrentConfig:
     graph_neighbors: int = 3
     attention_heads: int = 4
     graph_relation_indices: tuple[int, ...] = ()
+    graph_option_side_index: int | None = None
     initial_hold_bias: float = 5.0
     action_decoder: str = "factorized"
     masked_input_indices: tuple[int, ...] = ()
     auxiliary_target_count: int = 0
     auxiliary_horizons: tuple[int, ...] = (1,)
+    critic_layer_norm: bool = False
 
     def __post_init__(self) -> None:
         if min(self.input_size, self.slot_count, self.action_count, self.hidden_size) < 1:
@@ -74,6 +76,13 @@ class RecurrentConfig:
             raise ValueError("masked_input_indices cannot disable every input")
         if self.auxiliary_target_count < 0:
             raise ValueError("auxiliary_target_count cannot be negative")
+        if not isinstance(self.critic_layer_norm, bool):
+            raise ValueError("critic_layer_norm must be a boolean")
+        critic_width = self.hidden_size * (2 if self.kind == "hybrid" else 1)
+        if self.critic_layer_norm and critic_width < 2:
+            raise ValueError(
+                "critic_layer_norm requires a critic width of at least two"
+            )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
             not normalized_horizons
@@ -102,13 +111,23 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         raise ValueError(
             "kind must be 'gru', 'lstm', 'hybrid', or 'mixture'"
         )
-    graph_encoder = config.encoder in {"graph", "graph_set", "attention_set"}
-    set_encoder = config.encoder in {"graph_set", "attention_set"}
-    fixed_graph_encoder = config.encoder in {"graph", "graph_set"}
+    graph_encoder = config.encoder in {
+        "graph", "graph_set", "surface_graph_set", "attention_set",
+    }
+    set_encoder = config.encoder in {
+        "graph_set", "surface_graph_set", "attention_set",
+    }
+    fixed_graph_encoder = config.encoder in {
+        "graph", "graph_set", "surface_graph_set",
+    }
+    surface_graph_encoder = config.encoder == "surface_graph_set"
     single_leg = config.action_decoder == "single_leg"
-    if config.encoder not in {"flat", "graph", "graph_set", "attention_set"}:
+    if config.encoder not in {
+        "flat", "graph", "graph_set", "surface_graph_set", "attention_set",
+    }:
         raise ValueError(
-            "encoder must be 'flat', 'graph', 'graph_set', or 'attention_set'"
+            "encoder must be flat, graph, graph_set, surface_graph_set, "
+            "or attention_set"
         )
     if graph_encoder and config.contract_feature_count is None:
         raise ValueError("graph encoder requires contract_feature_count")
@@ -117,6 +136,14 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         for index in config.graph_relation_indices
     ):
         raise ValueError("graph_relation_indices are outside the contract feature layout")
+    if surface_graph_encoder and not config.graph_relation_indices:
+        raise ValueError("surface_graph_set requires graph relation coordinates")
+    if surface_graph_encoder and (
+        config.graph_option_side_index is None
+        or config.graph_option_side_index < 0
+        or config.graph_option_side_index >= config.contract_feature_count
+    ):
+        raise ValueError("surface_graph_set requires a valid option-side index")
     if (
         config.encoder == "attention_set"
         and config.graph_hidden_size % config.attention_heads
@@ -200,6 +227,15 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 ),
                 persistent=False,
             )
+            self.register_buffer(
+                "_graph_diagonal",
+                (
+                    torch.eye(config.slot_count, dtype=torch.bool).unsqueeze(0)
+                    if fixed_graph_encoder
+                    else torch.empty(0, dtype=torch.bool)
+                ),
+                persistent=False,
+            )
             self.input_norm = nn.LayerNorm(temporal_input_size)
             if graph_encoder:
                 self.contract_norm = nn.LayerNorm(config.contract_feature_count)
@@ -252,7 +288,10 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                                             bias=False,
                                         )
                                     }
-                                    if effective_graph_neighbors
+                                    if (
+                                        effective_graph_neighbors
+                                        or surface_graph_encoder
+                                    )
                                     else {}
                                 ),
                             }
@@ -322,6 +361,11 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                             config.action_count,
                         )[:, 0] = config.initial_hold_bias
                 self.joint_hold = None
+            self.value_norm = (
+                nn.LayerNorm(output_size)
+                if config.critic_layer_norm
+                else nn.Identity()
+            )
             self.value = nn.Linear(output_size, 1)
             self.auxiliary = (
                 nn.Linear(output_size, config.auxiliary_target_count)
@@ -368,7 +412,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                         hidden + transformed
                     )
                     hidden *= valid.unsqueeze(-1)
-            elif neighbor_count:
+            elif neighbor_count or surface_graph_encoder:
                 pair_valid = valid.unsqueeze(1) & valid.unsqueeze(2)
                 relation_indices = config.graph_relation_indices or tuple(
                     range(config.contract_feature_count)
@@ -385,28 +429,80 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 ).sqrt().clamp_min(1e-6)
                 relation = centered / relation_scale
                 distances = torch.cdist(relation, relation)
-                diagonal = torch.eye(
-                    config.slot_count, dtype=torch.bool, device=hidden.device
-                ).unsqueeze(0)
-                distances = distances.masked_fill(~pair_valid | diagonal, float("inf"))
-                neighbors = distances.topk(neighbor_count, largest=False).indices
-                adjacency = torch.zeros(
-                    batch * steps,
-                    config.slot_count,
-                    config.slot_count,
-                    dtype=hidden.dtype,
-                    device=hidden.device,
-                )
-                adjacency.scatter_(-1, neighbors, 1.0)
-                adjacency *= pair_valid
-                adjacency = torch.maximum(adjacency, adjacency.transpose(1, 2))
-                adjacency += torch.diag_embed(valid.to(hidden.dtype))
+                diagonal = self._graph_diagonal
+                local_pairs = pair_valid & ~diagonal
+                if surface_graph_encoder:
+                    assert config.graph_option_side_index is not None
+                    option_side = torch.signbit(
+                        contracts[:, :, config.graph_option_side_index]
+                    )
+                    same_side = option_side.unsqueeze(1).eq(
+                        option_side.unsqueeze(2)
+                    )
+                    local_pairs &= same_side
+                    counterpart_pairs = pair_valid & ~diagonal & ~same_side
+                    counterpart_distances = distances.masked_fill(
+                        ~counterpart_pairs,
+                        float("inf"),
+                    )
+                    counterpart_distance, counterpart = (
+                        counterpart_distances.min(dim=-1, keepdim=True)
+                    )
+                    counterpart_adjacency = torch.zeros(
+                        batch * steps,
+                        config.slot_count,
+                        config.slot_count,
+                        dtype=hidden.dtype,
+                        device=hidden.device,
+                    )
+                    counterpart_adjacency.scatter_(
+                        -1,
+                        counterpart,
+                        torch.isfinite(counterpart_distance).to(hidden.dtype),
+                    )
+                    counterpart_adjacency = torch.maximum(
+                        counterpart_adjacency,
+                        counterpart_adjacency.transpose(1, 2),
+                    )
+
+                adjacency = torch.diag_embed(valid.to(hidden.dtype))
+                if neighbor_count:
+                    local_distances = distances.masked_fill(
+                        ~local_pairs,
+                        float("inf"),
+                    )
+                    neighbor_distance, neighbors = local_distances.topk(
+                        neighbor_count,
+                        largest=False,
+                    )
+                    neighbor_adjacency = torch.zeros(
+                        batch * steps,
+                        config.slot_count,
+                        config.slot_count,
+                        dtype=hidden.dtype,
+                        device=hidden.device,
+                    )
+                    neighbor_adjacency.scatter_(
+                        -1,
+                        neighbors,
+                        torch.isfinite(neighbor_distance).to(hidden.dtype),
+                    )
+                    neighbor_adjacency = torch.maximum(
+                        neighbor_adjacency,
+                        neighbor_adjacency.transpose(1, 2),
+                    )
+                    adjacency = torch.maximum(adjacency, neighbor_adjacency)
+                if surface_graph_encoder:
+                    adjacency = torch.maximum(
+                        adjacency,
+                        counterpart_adjacency,
+                    )
                 degree = adjacency.sum(dim=-1, keepdim=True).clamp_min(1.0)
 
             if fixed_graph_encoder:
                 for layer in self.graph_message_layers:
                     transformed = layer["self"](hidden)
-                    if neighbor_count:
+                    if neighbor_count or surface_graph_encoder:
                         neighbor_mean = adjacency.bmm(hidden) / degree
                         transformed = transformed + layer["neighbor"](neighbor_mean)
                     hidden = torch.nn.functional.gelu(transformed)
@@ -459,10 +555,15 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         def _encode_sequence(self, sequence, hidden_state=None):
             if self._masked_input_indices.numel():
                 if compact_flat_mask:
-                    sequence = sequence.index_select(
-                        -1,
-                        self._active_input_indices,
-                    )
+                    if sequence.shape[-1] == config.input_size:
+                        sequence = sequence.index_select(
+                            -1,
+                            self._active_input_indices,
+                        )
+                    elif sequence.shape[-1] != temporal_input_size:
+                        raise ValueError(
+                            "flat sequence width must be raw or precompacted"
+                        )
                 else:
                     sequence = sequence.clone()
                     sequence.index_fill_(-1, self._masked_input_indices, 0.0)
@@ -557,20 +658,24 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 )
                 if action_mask.shape != expected_mask_shape:
                     raise ValueError("action_mask does not match recurrent outputs")
-                safe_mask = self._safe_action_mask(action_mask)
                 if single_leg:
+                    action_mask = action_mask.bool()
                     hold_mask = torch.ones(
-                        *safe_mask.shape[:-2],
+                        *action_mask.shape[:-2],
                         1,
                         dtype=torch.bool,
-                        device=safe_mask.device,
+                        device=action_mask.device,
                     )
                     joint_mask = torch.cat(
-                        (hold_mask, safe_mask[..., 1:].flatten(start_dim=-2)),
+                        (
+                            hold_mask,
+                            action_mask[..., 1:].flatten(start_dim=-2),
+                        ),
                         dim=-1,
                     )
                     logits = logits.masked_fill(~joint_mask, float("-inf"))
                 else:
+                    safe_mask = self._safe_action_mask(action_mask)
                     logits = logits.masked_fill(~safe_mask, float("-inf"))
             return logits
 
@@ -588,7 +693,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                     action_mask,
                     node_embeddings,
                 ),
-                self.value(encoded).squeeze(-1),
+                self.value(self.value_norm(encoded)).squeeze(-1),
             )
 
         @staticmethod
@@ -793,17 +898,72 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             action_mask,
             deterministic=False,
             hidden_state=None,
+            return_logits=False,
         ):
             """Sample an action without evaluating critic or auxiliary heads."""
+            if deterministic and single_leg and action_mask is not None:
+                logits, hidden = self.policy_sequence(
+                    sequence,
+                    None,
+                    hidden_state,
+                )
+                if action_mask.ndim == 4:
+                    expected = (
+                        *sequence.shape[:2],
+                        policy_slot_count,
+                        config.action_count,
+                    )
+                    if action_mask.shape != expected:
+                        raise ValueError(
+                            "action_mask does not match recurrent outputs"
+                        )
+                    final_mask = action_mask[:, -1]
+                elif action_mask.ndim == 3:
+                    expected = (
+                        sequence.shape[0],
+                        policy_slot_count,
+                        config.action_count,
+                    )
+                    if action_mask.shape != expected:
+                        raise ValueError(
+                            "action_mask does not match recurrent outputs"
+                        )
+                    final_mask = action_mask
+                else:
+                    raise ValueError(
+                        "action_mask does not match recurrent outputs"
+                    )
+                final_logits = logits[:, -1]
+                non_hold_mask = final_mask[..., 1:].reshape(
+                    sequence.shape[0],
+                    -1,
+                ).bool()
+                final_logits[..., 1:].masked_fill_(
+                    ~non_hold_mask,
+                    float("-inf"),
+                )
+                action = self._decode_joint_actions(
+                    final_logits.argmax(dim=-1)
+                )
+                return (
+                    (action, hidden, final_logits)
+                    if return_logits
+                    else (action, hidden)
+                )
             logits, hidden = self.policy_sequence(
                 sequence,
                 action_mask,
                 hidden_state,
             )
+            final_logits = logits[:, -1]
             action = self.actions_from_logits(
-                logits[:, -1],
+                final_logits,
                 deterministic=deterministic,
             )
-            return action, hidden
+            return (
+                (action, hidden, final_logits)
+                if return_logits
+                else (action, hidden)
+            )
 
     return ActorCritic()

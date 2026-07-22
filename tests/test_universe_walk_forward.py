@@ -91,6 +91,13 @@ class UniverseWalkForwardTests(TestCase):
                 hidden_size=4,
                 auxiliary_horizons=(1, 2),
             ),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
+                auxiliary_horizons=(1, 2),
+                critic_layer_norm=True,
+            ),
             ModelSpec("lstm", "flat", hidden_size=4),
             ModelSpec("gru", "flat", hidden_size=4),
             ModelSpec(
@@ -111,6 +118,22 @@ class UniverseWalkForwardTests(TestCase):
                 hidden_size=4,
                 auxiliary_coefficient=0.0,
                 auxiliary_horizons=(1, 2),
+            ),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
+                auxiliary_horizons=(1, 2),
+                auxiliary_target_exclusions=(
+                    "medianContractDeltaHedgedSpotReturn",
+                ),
+            ),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
+                auxiliary_horizons=(1, 2),
+                delta_neutrality_coefficient=0.0,
             ),
             ModelSpec(
                 "gru",
@@ -152,6 +175,7 @@ class UniverseWalkForwardTests(TestCase):
                     selection_worst_ticker_weight=0.25,
                     auxiliary_coefficient=0.05,
                     auxiliary_horizons=(1, 2),
+                    delta_neutrality_coefficient=0.001,
                     seed=17,
                 ),
                 output_dir,
@@ -289,6 +313,31 @@ class UniverseWalkForwardTests(TestCase):
                 "validation_score_lift_vs_configured_horizons"
             ]
         )
+        target_ablation = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["effective_auxiliary_target_exclusions"]
+            == ["medianContractDeltaHedgedSpotReturn"]
+        )
+        self.assertIsNotNone(
+            target_ablation[
+                "validation_score_lift_vs_full_auxiliary_targets"
+            ]
+        )
+        neutrality_enabled = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["effective_delta_neutrality_coefficient"] == 0.001
+            and candidate["effective_auxiliary_horizons"] == [1, 2]
+            and candidate["effective_auxiliary_coefficient"] == 0.05
+            and not candidate["effective_auxiliary_target_exclusions"]
+            and not candidate["model"]["critic_layer_norm"]
+        )
+        self.assertIsNotNone(
+            neutrality_enabled[
+                "validation_score_lift_vs_delta_neutrality_disabled"
+            ]
+        )
         burn_in_ablation = next(
             candidate
             for candidate in fold["model_selection"]["candidates"]
@@ -347,6 +396,16 @@ class UniverseWalkForwardTests(TestCase):
         self.assertIsNotNone(
             entropy_ablation[
                 "validation_score_lift_vs_feasible_normalized_entropy"
+            ]
+        )
+        critic_layer_norm = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["model"]["critic_layer_norm"]
+        )
+        self.assertIsNotNone(
+            critic_layer_norm[
+                "validation_score_lift_vs_critic_layer_norm_disabled"
             ]
         )
         self.assertEqual(len(manifest["training_environments"]), 2)

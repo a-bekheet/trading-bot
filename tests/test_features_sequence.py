@@ -7,13 +7,21 @@ import pandas as pd
 
 from trading_bot.training.dataset import SnapshotDataset
 from trading_bot.training.features import (
+    BENCHMARK_CONTEXT_FEATURES,
     CONTRACT_ARBITRAGE_FEATURES,
     CONTRACT_DYNAMICS_FEATURES,
+    CONTRACT_SMILE_RESIDUAL_FEATURES,
     ENGINEERED_FEATURES,
+    INTRADAY_CLOCK_FEATURES,
     MARKET_ENGINEERED_FEATURES,
+    SMILE_FIT_FEATURES,
+    SURFACE_VELOCITY_FEATURES,
+    benchmark_context_features,
     engineer_snapshot,
+    intraday_clock_features,
     realized_volatility_features,
     snapshot_gap_features,
+    underlying_quote_age_features,
 )
 from trading_bot.training.env import (
     CONTRACT_FEATURES,
@@ -49,40 +57,307 @@ def surface_snapshot(
             ("call", 0.5, atm_level - 0.01),
             ("put", -0.5, atm_level + 0.01),
         ):
-            rows.append({
-                "collectedAt": timestamp,
-                "contractSymbol": f"{expiration}-ATM-{side}",
-                "expiration": expiration,
-                "optionType": side,
-                "bid": 1.0,
-                "ask": 1.2,
-                "lastPrice": 1.1,
-                "strike": 100,
-                "underlyingPrice": 100,
-                "riskFreeRate": 0.0,
-                "impliedVolatility": volatility,
-                "delta": delta,
-                "gamma": 0.01,
-                "theta": -0.1,
-                "vega": 0.2,
-            })
+            rows.append(
+                {
+                    "collectedAt": timestamp,
+                    "contractSymbol": f"{expiration}-ATM-{side}",
+                    "expiration": expiration,
+                    "optionType": side,
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "lastPrice": 1.1,
+                    "strike": 100,
+                    "underlyingPrice": 100,
+                    "riskFreeRate": 0.0,
+                    "impliedVolatility": volatility,
+                    "delta": delta,
+                    "gamma": 0.01,
+                    "theta": -0.1,
+                    "vega": 0.2,
+                }
+            )
         if expiration == expirations[0]:
             for side, strike, delta, volatility in (
                 ("call", 110, 0.25, front_call_wing),
                 ("put", 90, -0.25, front_put_wing),
             ):
-                rows.append({
-                    **rows[-1],
-                    "contractSymbol": f"{expiration}-WING-{side}",
-                    "optionType": side,
-                    "strike": strike,
-                    "delta": delta,
-                    "impliedVolatility": volatility,
-                })
+                rows.append(
+                    {
+                        **rows[-1],
+                        "contractSymbol": f"{expiration}-WING-{side}",
+                        "optionType": side,
+                        "strike": strike,
+                        "delta": delta,
+                        "impliedVolatility": volatility,
+                    }
+                )
     return pd.DataFrame(rows)
 
 
 class FeatureSequenceTests(TestCase):
+    def test_intraday_clock_is_causal_dst_aware_and_ablatable(self):
+        summer = intraday_clock_features(
+            pd.DataFrame(
+                {
+                    "collectedAt": ["2026-07-21T14:00:00Z"],
+                }
+            )
+        )
+        winter = intraday_clock_features(
+            pd.DataFrame(
+                {
+                    "collectedAt": ["2026-01-21T15:00:00Z"],
+                }
+            )
+        )
+
+        self.assertEqual(summer, winter)
+        self.assertAlmostEqual(
+            summer["easternCaptureDayFraction"],
+            10 / 24,
+        )
+        self.assertEqual(summer["easternCaptureClockCoverage"], 1.0)
+        current = surface_snapshot(
+            "2026-07-21T14:00:00Z",
+            (0.2, 0.24, 0.3),
+            front_call_wing=0.22,
+            front_put_wing=0.26,
+        )
+        future_labeled_previous = surface_snapshot(
+            "2026-07-21T20:00:00Z",
+            (0.4, 0.44, 0.5),
+            front_call_wing=0.42,
+            front_put_wing=0.46,
+        )
+        engineered = engineer_snapshot(
+            current,
+            future_labeled_previous,
+        ).iloc[0]
+        for name, value in summer.items():
+            self.assertAlmostEqual(engineered[name], value)
+        self.assertEqual(
+            feature_ablation_indices(("intraday_clock",), 2),
+            tuple(MARKET_FEATURES.index(name) for name in INTRADAY_CLOCK_FEATURES),
+        )
+        for frame in (
+            pd.DataFrame(),
+            pd.DataFrame({"other": [1]}),
+            pd.DataFrame({"collectedAt": ["not-a-time"]}),
+        ):
+            self.assertEqual(
+                intraday_clock_features(frame),
+                dict.fromkeys(INTRADAY_CLOCK_FEATURES, 0.0),
+            )
+
+    def test_executable_front_smile_fit_is_causal_and_ablatable(self):
+        rows = []
+        for side in ("call", "put"):
+            for log_moneyness in (-0.2, -0.1, 0.0, 0.1, 0.2):
+                rows.append(
+                    {
+                        "collectedAt": "2026-07-21T14:00:00Z",
+                        "contractSymbol": f"{side}-{log_moneyness}",
+                        "expiration": "2026-08-21",
+                        "optionType": side,
+                        "bid": 1.0,
+                        "ask": 1.2,
+                        "lastPrice": 1.1,
+                        "strike": 100 * np.exp(-log_moneyness),
+                        "underlyingPrice": 100,
+                        "riskFreeRate": 0.0,
+                        "dividendYield": 0.0,
+                        "impliedVolatility": 0.2 + 0.5 * log_moneyness**2,
+                        "delta": 0.5 if side == "call" else -0.5,
+                        "gamma": 0.01,
+                        "theta": -0.1,
+                        "vega": 0.2,
+                    }
+                )
+
+        fitted = engineer_snapshot(pd.DataFrame(rows))
+        first = fitted.iloc[0]
+        self.assertEqual(first["frontSmileFitCoverage"], 1.0)
+        self.assertAlmostEqual(first["frontSmileCurvature"], 0.00125)
+        self.assertAlmostEqual(first["frontSmileFitRmsePct"], 0.0)
+        self.assertAlmostEqual(first["frontAtmSmileResidualPct"], 0.0)
+        self.assertTrue((fitted["smileResidualCoverage"] == 1.0).all())
+        np.testing.assert_allclose(fitted["smileResidualPct"], 0.0, atol=1e-12)
+        self.assertEqual(
+            feature_ablation_indices(("smile_fit",), 2),
+            tuple(MARKET_FEATURES.index(name) for name in SMILE_FIT_FEATURES),
+        )
+        residual_indices = feature_ablation_indices(("contract_smile_residual",), 2)
+        contract_start = len(MARKET_FEATURES)
+        self.assertEqual(
+            residual_indices,
+            tuple(
+                sorted(
+                    contract_start
+                    + slot * len(CONTRACT_FEATURES)
+                    + CONTRACT_FEATURES.index(name)
+                    for slot in range(2)
+                    for name in CONTRACT_SMILE_RESIDUAL_FEATURES
+                )
+            ),
+        )
+        shuffled_frame = engineer_snapshot(
+            pd.DataFrame(rows).sample(frac=1.0, random_state=69)
+        )
+        shuffled = shuffled_frame.iloc[0]
+        for name in SMILE_FIT_FEATURES:
+            self.assertAlmostEqual(shuffled[name], first[name])
+        ordered_residuals = fitted.set_index("contractSymbol")[
+            list(CONTRACT_SMILE_RESIDUAL_FEATURES)
+        ].sort_index()
+        shuffled_residuals = shuffled_frame.set_index("contractSymbol")[
+            list(CONTRACT_SMILE_RESIDUAL_FEATURES)
+        ].sort_index()
+        np.testing.assert_allclose(
+            ordered_residuals,
+            shuffled_residuals,
+            atol=1e-12,
+        )
+
+        rich_atm = pd.DataFrame(rows)
+        rich_atm.loc[
+            np.isclose(rich_atm["strike"], 100),
+            "impliedVolatility",
+        ] += 0.02
+        rich = engineer_snapshot(rich_atm).iloc[0]
+        self.assertAlmostEqual(
+            rich["frontAtmSmileResidualPct"],
+            0.02 / 0.22,
+        )
+        self.assertGreater(rich["frontSmileFitRmsePct"], 0.0)
+        rich_contracts = engineer_snapshot(rich_atm)
+        rich_atm_residuals = rich_contracts.loc[
+            np.isclose(rich_contracts["strike"], 100),
+            "smileResidualPct",
+        ]
+        self.assertTrue((rich_atm_residuals > 0).all())
+
+        sparse_global = pd.DataFrame(rows)
+        sparse_global.loc[
+            np.isclose(sparse_global["strike"], 100 * np.exp(-0.2)),
+            "bid",
+        ] = 0.0
+        unavailable = engineer_snapshot(sparse_global).iloc[0]
+        self.assertEqual(unavailable["frontSmileFitCoverage"], 0.0)
+        self.assertEqual(unavailable["frontSmileCurvature"], 0.0)
+
+        sparse = pd.DataFrame(rows)
+        sparse.loc[
+            sparse["optionType"].eq("call")
+            & np.isclose(sparse["strike"], 100 * np.exp(-0.2)),
+            "bid",
+        ] = 0.0
+        sparse_engineered = engineer_snapshot(sparse)
+        self.assertTrue(
+            (
+                sparse_engineered.loc[
+                    sparse_engineered["optionType"].eq("call"),
+                    "smileResidualCoverage",
+                ]
+                == 0.0
+            ).all()
+        )
+        self.assertTrue(
+            (
+                sparse_engineered.loc[
+                    sparse_engineered["optionType"].eq("put"),
+                    "smileResidualCoverage",
+                ]
+                == 1.0
+            ).all()
+        )
+
+        narrow = pd.DataFrame(rows)
+        original_coordinates = -np.log(narrow["strike"] / 100)
+        narrow["strike"] = 100 * np.exp(-original_coordinates * 0.1)
+        unsupported = engineer_snapshot(narrow).iloc[0]
+        self.assertEqual(unsupported["frontSmileFitCoverage"], 0.0)
+
+    def test_benchmark_context_is_causal_covered_and_ablatable(self):
+        previous = surface_snapshot(
+            "2026-07-21T14:00:00Z",
+            (0.2, 0.21, 0.22),
+            front_call_wing=0.23,
+            front_put_wing=0.25,
+        ).assign(
+            benchmarkSymbol="SPY",
+            benchmarkPrice=500.0,
+            benchmarkQuoteTime="2026-07-21T13:59:00Z",
+        )
+        current = surface_snapshot(
+            "2026-07-21T14:15:00Z",
+            (0.2, 0.21, 0.22),
+            front_call_wing=0.23,
+            front_put_wing=0.25,
+        ).assign(
+            underlyingPrice=102.0,
+            benchmarkSymbol="SPY",
+            benchmarkPrice=505.0,
+            benchmarkQuoteTime="2026-07-21T14:14:00Z",
+        )
+        history = (
+            (pd.Timestamp("2026-07-21T13:59:00Z"), 500.0),
+            (pd.Timestamp("2026-07-21T14:14:00Z"), 505.0),
+        )
+
+        features = benchmark_context_features(current, previous, history)
+
+        self.assertAlmostEqual(features["benchmarkReturn"], 0.01)
+        self.assertEqual(features["benchmarkReturnCoverage"], 1.0)
+        self.assertAlmostEqual(features["relativeUnderlyingReturn"], 0.01)
+        self.assertEqual(features["relativeUnderlyingReturnCoverage"], 1.0)
+        self.assertEqual(features["benchmarkQuoteAgeSeconds"], 60.0)
+        self.assertEqual(features["benchmarkQuoteAgeCoverage"], 1.0)
+        self.assertAlmostEqual(
+            features["benchmarkLogReturn4"],
+            np.log(1.01),
+        )
+        self.assertEqual(features["benchmarkRealizedVol4Coverage"], 0.25)
+        indices = feature_ablation_indices(("systematic_context",), 2)
+        self.assertEqual(
+            indices,
+            tuple(MARKET_FEATURES.index(name) for name in BENCHMARK_CONTEXT_FEATURES),
+        )
+
+        repeated = current.assign(
+            benchmarkPrice=500.0,
+            benchmarkQuoteTime="2026-07-21T13:59:00Z",
+        )
+        repeated_features = benchmark_context_features(
+            repeated,
+            previous,
+            history[:1],
+        )
+        self.assertEqual(repeated_features["benchmarkReturnCoverage"], 0.0)
+        self.assertEqual(
+            repeated_features["relativeUnderlyingReturnCoverage"],
+            0.0,
+        )
+
+        changed_symbol = current.assign(benchmarkSymbol="QQQ")
+        changed_features = benchmark_context_features(
+            changed_symbol,
+            previous,
+            history,
+        )
+        self.assertEqual(changed_features["benchmarkReturnCoverage"], 0.0)
+        self.assertEqual(
+            changed_features["relativeUnderlyingReturnCoverage"],
+            0.0,
+        )
+
+        missing_symbol = current.drop(columns="benchmarkSymbol")
+        missing_features = benchmark_context_features(
+            missing_symbol,
+            previous,
+            history,
+        )
+        self.assertEqual(missing_features["benchmarkReturnCoverage"], 0.0)
+
     def test_market_state_features_are_explicit_and_causal(self):
         regular = surface_snapshot(
             "2026-07-21T14:00:00Z",
@@ -100,31 +375,87 @@ class FeatureSequenceTests(TestCase):
         unknown_features = engineer_snapshot(unknown)
 
         self.assertEqual(
-            tuple(regular_features.iloc[0][[
-                "regularMarketSession", "marketStateCoverage",
-            ]]),
+            tuple(
+                regular_features.iloc[0][
+                    [
+                        "regularMarketSession",
+                        "marketStateCoverage",
+                    ]
+                ]
+            ),
             (1.0, 1.0),
         )
         self.assertEqual(
-            tuple(closed_features.iloc[0][[
-                "regularMarketSession", "marketStateCoverage",
-            ]]),
+            tuple(
+                closed_features.iloc[0][
+                    [
+                        "regularMarketSession",
+                        "marketStateCoverage",
+                    ]
+                ]
+            ),
             (0.0, 1.0),
         )
         self.assertEqual(
-            tuple(unknown_features.iloc[0][[
-                "regularMarketSession", "marketStateCoverage",
-            ]]),
+            tuple(
+                unknown_features.iloc[0][
+                    [
+                        "regularMarketSession",
+                        "marketStateCoverage",
+                    ]
+                ]
+            ),
             (0.0, 0.0),
         )
 
     def test_market_session_ablation_maps_only_the_two_market_inputs(self):
         indices = feature_ablation_indices(("market_session",), 2)
 
-        self.assertEqual(indices, (
-            MARKET_FEATURES.index("regularMarketSession"),
-            MARKET_FEATURES.index("marketStateCoverage"),
-        ))
+        self.assertEqual(
+            indices,
+            (
+                MARKET_FEATURES.index("regularMarketSession"),
+                MARKET_FEATURES.index("marketStateCoverage"),
+            ),
+        )
+
+    def test_underlying_quote_age_is_causal_and_has_named_ablation(self):
+        frame = surface_snapshot(
+            "2026-07-21T14:00:00Z",
+            (0.2, 0.21, 0.22),
+            front_call_wing=0.23,
+            front_put_wing=0.25,
+        )
+        frame["underlyingQuoteTime"] = "2026-07-21T13:45:00Z"
+        engineered = engineer_snapshot(frame)
+
+        self.assertEqual(
+            tuple(
+                engineered.iloc[0][
+                    [
+                        "underlyingQuoteAgeSeconds",
+                        "underlyingQuoteAgeCoverage",
+                    ]
+                ]
+            ),
+            (900.0, 1.0),
+        )
+        self.assertEqual(
+            underlying_quote_age_features(
+                frame.assign(underlyingQuoteTime="2026-07-21T14:01:00Z")
+            ),
+            {
+                "underlyingQuoteAgeSeconds": 0.0,
+                "underlyingQuoteAgeCoverage": 0.0,
+            },
+        )
+        self.assertEqual(
+            feature_ablation_indices(("data_freshness",), 2),
+            (
+                MARKET_FEATURES.index("underlyingQuoteAgeSeconds"),
+                MARKET_FEATURES.index("underlyingQuoteAgeCoverage"),
+            ),
+        )
 
     def test_dataset_drops_consecutive_stale_quote_surfaces(self):
         base = {
@@ -164,9 +495,16 @@ class FeatureSequenceTests(TestCase):
         with TemporaryDirectory() as directory:
             data_dir = Path(directory)
             pd.DataFrame(rows).to_csv(data_dir / "AAPL.csv", index=False)
-            dataset = SnapshotDataset.from_directory(data_dir, "AAPL")
+            material = SnapshotDataset.material_from_directory(
+                data_dir,
+                "AAPL",
+            )
+            dataset = material.engineered()
+            direct = SnapshotDataset.from_directory(data_dir, "AAPL")
 
+        self.assertNotIn("snapshotGapSeconds", material.snapshots[0].frame)
         self.assertEqual(len(dataset), 2)
+        self.assertEqual(dataset.fingerprint, direct.fingerprint)
         self.assertEqual(
             [snapshot.timestamp for snapshot in dataset.snapshots],
             [
@@ -178,6 +516,58 @@ class FeatureSequenceTests(TestCase):
             dataset.snapshots[-1].frame.iloc[0]["snapshotGapSeconds"],
             120,
         )
+
+    def test_dataset_resets_rolling_benchmark_history_on_symbol_change(self):
+        base = {
+            "contractSymbol": "AAPL-C1",
+            "symbol": "AAPL",
+            "expiration": "2026-08-21",
+            "optionType": "call",
+            "strike": 100,
+            "bid": 1.0,
+            "ask": 1.2,
+            "lastPrice": 1.1,
+            "impliedVolatility": 0.2,
+            "underlyingPrice": 100,
+            "riskFreeRate": 0.04,
+            "greekModel": "black-scholes-merton",
+        }
+        rows = [
+            {
+                **base,
+                "collectedAt": "2026-07-21T14:00:00Z",
+                "benchmarkSymbol": "SPY",
+                "benchmarkPrice": 500,
+                "benchmarkQuoteTime": "2026-07-21T13:59:00Z",
+            },
+            {
+                **base,
+                "collectedAt": "2026-07-21T14:15:00Z",
+                "benchmarkSymbol": "SPY",
+                "benchmarkPrice": 505,
+                "benchmarkQuoteTime": "2026-07-21T14:14:00Z",
+            },
+            {
+                **base,
+                "collectedAt": "2026-07-21T14:30:00Z",
+                "benchmarkSymbol": "QQQ",
+                "benchmarkPrice": 600,
+                "benchmarkQuoteTime": "2026-07-21T14:29:00Z",
+            },
+        ]
+
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            pd.DataFrame(rows).to_csv(data_dir / "AAPL.csv", index=False)
+            dataset = SnapshotDataset.from_directory(data_dir, "AAPL")
+
+        second = dataset.snapshots[1].frame.iloc[0]
+        switched = dataset.snapshots[2].frame.iloc[0]
+        self.assertEqual(second["benchmarkReturnCoverage"], 1.0)
+        self.assertEqual(second["benchmarkRealizedVol4Coverage"], 0.25)
+        self.assertEqual(switched["benchmarkReturnCoverage"], 0.0)
+        self.assertEqual(switched["benchmarkRealizedVol4Coverage"], 0.0)
+        self.assertEqual(switched["benchmarkLogReturn4"], 0.0)
 
     @staticmethod
     def auxiliary_observation(
@@ -234,7 +624,10 @@ class FeatureSequenceTests(TestCase):
         values, available = auxiliary_market_change_targets(current, future)
 
         self.assertEqual(len(values), len(AUXILIARY_TARGET_FEATURES))
-        np.testing.assert_allclose(available, (1, 1, 0, 0, 1, 0, 0, 0))
+        np.testing.assert_allclose(
+            available,
+            (1, 1, 0, 0, 1, 0, 0, 0, 0),
+        )
         self.assertAlmostEqual(values[0], np.log1p(1.0))
         self.assertAlmostEqual(values[1], np.log1p(0.03))
         self.assertAlmostEqual(values[4], -np.log1p(0.1))
@@ -242,22 +635,29 @@ class FeatureSequenceTests(TestCase):
     def test_contract_auxiliary_targets_match_ids_not_slot_order(self):
         def observation(
             ids: tuple[str, ...],
-            quotes: dict[str, tuple[float, float, float]],
+            quotes: dict[str, tuple[float, float, float, float]],
+            *,
+            spot: float,
         ) -> Observation:
             contracts = np.zeros(
                 (len(ids), len(CONTRACT_FEATURES)),
                 dtype=float,
             )
             for row, contract_id in enumerate(ids):
-                bid, ask, volatility = quotes[contract_id]
+                bid, ask, volatility, delta = quotes[contract_id]
                 contracts[row, CONTRACT_FEATURES.index("bid")] = bid
                 contracts[row, CONTRACT_FEATURES.index("ask")] = ask
                 contracts[
                     row,
                     CONTRACT_FEATURES.index("impliedVolatility"),
                 ] = volatility
+                contracts[row, CONTRACT_FEATURES.index("delta")] = delta
             market = np.zeros(len(MARKET_FEATURES), dtype=float)
-            market[MARKET_FEATURES.index("underlyingPrice")] = 100
+            market[MARKET_FEATURES.index("underlyingPrice")] = spot
+            market[MARKET_FEATURES.index("regularMarketSession")] = 1.0
+            market[MARKET_FEATURES.index("marketStateCoverage")] = 1.0
+            market[MARKET_FEATURES.index("underlyingQuoteAgeSeconds")] = 0.0
+            market[MARKET_FEATURES.index("underlyingQuoteAgeCoverage")] = 1.0
             return Observation(
                 "now",
                 market,
@@ -269,15 +669,15 @@ class FeatureSequenceTests(TestCase):
             )
 
         current_quotes = {
-            "A": (1.0, 1.2, 0.20),
-            "B": (2.0, 2.4, 0.30),
+            "A": (1.0, 1.2, 0.20, 0.50),
+            "B": (2.0, 2.4, 0.30, -0.50),
         }
         future_quotes = {
-            "A": (1.2, 1.4, 0.25),
-            "B": (2.2, 2.6, 0.33),
+            "A": (1.2, 1.4, 0.25, -9.0),
+            "B": (2.2, 2.6, 0.33, 9.0),
         }
-        current = observation(("A", "B"), current_quotes)
-        future = observation(("B", "A"), future_quotes)
+        current = observation(("A", "B"), current_quotes, spot=100)
+        future = observation(("B", "A"), future_quotes, spot=101)
 
         values, available = cross_sectional_contract_change_targets(
             current,
@@ -285,20 +685,50 @@ class FeatureSequenceTests(TestCase):
         )
 
         mid_returns = np.array((np.log(1.3 / 1.1), np.log(2.4 / 2.2)))
-        spread_changes = np.array((
-            0.2 / 1.3 - 0.2 / 1.1,
-            0.4 / 2.4 - 0.4 / 2.2,
-        ))
-        expected = np.array((
-            np.log1p(np.median(mid_returns) * 100),
-            -np.log1p(abs(np.median(spread_changes)) * 10),
-            np.log1p(0.04 * 10),
-        ))
+        spread_changes = np.array(
+            (
+                0.2 / 1.3 - 0.2 / 1.1,
+                0.4 / 2.4 - 0.4 / 2.2,
+            )
+        )
+        expected = np.array(
+            (
+                np.log1p(np.median(mid_returns) * 100),
+                -np.log1p(abs(np.median(spread_changes)) * 10),
+                np.log1p(0.04 * 10),
+                np.log1p(0.002 * 100),
+            )
+        )
         np.testing.assert_allclose(values, expected, rtol=1e-6)
-        np.testing.assert_allclose(available, np.ones(3))
+        np.testing.assert_allclose(available, np.ones(4))
         self.assertEqual(len(values), len(CONTRACT_AUXILIARY_TARGET_FEATURES))
 
-        unmatched = observation(("C",), {"C": (1.0, 1.2, 0.20)})
+        stale_future = observation(
+            ("B", "A"),
+            future_quotes,
+            spot=101,
+        )
+        stale_future.market[MARKET_FEATURES.index("regularMarketSession")] = 0.0
+        _, stale_available = cross_sectional_contract_change_targets(
+            current,
+            stale_future,
+        )
+        np.testing.assert_allclose(stale_available[:3], 1.0)
+        self.assertEqual(stale_available[3], 0.0)
+
+        old_future = observation(("B", "A"), future_quotes, spot=101)
+        old_future.market[MARKET_FEATURES.index("underlyingQuoteAgeSeconds")] = 1_201.0
+        _, old_available = cross_sectional_contract_change_targets(
+            current,
+            old_future,
+        )
+        self.assertEqual(old_available[3], 0.0)
+
+        unmatched = observation(
+            ("C",),
+            {"C": (1.0, 1.2, 0.20, 0.50)},
+            spot=101,
+        )
         values, available = cross_sectional_contract_change_targets(
             current,
             unmatched,
@@ -309,22 +739,35 @@ class FeatureSequenceTests(TestCase):
         partial_current = observation(
             ("A", "B", "C"),
             {
-                "A": (1.0, 1.2, 0.20),
-                "B": (2.0, 2.4, 0.30),
-                "C": (3.0, 3.4, 0.40),
+                "A": (1.0, 1.2, 0.20, 0.50),
+                "B": (2.0, 2.4, 0.30, -0.50),
+                "C": (3.0, 3.4, 0.40, 0.25),
             },
+            spot=100,
         )
         values, available = cross_sectional_contract_change_targets(
             partial_current,
-            observation(("A",), {"A": (1.2, 1.4, 0.25)}),
+            observation(
+                ("A",),
+                {"A": (1.2, 1.4, 0.25, 0.50)},
+                spot=101,
+            ),
         )
         np.testing.assert_allclose(values, 0)
         np.testing.assert_allclose(available, 0)
 
-        invalid = observation(("A",), {"A": (0.0, 1.2, 0.20)})
+        invalid = observation(
+            ("A",),
+            {"A": (0.0, 1.2, 0.20, 0.50)},
+            spot=100,
+        )
         values, available = cross_sectional_contract_change_targets(
             invalid,
-            observation(("A",), {"A": (1.2, 1.4, 0.25)}),
+            observation(
+                ("A",),
+                {"A": (1.2, 1.4, 0.25, 0.50)},
+                spot=101,
+            ),
         )
         np.testing.assert_allclose(values, 0)
         np.testing.assert_allclose(available, 0)
@@ -403,6 +846,7 @@ class FeatureSequenceTests(TestCase):
             2,
         )
         time_indices = feature_ablation_indices(("time_context",), 2)
+        clock_indices = feature_ablation_indices(("intraday_clock",), 2)
         trend_indices = feature_ablation_indices(("price_trend",), 2)
         volatility_indices = feature_ablation_indices(("volatility_regime",), 2)
         normalization_indices = feature_ablation_indices(
@@ -427,19 +871,23 @@ class FeatureSequenceTests(TestCase):
             2 * len(CONTRACT_DYNAMICS_FEATURES),
         )
         self.assertEqual(len(time_indices), 2)
+        self.assertEqual(len(clock_indices), 2)
         self.assertEqual(len(trend_indices), 2)
         self.assertEqual(len(normalization_indices), 2)
         self.assertEqual(len(arbitrage_indices), 4)
-        self.assertEqual(set(arbitrage_indices), {
-            len(MARKET_FEATURES)
-            + slot * len(CONTRACT_FEATURES)
-            + CONTRACT_FEATURES.index(feature)
-            for slot in range(2)
-            for feature in (
-                "verticalArbitrageViolationPct",
-                "butterflyArbitrageViolationPct",
-            )
-        })
+        self.assertEqual(
+            set(arbitrage_indices),
+            {
+                len(MARKET_FEATURES)
+                + slot * len(CONTRACT_FEATURES)
+                + CONTRACT_FEATURES.index(feature)
+                for slot in range(2)
+                for feature in (
+                    "verticalArbitrageViolationPct",
+                    "butterflyArbitrageViolationPct",
+                )
+            },
+        )
         for feature in (
             "verticalArbitrageCoverage",
             "butterflyArbitrageCoverage",
@@ -451,18 +899,19 @@ class FeatureSequenceTests(TestCase):
                     + CONTRACT_FEATURES.index(feature),
                     arbitrage_indices,
                 )
-        self.assertEqual(set(normalization_indices), {
-            MARKET_FEATURES.index("frontAtmIvZScore16"),
-            MARKET_FEATURES.index("volatilityRiskPremiumZScore16"),
-        })
+        self.assertEqual(
+            set(normalization_indices),
+            {
+                MARKET_FEATURES.index("frontAtmIvZScore16"),
+                MARKET_FEATURES.index("volatilityRiskPremiumZScore16"),
+            },
+        )
         self.assertNotIn(
             MARKET_FEATURES.index("frontAtmIvZScore16Coverage"),
             normalization_indices,
         )
         self.assertNotIn(
-            MARKET_FEATURES.index(
-                "volatilityRiskPremiumZScore16Coverage"
-            ),
+            MARKET_FEATURES.index("volatilityRiskPremiumZScore16Coverage"),
             normalization_indices,
         )
         self.assertEqual(
@@ -472,6 +921,7 @@ class FeatureSequenceTests(TestCase):
         self.assertFalse(set(wing_indices) & set(quality_indices))
         self.assertFalse(set(term_indices) & set(dynamics_indices))
         self.assertFalse(set(time_indices) & set(dynamics_indices))
+        self.assertFalse(set(time_indices) & set(clock_indices))
         self.assertFalse(set(trend_indices) & set(time_indices))
         self.assertFalse(set(trend_indices) & set(term_indices))
         self.assertFalse(set(position_indices) & set(identity_indices))
@@ -504,10 +954,15 @@ class FeatureSequenceTests(TestCase):
             self.assertNotIn(coverage_index, trend_indices)
             self.assertNotIn(coverage_index, volatility_indices)
         self.assertTrue(all(index < len(MARKET_FEATURES) for index in time_indices))
+        self.assertTrue(all(index < len(MARKET_FEATURES) for index in clock_indices))
         self.assertTrue(all(index < len(MARKET_FEATURES) for index in trend_indices))
         self.assertTrue(all(index < len(MARKET_FEATURES) for index in wing_indices))
-        self.assertTrue(all(index >= len(MARKET_FEATURES) for index in contract_indices))
-        self.assertTrue(all(index >= len(MARKET_FEATURES) for index in identity_indices))
+        self.assertTrue(
+            all(index >= len(MARKET_FEATURES) for index in contract_indices)
+        )
+        self.assertTrue(
+            all(index >= len(MARKET_FEATURES) for index in identity_indices)
+        )
         seen: set[int] = set()
         for group in FEATURE_ABLATION_GROUPS:
             indices = set(feature_ablation_indices((group,), 2))
@@ -517,81 +972,96 @@ class FeatureSequenceTests(TestCase):
             feature_ablation_indices(("future_leak",), 2)
 
     def test_features_are_finite_and_use_previous_snapshot_only(self):
-        previous = pd.DataFrame([{
-            "collectedAt": "2026-07-21T14:00:00Z", "contractSymbol": "C1",
-            "expiration": "2026-08-21", "bid": 1, "ask": 1.2,
-            "lastPrice": 1.1, "strike": 100, "underlyingPrice": 100,
-            "impliedVolatility": .2, "volume": 10, "openInterest": 20,
-            "lastTradeDate": "2026-07-21T13:59:00Z",
-        }])
+        previous = pd.DataFrame(
+            [
+                {
+                    "collectedAt": "2026-07-21T14:00:00Z",
+                    "contractSymbol": "C1",
+                    "expiration": "2026-08-21",
+                    "bid": 1,
+                    "ask": 1.2,
+                    "lastPrice": 1.1,
+                    "strike": 100,
+                    "underlyingPrice": 100,
+                    "impliedVolatility": 0.2,
+                    "volume": 10,
+                    "openInterest": 20,
+                    "lastTradeDate": "2026-07-21T13:59:00Z",
+                }
+            ]
+        )
         current = previous.copy()
         current["collectedAt"] = "2026-07-21T14:01:00Z"
         current["underlyingPrice"] = 101
-        current["impliedVolatility"] = .25
+        current["impliedVolatility"] = 0.25
 
         engineered = engineer_snapshot(current, previous)
 
         self.assertEqual(set(ENGINEERED_FEATURES) - set(engineered.columns), set())
-        self.assertAlmostEqual(engineered.iloc[0]["underlyingReturn"], .01)
+        self.assertAlmostEqual(engineered.iloc[0]["underlyingReturn"], 0.01)
         self.assertAlmostEqual(engineered.iloc[0]["midPriceLogReturn"], 0)
         self.assertAlmostEqual(engineered.iloc[0]["spreadPctChange"], 0)
         self.assertEqual(engineered.iloc[0]["quoteChangeCoverage"], 1)
-        self.assertAlmostEqual(engineered.iloc[0]["ivChange"], .05)
+        self.assertAlmostEqual(engineered.iloc[0]["ivChange"], 0.05)
         self.assertEqual(engineered.iloc[0]["ivChangeCoverage"], 1)
         self.assertEqual(engineered.iloc[0]["snapshotGapSeconds"], 60)
         self.assertEqual(engineered.iloc[0]["snapshotGapCoverage"], 1)
-        self.assertTrue(np.isfinite(engineered[list(ENGINEERED_FEATURES)].to_numpy()).all())
+        self.assertTrue(
+            np.isfinite(engineered[list(ENGINEERED_FEATURES)].to_numpy()).all()
+        )
 
     def test_contract_dynamics_require_matched_executable_quotes(self):
-        previous = pd.DataFrame([
-            {
-                "collectedAt": "2026-07-21T14:00:00Z",
-                "contractSymbol": "C1",
-                "expiration": "2026-08-21",
-                "bid": 1.0,
-                "ask": 1.2,
-                "lastPrice": np.nan,
-                "strike": 100,
-                "underlyingPrice": 100,
-                "impliedVolatility": 0.20,
-            },
-            {
-                "collectedAt": "2026-07-21T14:00:00Z",
-                "contractSymbol": "C3",
-                "expiration": "2026-08-21",
-                "bid": 0.0,
-                "ask": 1.2,
-                "lastPrice": 1.1,
-                "strike": 100,
-                "underlyingPrice": 100,
-                "impliedVolatility": 0.20,
-            },
-        ])
-        current = pd.DataFrame([
-            {
-                **previous.iloc[0].to_dict(),
-                "collectedAt": "2026-07-21T14:01:00Z",
-                "bid": 1.2,
-                "ask": 1.4,
-                "impliedVolatility": 0.25,
-            },
-            {
-                **previous.iloc[0].to_dict(),
-                "collectedAt": "2026-07-21T14:01:00Z",
-                "contractSymbol": "C2",
-            },
-            {
-                **previous.iloc[1].to_dict(),
-                "collectedAt": "2026-07-21T14:01:00Z",
-                "bid": 1.2,
-                "ask": 1.4,
-                "impliedVolatility": 0.25,
-            },
-        ])
-
-        engineered = engineer_snapshot(current, previous).set_index(
-            "contractSymbol"
+        previous = pd.DataFrame(
+            [
+                {
+                    "collectedAt": "2026-07-21T14:00:00Z",
+                    "contractSymbol": "C1",
+                    "expiration": "2026-08-21",
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "lastPrice": np.nan,
+                    "strike": 100,
+                    "underlyingPrice": 100,
+                    "impliedVolatility": 0.20,
+                },
+                {
+                    "collectedAt": "2026-07-21T14:00:00Z",
+                    "contractSymbol": "C3",
+                    "expiration": "2026-08-21",
+                    "bid": 0.0,
+                    "ask": 1.2,
+                    "lastPrice": 1.1,
+                    "strike": 100,
+                    "underlyingPrice": 100,
+                    "impliedVolatility": 0.20,
+                },
+            ]
         )
+        current = pd.DataFrame(
+            [
+                {
+                    **previous.iloc[0].to_dict(),
+                    "collectedAt": "2026-07-21T14:01:00Z",
+                    "bid": 1.2,
+                    "ask": 1.4,
+                    "impliedVolatility": 0.25,
+                },
+                {
+                    **previous.iloc[0].to_dict(),
+                    "collectedAt": "2026-07-21T14:01:00Z",
+                    "contractSymbol": "C2",
+                },
+                {
+                    **previous.iloc[1].to_dict(),
+                    "collectedAt": "2026-07-21T14:01:00Z",
+                    "bid": 1.2,
+                    "ask": 1.4,
+                    "impliedVolatility": 0.25,
+                },
+            ]
+        )
+
+        engineered = engineer_snapshot(current, previous).set_index("contractSymbol")
 
         self.assertAlmostEqual(
             engineered.loc["C1", "midPriceLogReturn"],
@@ -616,27 +1086,31 @@ class FeatureSequenceTests(TestCase):
         *,
         scale: float = 1.0,
     ) -> pd.DataFrame:
-        return pd.DataFrame([
-            {
-                "collectedAt": "2026-07-21T14:00:00Z",
-                "contractSymbol": f"{option_type}-{strike:g}",
-                "expiration": "2026-08-21",
-                "optionType": option_type,
-                "strike": strike * scale,
-                "bid": bid * scale,
-                "ask": ask * scale,
-                "lastPrice": (bid + ask) * scale / 2,
-                "underlyingPrice": 100 * scale,
-                "impliedVolatility": 0.2,
-            }
-            for strike, bid, ask in quotes
-        ])
+        return pd.DataFrame(
+            [
+                {
+                    "collectedAt": "2026-07-21T14:00:00Z",
+                    "contractSymbol": f"{option_type}-{strike:g}",
+                    "expiration": "2026-08-21",
+                    "optionType": option_type,
+                    "strike": strike * scale,
+                    "bid": bid * scale,
+                    "ask": ask * scale,
+                    "lastPrice": (bid + ask) * scale / 2,
+                    "underlyingPrice": 100 * scale,
+                    "impliedVolatility": 0.2,
+                }
+                for strike, bid, ask in quotes
+            ]
+        )
 
     def test_call_vertical_and_butterfly_violations_use_executable_quotes(self):
-        engineered = engineer_snapshot(self.arbitrage_surface(
-            "call",
-            ((90, 10, 11), (100, 12, 13), (110, 1, 2)),
-        )).set_index("strike")
+        engineered = engineer_snapshot(
+            self.arbitrage_surface(
+                "call",
+                ((90, 10, 11), (100, 12, 13), (110, 1, 2)),
+            )
+        ).set_index("strike")
 
         np.testing.assert_allclose(
             engineered["verticalArbitrageViolationPct"],
@@ -656,10 +1130,12 @@ class FeatureSequenceTests(TestCase):
         )
 
     def test_put_vertical_uses_the_put_monotonicity_direction(self):
-        engineered = engineer_snapshot(self.arbitrage_surface(
-            "put",
-            ((90, 12, 13), (100, 10, 11)),
-        ))
+        engineered = engineer_snapshot(
+            self.arbitrage_surface(
+                "put",
+                ((90, 12, 13), (100, 10, 11)),
+            )
+        )
 
         np.testing.assert_allclose(
             engineered["verticalArbitrageViolationPct"],
@@ -670,18 +1146,22 @@ class FeatureSequenceTests(TestCase):
             1.0,
         )
         np.testing.assert_allclose(
-            engineered[[
-                "butterflyArbitrageViolationPct",
-                "butterflyArbitrageCoverage",
-            ]],
+            engineered[
+                [
+                    "butterflyArbitrageViolationPct",
+                    "butterflyArbitrageCoverage",
+                ]
+            ],
             0.0,
         )
 
     def test_vertical_detects_executable_payoff_width_violation(self):
-        engineered = engineer_snapshot(self.arbitrage_surface(
-            "call",
-            ((90, 25, 26), (100, 1, 2)),
-        ))
+        engineered = engineer_snapshot(
+            self.arbitrage_surface(
+                "call",
+                ((90, 25, 26), (100, 1, 2)),
+            )
+        )
 
         np.testing.assert_allclose(
             engineered["verticalArbitrageViolationPct"],
@@ -691,11 +1171,13 @@ class FeatureSequenceTests(TestCase):
     def test_butterfly_weights_support_uneven_strikes_and_price_scaling(self):
         quotes = ((90, 8, 9), (100, 10, 11), (120, 1, 3))
         first = engineer_snapshot(self.arbitrage_surface("call", quotes))
-        second = engineer_snapshot(self.arbitrage_surface(
-            "call",
-            quotes,
-            scale=2,
-        ))
+        second = engineer_snapshot(
+            self.arbitrage_surface(
+                "call",
+                quotes,
+                scale=2,
+            )
+        )
 
         expected = (10 - (2 / 3) * 9 - (1 / 3) * 3) / 100
         np.testing.assert_allclose(
@@ -747,11 +1229,13 @@ class FeatureSequenceTests(TestCase):
 
     def test_price_history_trend_uses_only_valid_observed_intervals(self):
         start = pd.Timestamp("2026-07-21T14:00:00Z")
-        history = tuple(zip(
-            (start + pd.Timedelta(minutes=15 * index) for index in range(5)),
-            (100.0, 101.0, np.nan, 102.0, 103.0),
-            strict=True,
-        ))
+        history = tuple(
+            zip(
+                (start + pd.Timedelta(minutes=15 * index) for index in range(5)),
+                (100.0, 101.0, np.nan, 102.0, 103.0),
+                strict=True,
+            )
+        )
 
         features = realized_volatility_features(history)
 
@@ -769,13 +1253,23 @@ class FeatureSequenceTests(TestCase):
 
     def test_sequence_windows_are_chronological_and_fixed_shape(self):
         observations = [
-            Observation(str(i), np.ones(2) * i, np.ones((2, 3)) * i, np.ones(3), np.ones(2, bool), np.ones((2, 2), bool), ("a", "b"))
+            Observation(
+                str(i),
+                np.ones(2) * i,
+                np.ones((2, 3)) * i,
+                np.ones(3),
+                np.ones(2, bool),
+                np.ones((2, 2), bool),
+                ("a", "b"),
+            )
             for i in range(3)
         ]
         windows = build_windows(observations, window=2)
 
         self.assertEqual(len(windows), 2)
-        self.assertEqual(windows[0].features.shape, (2, observation_vector(observations[0]).size))
+        self.assertEqual(
+            windows[0].features.shape, (2, observation_vector(observations[0]).size)
+        )
         self.assertEqual(windows[0].features[0, 0], 0)
         self.assertEqual(windows[1].features[0, 0], 1)
 
@@ -789,24 +1283,26 @@ class FeatureSequenceTests(TestCase):
                 ("call", call_iv, 5.5),
                 ("put", put_iv, 4.8),
             ):
-                rows.append({
-                    "collectedAt": "2026-07-21T14:00:00Z",
-                    "contractSymbol": f"{expiration}-{option_type}",
-                    "expiration": expiration,
-                    "optionType": option_type,
-                    "bid": mid - 0.1,
-                    "ask": mid + 0.1,
-                    "lastPrice": mid,
-                    "strike": 100,
-                    "underlyingPrice": 101,
-                    "riskFreeRate": 0.04,
-                    "dividendYield": 0.01,
-                    "timeToExpiryYears": years,
-                    "impliedVolatility": volatility,
-                    "volume": 10,
-                    "openInterest": 20,
-                    "lastTradeDate": "2026-07-21T13:59:00Z",
-                })
+                rows.append(
+                    {
+                        "collectedAt": "2026-07-21T14:00:00Z",
+                        "contractSymbol": f"{expiration}-{option_type}",
+                        "expiration": expiration,
+                        "optionType": option_type,
+                        "bid": mid - 0.1,
+                        "ask": mid + 0.1,
+                        "lastPrice": mid,
+                        "strike": 100,
+                        "underlyingPrice": 101,
+                        "riskFreeRate": 0.04,
+                        "dividendYield": 0.01,
+                        "timeToExpiryYears": years,
+                        "impliedVolatility": volatility,
+                        "volume": 10,
+                        "openInterest": 20,
+                        "lastTradeDate": "2026-07-21T13:59:00Z",
+                    }
+                )
 
         engineered = engineer_snapshot(pd.DataFrame(rows))
         front = engineered[engineered["expiration"].eq("2026-08-21")]
@@ -827,12 +1323,14 @@ class FeatureSequenceTests(TestCase):
         self.assertTrue(np.isfinite(engineered[list(ENGINEERED_FEATURES)]).all().all())
 
     def test_term_structure_and_surface_changes_require_explicit_coverage(self):
-        previous = engineer_snapshot(surface_snapshot(
-            "2026-07-21T14:00:00Z",
-            (0.20, 0.24, 0.31),
-            front_call_wing=0.24,
-            front_put_wing=0.28,
-        ))
+        previous = engineer_snapshot(
+            surface_snapshot(
+                "2026-07-21T14:00:00Z",
+                (0.20, 0.24, 0.31),
+                front_call_wing=0.24,
+                front_put_wing=0.28,
+            )
+        )
         current = engineer_snapshot(
             surface_snapshot(
                 "2026-07-21T14:01:00Z",
@@ -854,13 +1352,22 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(prior["atmTermSlopeChangeCoverage"], 0)
         self.assertAlmostEqual(now["frontAtmIvChange"], 0.02)
         self.assertEqual(now["frontAtmIvChangeCoverage"], 1)
+        self.assertAlmostEqual(now["frontAtmIvVelocityPerHour"], 1.2)
         self.assertAlmostEqual(
             now["front25DeltaRiskReversalChange"],
             -0.02,
         )
         self.assertAlmostEqual(
+            now["front25DeltaRiskReversalVelocityPerHour"],
+            -1.2,
+        )
+        self.assertAlmostEqual(
             now["front25DeltaButterflyChange"],
             0.02,
+        )
+        self.assertAlmostEqual(
+            now["front25DeltaButterflyVelocityPerHour"],
+            1.2,
         )
         self.assertEqual(now["frontWingChangeCoverage"], 1)
         self.assertAlmostEqual(
@@ -868,9 +1375,55 @@ class FeatureSequenceTests(TestCase):
             now["atmTermStructureSlope"] - prior["atmTermStructureSlope"],
         )
         self.assertEqual(now["atmTermSlopeChangeCoverage"], 1)
+        self.assertAlmostEqual(
+            now["atmTermStructureSlopeVelocityPerHour"],
+            np.clip(now["atmTermStructureSlopeChange"] * 60, -2.0, 2.0),
+        )
+        self.assertTrue((previous[list(SURFACE_VELOCITY_FEATURES)] == 0).all().all())
         self.assertTrue(
             np.isfinite(current[list(MARKET_ENGINEERED_FEATURES)]).all().all()
         )
+
+    def test_surface_velocity_uses_elapsed_time_and_requires_gap_coverage(self):
+        previous = engineer_snapshot(
+            surface_snapshot(
+                "2026-07-21T14:00:00Z",
+                (0.20, 0.24, 0.31),
+                front_call_wing=0.24,
+                front_put_wing=0.28,
+            )
+        )
+        one_hour = engineer_snapshot(
+            surface_snapshot(
+                "2026-07-21T15:00:00Z",
+                (0.22, 0.255, 0.34),
+                front_call_wing=0.27,
+                front_put_wing=0.33,
+            ),
+            previous,
+        )
+        repeated_time = engineer_snapshot(
+            surface_snapshot(
+                "2026-07-21T14:00:00Z",
+                (0.22, 0.255, 0.34),
+                front_call_wing=0.27,
+                front_put_wing=0.33,
+            ),
+            previous,
+        )
+
+        self.assertAlmostEqual(
+            one_hour.iloc[0]["frontAtmIvVelocityPerHour"],
+            0.02,
+        )
+        self.assertAlmostEqual(
+            one_hour.iloc[0]["front25DeltaRiskReversalVelocityPerHour"],
+            -0.02,
+        )
+        self.assertTrue(
+            (repeated_time[list(SURFACE_VELOCITY_FEATURES)] == 0).all().all()
+        )
+        self.assertEqual(repeated_time.iloc[0]["snapshotGapCoverage"], 0)
 
     def test_dimensionless_vector_is_bounded_and_price_scale_invariant(self):
         def make_observation(scale: float) -> Observation:
@@ -909,24 +1462,36 @@ class FeatureSequenceTests(TestCase):
             market = np.zeros(len(MARKET_FEATURES), dtype=float)
             market[MARKET_FEATURES.index("underlyingPrice")] = 100 * scale
             market[MARKET_FEATURES.index("riskFreeRate")] = 0.04
+            market[MARKET_FEATURES.index("benchmarkReturn")] = 0.01
+            market[MARKET_FEATURES.index("relativeUnderlyingReturn")] = 0.02
+            market[MARKET_FEATURES.index("benchmarkQuoteAgeSeconds")] = 60
+            market[MARKET_FEATURES.index("benchmarkRealizedVol4")] = 0.2
+            market[MARKET_FEATURES.index("benchmarkLogReturn4")] = 0.03
+            market[MARKET_FEATURES.index("frontSmileCurvature")] = -0.03
+            market[MARKET_FEATURES.index("frontSmileFitRmsePct")] = 0.04
+            market[MARKET_FEATURES.index("frontAtmSmileResidualPct")] = 0.05
+            market[MARKET_FEATURES.index("easternCaptureDayFraction")] = 0.5
+            market[MARKET_FEATURES.index("easternCaptureClockCoverage")] = 1
             return Observation(
                 "now",
                 market,
                 contracts,
-                np.array([
-                    80_000 * scale,
-                    20_000 * scale,
-                    100_000 * scale,
-                    50,
-                    1 / scale,
-                    -10 * scale,
-                    20 * scale,
-                    10,
-                    30_000 * scale,
-                    20,
-                    0.5,
-                    0.75,
-                ]),
+                np.array(
+                    [
+                        80_000 * scale,
+                        20_000 * scale,
+                        100_000 * scale,
+                        50,
+                        1 / scale,
+                        -10 * scale,
+                        20 * scale,
+                        10,
+                        30_000 * scale,
+                        20,
+                        0.5,
+                        0.75,
+                    ]
+                ),
                 np.ones(1, dtype=bool),
                 np.ones((1, 3), dtype=bool),
                 ("C1",),
@@ -938,15 +1503,49 @@ class FeatureSequenceTests(TestCase):
 
         np.testing.assert_allclose(first[:contract_end], second[:contract_end])
         np.testing.assert_allclose(
-            first[contract_end:contract_end + 12],
-            second[contract_end:contract_end + 12],
+            first[contract_end : contract_end + 12],
+            second[contract_end : contract_end + 12],
         )
         np.testing.assert_allclose(
-            first[contract_end + 10:contract_end + 12],
+            first[contract_end + 10 : contract_end + 12],
             (0.5, 0.75),
         )
+        self.assertAlmostEqual(
+            first[MARKET_FEATURES.index("benchmarkReturn")],
+            np.log1p(1.0),
+        )
+        self.assertAlmostEqual(
+            first[MARKET_FEATURES.index("relativeUnderlyingReturn")],
+            np.log1p(2.0),
+        )
+        self.assertAlmostEqual(
+            first[MARKET_FEATURES.index("benchmarkQuoteAgeSeconds")],
+            np.log1p(60) / 10,
+        )
+        self.assertAlmostEqual(
+            first[MARKET_FEATURES.index("benchmarkRealizedVol4")],
+            np.log1p(0.2),
+        )
+        self.assertAlmostEqual(
+            first[MARKET_FEATURES.index("frontSmileCurvature")],
+            -np.log1p(0.03),
+        )
+        self.assertAlmostEqual(
+            first[MARKET_FEATURES.index("frontSmileFitRmsePct")],
+            np.log1p(0.04),
+        )
+        self.assertAlmostEqual(
+            first[MARKET_FEATURES.index("frontAtmSmileResidualPct")],
+            np.log1p(0.05),
+        )
         self.assertEqual(
-            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("buyFeasibleFraction")],
+            first[MARKET_FEATURES.index("easternCaptureDayFraction")],
+            0.5,
+        )
+        self.assertEqual(
+            first[
+                len(MARKET_FEATURES) + CONTRACT_FEATURES.index("buyFeasibleFraction")
+            ],
             0.25,
         )
         self.assertAlmostEqual(
@@ -970,12 +1569,15 @@ class FeatureSequenceTests(TestCase):
             np.log(10) / 10,
         )
         self.assertAlmostEqual(
-            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("positionLastTradeAgeSteps")],
+            first[
+                len(MARKET_FEATURES)
+                + CONTRACT_FEATURES.index("positionLastTradeAgeSteps")
+            ],
             np.log(100) / 10,
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v18")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v24")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
@@ -1014,10 +1616,7 @@ class FeatureSequenceTests(TestCase):
             -10,
         )
         self.assertEqual(
-            vector[
-                contract_start
-                + CONTRACT_FEATURES.index("impliedVolatility")
-            ],
+            vector[contract_start + CONTRACT_FEATURES.index("impliedVolatility")],
             0,
         )
 
@@ -1027,6 +1626,8 @@ class FeatureSequenceTests(TestCase):
         market[MARKET_FEATURES.index("riskFreeRate")] = 0.04
         market[MARKET_FEATURES.index("snapshotGapSeconds")] = 900
         market[MARKET_FEATURES.index("snapshotGapCoverage")] = 1
+        market[MARKET_FEATURES.index("underlyingQuoteAgeSeconds")] = 1_200
+        market[MARKET_FEATURES.index("underlyingQuoteAgeCoverage")] = 1
         market[MARKET_FEATURES.index("realizedVol4")] = 0.2
         market[MARKET_FEATURES.index("underlyingLogReturn4")] = 0.01
         market[MARKET_FEATURES.index("underlyingLogReturn16")] = -0.02
@@ -1038,20 +1639,14 @@ class FeatureSequenceTests(TestCase):
         market[MARKET_FEATURES.index("atmTermStructureSlope")] = 0.2
         market[MARKET_FEATURES.index("atmTermStructureCurvature")] = -0.1
         market[MARKET_FEATURES.index("frontAtmIvChange")] = -0.03
-        market[
-            MARKET_FEATURES.index("front25DeltaRiskReversalChange")
-        ] = 0.02
+        market[MARKET_FEATURES.index("front25DeltaRiskReversalChange")] = 0.02
         market[MARKET_FEATURES.index("atmTermSlopeChangeCoverage")] = 1
         market[MARKET_FEATURES.index("executableQuoteCoverage")] = 0.8
         market[MARKET_FEATURES.index("greekCoverage")] = 0.75
         market[MARKET_FEATURES.index("atmIvMinusRealizedVol4")] = 0.05
         market[MARKET_FEATURES.index("frontAtmIvZScore16")] = -1.25
-        market[
-            MARKET_FEATURES.index("frontAtmIvZScore16Coverage")
-        ] = 0.5
-        market[
-            MARKET_FEATURES.index("volatilityRiskPremiumZScore16")
-        ] = 2.5
+        market[MARKET_FEATURES.index("frontAtmIvZScore16Coverage")] = 0.5
+        market[MARKET_FEATURES.index("volatilityRiskPremiumZScore16")] = 2.5
         observation = Observation(
             "now",
             market,
@@ -1071,6 +1666,10 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(
             vector[MARKET_FEATURES.index("snapshotGapCoverage")],
             1,
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("underlyingQuoteAgeSeconds")],
+            np.log1p(1_200) / 10,
         )
         self.assertAlmostEqual(
             vector[MARKET_FEATURES.index("underlyingLogReturn4")],
@@ -1094,9 +1693,7 @@ class FeatureSequenceTests(TestCase):
             -1.25,
         )
         self.assertEqual(
-            vector[
-                MARKET_FEATURES.index("volatilityRiskPremiumZScore16")
-            ],
+            vector[MARKET_FEATURES.index("volatilityRiskPremiumZScore16")],
             2.5,
         )
         self.assertAlmostEqual(
@@ -1138,25 +1735,27 @@ class FeatureSequenceTests(TestCase):
             ("ATM-P", "put", 100, -0.50, 0.22, 1.0, 0.2),
             ("WING-P", "put", 90, -0.25, 0.28, 1.0, 0.2),
         ):
-            rows.append({
-                "collectedAt": "2026-07-21T14:00:00Z",
-                "contractSymbol": symbol,
-                "expiration": "2026-08-21",
-                "optionType": side,
-                "bid": bid,
-                "ask": 1.2,
-                "lastPrice": 1.1,
-                "strike": strike,
-                "underlyingPrice": 100,
-                "riskFreeRate": 0.0,
-                "dividendYield": 0.0,
-                "timeToExpiryYears": 31 / 365,
-                "impliedVolatility": volatility,
-                "delta": delta,
-                "gamma": 0.01,
-                "theta": -0.1,
-                "vega": vega,
-            })
+            rows.append(
+                {
+                    "collectedAt": "2026-07-21T14:00:00Z",
+                    "contractSymbol": symbol,
+                    "expiration": "2026-08-21",
+                    "optionType": side,
+                    "bid": bid,
+                    "ask": 1.2,
+                    "lastPrice": 1.1,
+                    "strike": strike,
+                    "underlyingPrice": 100,
+                    "riskFreeRate": 0.0,
+                    "dividendYield": 0.0,
+                    "timeToExpiryYears": 31 / 365,
+                    "impliedVolatility": volatility,
+                    "delta": delta,
+                    "gamma": 0.01,
+                    "theta": -0.1,
+                    "vega": vega,
+                }
+            )
 
         engineered = engineer_snapshot(pd.DataFrame(rows))
         first = engineered.iloc[0]
@@ -1170,22 +1769,26 @@ class FeatureSequenceTests(TestCase):
         self.assertAlmostEqual(first["greekCoverage"], 0.8)
 
     def test_executable_quote_coverage_does_not_require_a_last_trade(self):
-        rows = pd.DataFrame([{
-            "collectedAt": "2026-07-21T14:00:00Z",
-            "contractSymbol": "NO-LAST-TRADE",
-            "expiration": "2026-08-21",
-            "optionType": "call",
-            "bid": 1.0,
-            "ask": 1.2,
-            "lastPrice": np.nan,
-            "strike": 100,
-            "underlyingPrice": 100,
-            "impliedVolatility": 0.2,
-            "delta": 0.5,
-            "gamma": 0.01,
-            "theta": -0.1,
-            "vega": 0.2,
-        }])
+        rows = pd.DataFrame(
+            [
+                {
+                    "collectedAt": "2026-07-21T14:00:00Z",
+                    "contractSymbol": "NO-LAST-TRADE",
+                    "expiration": "2026-08-21",
+                    "optionType": "call",
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "lastPrice": np.nan,
+                    "strike": 100,
+                    "underlyingPrice": 100,
+                    "impliedVolatility": 0.2,
+                    "delta": 0.5,
+                    "gamma": 0.01,
+                    "theta": -0.1,
+                    "vega": 0.2,
+                }
+            ]
+        )
 
         engineered = engineer_snapshot(rows)
 
@@ -1198,19 +1801,21 @@ class FeatureSequenceTests(TestCase):
             ("ATM-C", "call", 0.50, 0.20),
             ("ATM-P", "put", -0.50, 0.22),
         ):
-            rows.append({
-                "collectedAt": "2026-07-21T14:00:00Z",
-                "contractSymbol": symbol,
-                "expiration": "2026-08-21",
-                "optionType": side,
-                "bid": 1.0,
-                "ask": 1.2,
-                "lastPrice": 1.1,
-                "strike": 100,
-                "underlyingPrice": 100,
-                "impliedVolatility": volatility,
-                "delta": delta,
-            })
+            rows.append(
+                {
+                    "collectedAt": "2026-07-21T14:00:00Z",
+                    "contractSymbol": symbol,
+                    "expiration": "2026-08-21",
+                    "optionType": side,
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "lastPrice": 1.1,
+                    "strike": 100,
+                    "underlyingPrice": 100,
+                    "impliedVolatility": volatility,
+                    "delta": delta,
+                }
+            )
 
         engineered = engineer_snapshot(pd.DataFrame(rows))
 
@@ -1222,22 +1827,24 @@ class FeatureSequenceTests(TestCase):
     def test_realized_volatility_is_backward_only_with_explicit_coverage(self):
         rows = []
         for index in range(18):
-            rows.append({
-                "collectedAt": pd.Timestamp("2026-07-21T14:00:00Z")
-                + pd.Timedelta(minutes=15 * index),
-                "contractSymbol": "TEST-C",
-                "symbol": "TEST",
-                "expiration": "2026-09-18",
-                "optionType": "call",
-                "strike": 100,
-                "bid": 1.0,
-                "ask": 1.2,
-                "lastPrice": 1.1,
-                "impliedVolatility": 0.2,
-                "underlyingPrice": 100 * 1.001**index,
-                "riskFreeRate": 0.04,
-                "greekModel": "black-scholes-merton",
-            })
+            rows.append(
+                {
+                    "collectedAt": pd.Timestamp("2026-07-21T14:00:00Z")
+                    + pd.Timedelta(minutes=15 * index),
+                    "contractSymbol": "TEST-C",
+                    "symbol": "TEST",
+                    "expiration": "2026-09-18",
+                    "optionType": "call",
+                    "strike": 100,
+                    "bid": 1.0,
+                    "ask": 1.2,
+                    "lastPrice": 1.1,
+                    "impliedVolatility": 0.2,
+                    "underlyingPrice": 100 * 1.001**index,
+                    "riskFreeRate": 0.04,
+                    "greekModel": "black-scholes-merton",
+                }
+            )
         rows[-1]["underlyingPrice"] = 1_000  # future shock
 
         with TemporaryDirectory() as directory:
@@ -1294,20 +1901,22 @@ class FeatureSequenceTests(TestCase):
         iv_values = (0.20, 0.22, 0.18, 0.21, 0.30, 0.24, 0.26, 0.23, 0.31, 1.50)
         rows = []
         for index, volatility in enumerate(iv_values):
-            rows.append({
-                "collectedAt": pd.Timestamp("2026-07-21T14:00:00Z")
-                + pd.Timedelta(minutes=15 * index),
-                "contractSymbol": "TEST-C",
-                "symbol": "TEST",
-                "expiration": "2026-09-18",
-                "optionType": "call",
-                "strike": 100,
-                "bid": 1.0 + index * 0.01,
-                "ask": 1.2 + index * 0.01,
-                "lastPrice": 1.1 + index * 0.01,
-                "impliedVolatility": volatility,
-                "underlyingPrice": 100 * 1.001**index,
-            })
+            rows.append(
+                {
+                    "collectedAt": pd.Timestamp("2026-07-21T14:00:00Z")
+                    + pd.Timedelta(minutes=15 * index),
+                    "contractSymbol": "TEST-C",
+                    "symbol": "TEST",
+                    "expiration": "2026-09-18",
+                    "optionType": "call",
+                    "strike": 100,
+                    "bid": 1.0 + index * 0.01,
+                    "ask": 1.2 + index * 0.01,
+                    "lastPrice": 1.1 + index * 0.01,
+                    "impliedVolatility": volatility,
+                    "underlyingPrice": 100 * 1.001**index,
+                }
+            )
 
         with TemporaryDirectory() as directory:
             data_dir = Path(directory)
@@ -1341,16 +1950,16 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(fourth["frontAtmIvZScore16Coverage"], 4 / 16)
 
         eighth = full.snapshots[8].frame.iloc[0]
-        prior_premium = np.asarray([
-            full.snapshots[index].frame.iloc[0]["atmIvMinusRealizedVol4"]
-            for index in range(4, 8)
-        ])
+        prior_premium = np.asarray(
+            [
+                full.snapshots[index].frame.iloc[0]["atmIvMinusRealizedVol4"]
+                for index in range(4, 8)
+            ]
+        )
         self.assertAlmostEqual(
             eighth["volatilityRiskPremiumZScore16"],
-            (
-                eighth["atmIvMinusRealizedVol4"]
-                - prior_premium.mean()
-            ) / prior_premium.std(),
+            (eighth["atmIvMinusRealizedVol4"] - prior_premium.mean())
+            / prior_premium.std(),
         )
         self.assertEqual(
             eighth["volatilityRiskPremiumZScore16Coverage"],

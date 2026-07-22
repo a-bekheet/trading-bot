@@ -2,22 +2,20 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import call, patch
 
-from trading_bot.market_data.service import (
+from trading_bot.training.arena_service import (
     LAUNCH_AGENT_LABEL,
     _bootstrap_launch_agent,
     launch_agent_payload,
 )
 
 
-class CollectorServiceTests(TestCase):
-    def test_launch_agent_runs_collector_with_absolute_paths_and_restart(self):
+class ArenaServiceTests(TestCase):
+    def test_launch_agent_runs_readiness_watcher_with_absolute_paths(self):
         payload = launch_agent_payload(
             Path("/repo/.venv/bin/python"),
             Path("/repo"),
             Path("/repo/data"),
-            interval=900,
-            ticker_delay=0.5,
-            expirations=1,
+            poll_seconds=60.0,
         )
 
         self.assertEqual(payload["Label"], LAUNCH_AGENT_LABEL)
@@ -27,28 +25,22 @@ class CollectorServiceTests(TestCase):
             [
                 "/repo/.venv/bin/python",
                 "-m",
-                "trading_bot.market_data.collector",
-                "--output-dir",
+                "trading_bot.training.arena_watch",
+                "--data-dir",
                 "/repo/data",
-                "--interval",
-                "900",
-                "--ticker-delay",
-                "0.5",
-                "--benchmark-symbol",
-                "SPY",
-                "--expirations",
-                "1",
+                "--poll-seconds",
+                "60.0",
             ],
         )
         self.assertTrue(payload["RunAtLoad"])
         self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
         self.assertEqual(
             payload["StandardErrorPath"],
-            "/repo/data/collector.stderr.log",
+            "/repo/data/arena-watch.stderr.log",
         )
 
-    @patch("trading_bot.market_data.service.time.sleep")
-    @patch("trading_bot.market_data.service._launchctl")
+    @patch("trading_bot.training.arena_service.time.sleep")
+    @patch("trading_bot.training.arena_service._launchctl")
     def test_bootstrap_retries_transient_launchctl_failure(self, launchctl, sleep):
         from subprocess import CalledProcessError
 
@@ -57,7 +49,7 @@ class CollectorServiceTests(TestCase):
             None,
         )
 
-        _bootstrap_launch_agent("gui/501", Path("/tmp/collector.plist"))
+        _bootstrap_launch_agent("gui/501", Path("/tmp/arena.plist"))
 
         self.assertEqual(launchctl.call_count, 2)
         self.assertEqual(sleep.call_args_list, [call(0.25)])

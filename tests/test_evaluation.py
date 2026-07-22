@@ -28,10 +28,57 @@ class EvaluationTests(TestCase):
 
         self.assertEqual(len(trace.timestamps), trace.report.steps)
         self.assertEqual(len(trace.step_returns), trace.report.steps)
+        self.assertEqual(len(trace.navs), trace.report.steps + 1)
+        self.assertEqual(len(trace.decisions), trace.report.steps)
+        self.assertEqual(trace.navs[0], trace.report.initial_nav)
+        self.assertEqual(trace.navs[-1], trace.report.final_nav)
+        self.assertEqual(
+            sum(len(decision["executions"]) for decision in trace.decisions),
+            trace.report.executions,
+        )
+        self.assertTrue(all("orders" in decision for decision in trace.decisions))
         self.assertAlmostEqual(
             np.prod(1 + np.asarray(trace.step_returns)) - 1,
             trace.report.total_return,
         )
+        self.assertGreaterEqual(
+            trace.report.delta_notional_weight_coverage,
+            0,
+        )
+
+    def test_episode_report_measures_market_beta_and_delta_notional(self):
+        source = three_snapshot_dataset()
+        rows = []
+        for index, snapshot in enumerate(source.snapshots):
+            frame = snapshot.frame.copy()
+            frame["underlyingPrice"] = (100.0, 101.0, 99.0)[index]
+            rows.append(type(snapshot)(snapshot.timestamp, frame))
+        env = OptionsEnv(
+            type(source)(tuple(rows), source.symbol),
+            slot_count=2,
+            underlying_commission_per_share=0.0,
+            underlying_slippage_bps=0.0,
+        )
+
+        def buy_underlying(observation):
+            action = np.zeros(observation.action_mask.shape[0], dtype=int)
+            feasible = np.flatnonzero(observation.action_mask[-1, 1:])
+            if len(feasible):
+                action[-1] = int(feasible[0] + 1)
+            return action
+
+        report = run_episode_trace(env, buy_underlying, seed=12).report
+
+        self.assertEqual(report.return_beta_coverage, 1.0)
+        self.assertEqual(report.return_correlation_coverage, 1.0)
+        self.assertGreater(report.return_beta_to_underlying, 0)
+        self.assertGreater(report.return_correlation_to_underlying, 0)
+        self.assertGreater(report.mean_abs_delta_notional_weight, 0)
+        self.assertGreaterEqual(
+            report.max_abs_delta_notional_weight,
+            report.mean_abs_delta_notional_weight,
+        )
+        self.assertEqual(report.delta_notional_weight_coverage, 1.0)
 
     def test_paired_block_bootstrap_is_deterministic_and_detects_lift(self):
         baseline = np.sin(np.arange(64) / 4) * 0.002
@@ -181,6 +228,7 @@ class EvaluationTests(TestCase):
                 portfolio_valuation="midpoint",
                 reward_drawdown_penalty=2.0,
                 reward_downside_penalty=3.0,
+                max_underlying_quote_age_seconds=300.0,
                 underlying_lot_size=25,
                 underlying_commission_per_share=0.01,
                 underlying_slippage_bps=10,
@@ -212,5 +260,10 @@ class EvaluationTests(TestCase):
         self.assertEqual(stressed.reward_downside_penalty, 3.0)
         self.assertEqual(stressed.manifest.reward_drawdown_penalty, 2.0)
         self.assertEqual(stressed.manifest.reward_downside_penalty, 3.0)
+        self.assertEqual(stressed.max_underlying_quote_age_seconds, 300.0)
+        self.assertEqual(
+            stressed.manifest.max_underlying_quote_age_seconds,
+            300.0,
+        )
         self.assertAlmostEqual(base_info["fees"], 0.25)
         self.assertAlmostEqual(stressed_info["fees"], 0.5)

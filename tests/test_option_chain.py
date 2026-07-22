@@ -24,6 +24,7 @@ class FakeTicker:
             puts=f"puts-{expiration}",
             underlying={
                 "regularMarketPrice": 200,
+                "regularMarketTime": 1_784_700_000,
                 "dividendYield": 0.5,
                 "marketState": "REGULAR",
             },
@@ -59,7 +60,33 @@ class FetchOptionChainTests(TestCase):
 
         self.assertEqual(snapshot.market_state, "REGULAR")
         self.assertEqual(snapshot.spot, 200)
+        self.assertEqual(snapshot.underlying_price_source, "regularMarketPrice")
+        self.assertEqual(
+            snapshot.underlying_quote_time_source,
+            "regularMarketTime",
+        )
         self.assertEqual(len(snapshot.chains), 2)
+
+    @patch("trading_bot.market_data.option_chain.yf.Ticker")
+    def test_pre_market_snapshot_uses_pre_market_price_pair(self, ticker):
+        ticker.return_value.options = ("2026-08-21",)
+        ticker.return_value.option_chain.return_value = SimpleNamespace(
+            calls="calls",
+            puts="puts",
+            underlying={
+                "marketState": "PRE",
+                "preMarketPrice": 201,
+                "preMarketTime": 1_784_710_000,
+                "regularMarketPrice": 200,
+                "regularMarketTime": 1_784_700_000,
+            },
+        )
+
+        snapshot = fetch_option_chain_snapshot("AAPL")
+
+        self.assertEqual(snapshot.spot, 201)
+        self.assertEqual(snapshot.underlying_price_source, "preMarketPrice")
+        self.assertEqual(snapshot.underlying_quote_time_source, "preMarketTime")
 
     def test_rejects_invalid_expiration_count_before_network_access(self):
         with self.assertRaisesRegex(ValueError, "expiration_count"):

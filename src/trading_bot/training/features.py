@@ -8,6 +8,7 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
+from trading_bot.market_data.freshness import underlying_quote_age
 from trading_bot.market_data.market_state import market_state_features
 
 
@@ -17,12 +18,55 @@ VOLATILITY_REGIME_MIN_HISTORY = 4
 VOLATILITY_REGIME_ZSCORE_CLIP = 8.0
 FRONT_ATM_LOG_MONEYNESS_TOLERANCE = 0.10
 FRONT_WING_DELTA_TOLERANCE = 0.15
+SMILE_FIT_MIN_POINTS = 5
+SMILE_FIT_MAX_ABS_FORWARD_LOG_MONEYNESS = 0.35
+SMILE_FIT_REFERENCE_LOG_MONEYNESS = 0.05
+SMILE_FIT_FEATURES = (
+    "frontSmileCurvature",
+    "frontSmileFitRmsePct",
+    "frontAtmSmileResidualPct",
+    "frontSmileFitCoverage",
+)
+CONTRACT_SMILE_RESIDUAL_FEATURES = (
+    "smileResidualPct",
+    "smileResidualCoverage",
+)
+CONTRACT_SMILE_RESIDUAL_MAX_ABS = 5.0
+SURFACE_VELOCITY_MAX_ABS_PER_HOUR = 2.0
+SURFACE_VELOCITY_FEATURES = (
+    "frontAtmIvVelocityPerHour",
+    "front25DeltaRiskReversalVelocityPerHour",
+    "front25DeltaButterflyVelocityPerHour",
+    "atmTermStructureSlopeVelocityPerHour",
+)
+INTRADAY_CLOCK_FEATURES = (
+    "easternCaptureDayFraction",
+    "easternCaptureClockCoverage",
+)
+BENCHMARK_CONTEXT_FEATURES = (
+    "benchmarkReturn",
+    "benchmarkReturnCoverage",
+    "relativeUnderlyingReturn",
+    "relativeUnderlyingReturnCoverage",
+    "benchmarkQuoteAgeSeconds",
+    "benchmarkQuoteAgeCoverage",
+    "benchmarkRealizedVol4",
+    "benchmarkRealizedVol4Coverage",
+    "benchmarkLogReturn4",
+    "benchmarkRealizedVol16",
+    "benchmarkRealizedVol16Coverage",
+    "benchmarkLogReturn16",
+)
 MARKET_ENGINEERED_FEATURES = (
     "underlyingReturn",
+    *BENCHMARK_CONTEXT_FEATURES,
     "regularMarketSession",
     "marketStateCoverage",
+    "underlyingQuoteAgeSeconds",
+    "underlyingQuoteAgeCoverage",
     "snapshotGapSeconds",
     "snapshotGapCoverage",
+    *INTRADAY_CLOCK_FEATURES,
     "realizedVol4",
     "realizedVol4Coverage",
     "underlyingLogReturn4",
@@ -34,6 +78,7 @@ MARKET_ENGINEERED_FEATURES = (
     "front25DeltaRiskReversal",
     "front25DeltaButterfly",
     "front25DeltaCoverage",
+    *SMILE_FIT_FEATURES,
     "atmTermStructureSlope",
     "atmTermStructureCurvature",
     "atmTermSlopeCoverage",
@@ -45,6 +90,7 @@ MARKET_ENGINEERED_FEATURES = (
     "frontWingChangeCoverage",
     "atmTermStructureSlopeChange",
     "atmTermSlopeChangeCoverage",
+    *SURFACE_VELOCITY_FEATURES,
     "executableQuoteCoverage",
     "greekCoverage",
     "atmIvMinusRealizedVol4",
@@ -68,14 +114,50 @@ CONTRACT_ARBITRAGE_FEATURES = (
     "butterflyArbitrageCoverage",
 )
 ENGINEERED_FEATURES = (
-    "midPrice", "spread", "spreadPct", "logMoneyness", "dteDays",
-    "volumeLog", "openInterestLog", "quoteAgeSeconds",
+    "midPrice",
+    "spread",
+    "spreadPct",
+    "logMoneyness",
+    "dteDays",
+    "volumeLog",
+    "openInterestLog",
+    "quoteAgeSeconds",
     *CONTRACT_DYNAMICS_FEATURES,
     *CONTRACT_ARBITRAGE_FEATURES,
-    "forwardLogMoneyness", "extrinsicValuePct", "atmIv", "ivSkew",
-    "atmTermSlope", "putCallIvSpread", "parityResidual",
+    "forwardLogMoneyness",
+    "extrinsicValuePct",
+    "atmIv",
+    "ivSkew",
+    *CONTRACT_SMILE_RESIDUAL_FEATURES,
+    "atmTermSlope",
+    "putCallIvSpread",
+    "parityResidual",
     *MARKET_ENGINEERED_FEATURES,
 )
+
+
+def intraday_clock_features(frame: pd.DataFrame) -> dict[str, float]:
+    """Encode causal America/New_York capture time as a day fraction."""
+    values = dict.fromkeys(INTRADAY_CLOCK_FEATURES, 0.0)
+    if frame.empty or "collectedAt" not in frame:
+        return values
+    timestamp = pd.to_datetime(
+        frame["collectedAt"].iloc[0],
+        errors="coerce",
+        utc=True,
+    )
+    if pd.isna(timestamp):
+        return values
+    eastern = timestamp.tz_convert("America/New_York")
+    seconds = (
+        eastern.hour * 3_600
+        + eastern.minute * 60
+        + eastern.second
+        + eastern.microsecond / 1_000_000
+    )
+    values["easternCaptureDayFraction"] = seconds / 86_400.0
+    values["easternCaptureClockCoverage"] = 1.0
+    return values
 
 
 def _executable_arbitrage_features(result: pd.DataFrame) -> None:
@@ -85,29 +167,34 @@ def _executable_arbitrage_features(result: pd.DataFrame) -> None:
         for name in CONTRACT_ARBITRAGE_FEATURES
     }
     required = {
-        "expiration", "optionType", "strike", "underlyingPrice", "bid", "ask",
+        "expiration",
+        "optionType",
+        "strike",
+        "underlyingPrice",
+        "bid",
+        "ask",
     }
     if not required.issubset(result.columns) or result.empty:
         for name, feature_values in values.items():
             result[name] = feature_values
         return
 
-    surface = pd.DataFrame({
-        "position": np.arange(len(result)),
-        "expiration": result["expiration"].astype(str).to_numpy(),
-        "optionType": result["optionType"].astype(str).str.lower().to_numpy(),
-        "strike": pd.to_numeric(result["strike"], errors="coerce").to_numpy(),
-        "spot": pd.to_numeric(
-            result["underlyingPrice"],
-            errors="coerce",
-        ).to_numpy(),
-        "bid": pd.to_numeric(result["bid"], errors="coerce").to_numpy(),
-        "ask": pd.to_numeric(result["ask"], errors="coerce").to_numpy(),
-    })
+    surface = pd.DataFrame(
+        {
+            "position": np.arange(len(result)),
+            "expiration": result["expiration"].astype(str).to_numpy(),
+            "optionType": result["optionType"].astype(str).str.lower().to_numpy(),
+            "strike": pd.to_numeric(result["strike"], errors="coerce").to_numpy(),
+            "spot": pd.to_numeric(
+                result["underlyingPrice"],
+                errors="coerce",
+            ).to_numpy(),
+            "bid": pd.to_numeric(result["bid"], errors="coerce").to_numpy(),
+            "ask": pd.to_numeric(result["ask"], errors="coerce").to_numpy(),
+        }
+    )
     surface = surface[
-        ~surface["expiration"].str.strip().str.lower().isin(
-            ("", "nan", "nat", "none")
-        )
+        ~surface["expiration"].str.strip().str.lower().isin(("", "nan", "nat", "none"))
         & surface["optionType"].isin(("call", "put"))
         & np.isfinite(surface["strike"])
         & (surface["strike"] > 0)
@@ -153,11 +240,16 @@ def _executable_arbitrage_features(result: pd.DataFrame) -> None:
             else:
                 ordering_violation = bids[:-1] - asks[1:]
                 width_violation = bids[1:] - asks[:-1] - widths
-            violation = np.maximum.reduce((
-                ordering_violation,
-                width_violation,
-                np.zeros_like(widths),
-            )) / spot_scale
+            violation = (
+                np.maximum.reduce(
+                    (
+                        ordering_violation,
+                        width_violation,
+                        np.zeros_like(widths),
+                    )
+                )
+                / spot_scale
+            )
             np.maximum.at(vertical, left_positions, violation)
             np.maximum.at(vertical, right_positions, violation)
 
@@ -171,12 +263,13 @@ def _executable_arbitrage_features(result: pd.DataFrame) -> None:
             butterfly_coverage[left_positions] = 1.0
             butterfly_coverage[middle_positions] = 1.0
             butterfly_coverage[right_positions] = 1.0
-            violation = np.maximum(
-                bids[1:-1]
-                - left_weights * asks[:-2]
-                - right_weights * asks[2:],
-                0.0,
-            ) / spot_scale
+            violation = (
+                np.maximum(
+                    bids[1:-1] - left_weights * asks[:-2] - right_weights * asks[2:],
+                    0.0,
+                )
+                / spot_scale
+            )
             np.maximum.at(butterfly, left_positions, violation)
             np.maximum.at(butterfly, middle_positions, violation)
             np.maximum.at(butterfly, right_positions, violation)
@@ -254,9 +347,7 @@ def _contract_dynamics_features(
     result["ivChangeCoverage"] = iv_coverage.astype(float)
     covered_iv = iv_coverage.astype(bool)
     iv_change = np.zeros(len(result), dtype=float)
-    iv_change[covered_iv] = (
-        current_iv[covered_iv] - prior_iv[covered_iv]
-    )
+    iv_change[covered_iv] = current_iv[covered_iv] - prior_iv[covered_iv]
     result["ivChange"] = iv_change
 
 
@@ -264,22 +355,17 @@ def realized_volatility_features(
     spot_history: Sequence[tuple[pd.Timestamp, float]],
 ) -> dict[str, float]:
     """Backward-only return/volatility summaries and history coverage."""
-    result = {
-        f"realizedVol{window}": 0.0
-        for window in REALIZED_VOL_WINDOWS
-    }
-    result.update({
-        f"realizedVol{window}Coverage": 0.0
-        for window in REALIZED_VOL_WINDOWS
-    })
-    result.update({
-        f"underlyingLogReturn{window}": 0.0
-        for window in REALIZED_VOL_WINDOWS
-    })
+    result = {f"realizedVol{window}": 0.0 for window in REALIZED_VOL_WINDOWS}
+    result.update(
+        {f"realizedVol{window}Coverage": 0.0 for window in REALIZED_VOL_WINDOWS}
+    )
+    result.update(
+        {f"underlyingLogReturn{window}": 0.0 for window in REALIZED_VOL_WINDOWS}
+    )
     if len(spot_history) < 2:
         return result
 
-    recent = spot_history[-(max(REALIZED_VOL_WINDOWS) + 1):]
+    recent = spot_history[-(max(REALIZED_VOL_WINDOWS) + 1) :]
     timestamps = pd.to_datetime([item[0] for item in recent], utc=True)
     spots = np.asarray([item[1] for item in recent], dtype=np.float64)
     elapsed_seconds = np.diff(timestamps.view("int64")) / 1e9
@@ -333,6 +419,130 @@ def snapshot_gap_features(
     return {"snapshotGapSeconds": elapsed, "snapshotGapCoverage": 1.0}
 
 
+def underlying_quote_age_features(frame: pd.DataFrame) -> dict[str, float]:
+    """Expose provider-time freshness with an explicit availability mask."""
+    if frame.empty:
+        age, coverage = 0.0, 0.0
+    else:
+        collected_at = frame["collectedAt"].iloc[0] if "collectedAt" in frame else None
+        quote_time = (
+            frame["underlyingQuoteTime"].iloc[0]
+            if "underlyingQuoteTime" in frame
+            else None
+        )
+        age, coverage = underlying_quote_age(collected_at, quote_time)
+    return {
+        "underlyingQuoteAgeSeconds": age,
+        "underlyingQuoteAgeCoverage": coverage,
+    }
+
+
+def benchmark_history_point(
+    frame: pd.DataFrame,
+) -> tuple[pd.Timestamp, float] | None:
+    """Extract one provider-timestamped benchmark price when observable."""
+    required = {
+        "collectedAt",
+        "benchmarkSymbol",
+        "benchmarkPrice",
+        "benchmarkQuoteTime",
+    }
+    if frame.empty or not required.issubset(frame.columns):
+        return None
+    symbol = benchmark_symbol(frame)
+    if symbol is None:
+        return None
+    collected_at = frame["collectedAt"].iloc[0]
+    quote_time = frame["benchmarkQuoteTime"].iloc[0]
+    age, coverage = underlying_quote_age(collected_at, quote_time)
+    if coverage < 0.5 or age < 0:
+        return None
+    timestamp = pd.to_datetime(quote_time, errors="coerce", utc=True)
+    try:
+        price = float(frame["benchmarkPrice"].iloc[0])
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(timestamp) or not math.isfinite(price) or price <= 0:
+        return None
+    return timestamp, price
+
+
+def benchmark_symbol(frame: pd.DataFrame) -> str | None:
+    """Return a normalized declared benchmark identity when available."""
+    if frame.empty or "benchmarkSymbol" not in frame:
+        return None
+    value = frame["benchmarkSymbol"].iloc[0]
+    if pd.isna(value):
+        return None
+    normalized = str(value).strip().upper()
+    return normalized or None
+
+
+def benchmark_context_features(
+    current: pd.DataFrame,
+    previous: pd.DataFrame | None,
+    history: Sequence[tuple[pd.Timestamp, float]],
+) -> dict[str, float]:
+    """Return causal benchmark regime and ticker-relative return features."""
+    result = {name: 0.0 for name in BENCHMARK_CONTEXT_FEATURES}
+    if not current.empty:
+        collected_at = (
+            current["collectedAt"].iloc[0] if "collectedAt" in current else None
+        )
+        quote_time = (
+            current["benchmarkQuoteTime"].iloc[0]
+            if "benchmarkQuoteTime" in current
+            else None
+        )
+        age, coverage = underlying_quote_age(collected_at, quote_time)
+        result["benchmarkQuoteAgeSeconds"] = age
+        result["benchmarkQuoteAgeCoverage"] = coverage
+
+    rolling = realized_volatility_features(history)
+    for window in REALIZED_VOL_WINDOWS:
+        result[f"benchmarkRealizedVol{window}"] = rolling[f"realizedVol{window}"]
+        result[f"benchmarkRealizedVol{window}Coverage"] = rolling[
+            f"realizedVol{window}Coverage"
+        ]
+        result[f"benchmarkLogReturn{window}"] = rolling[f"underlyingLogReturn{window}"]
+
+    if previous is None or previous.empty:
+        return result
+    current_point = benchmark_history_point(current)
+    previous_point = benchmark_history_point(previous)
+    if (
+        current_point is None
+        or previous_point is None
+        or current_point[0] <= previous_point[0]
+    ):
+        return result
+    current_symbol = benchmark_symbol(current)
+    previous_symbol = benchmark_symbol(previous)
+    if current_symbol is None or current_symbol != previous_symbol:
+        return result
+    benchmark_return = current_point[1] / previous_point[1] - 1.0
+    if not math.isfinite(benchmark_return):
+        return result
+    result["benchmarkReturn"] = benchmark_return
+    result["benchmarkReturnCoverage"] = 1.0
+    try:
+        current_spot = float(current["underlyingPrice"].iloc[0])
+        previous_spot = float(previous["underlyingPrice"].iloc[0])
+    except (KeyError, TypeError, ValueError):
+        return result
+    if (
+        math.isfinite(current_spot)
+        and current_spot > 0
+        and math.isfinite(previous_spot)
+        and previous_spot > 0
+    ):
+        result["relativeUnderlyingReturn"] = (
+            current_spot / previous_spot - 1.0 - benchmark_return
+        )
+        result["relativeUnderlyingReturnCoverage"] = 1.0
+    return result
+
+
 def volatility_regime_observation(
     frame: pd.DataFrame,
 ) -> tuple[float | None, float | None]:
@@ -384,21 +594,26 @@ def volatility_regime_zscore_features(
     }
     current_values = volatility_regime_observation(current)
     recent = history[-VOLATILITY_REGIME_WINDOW:]
-    for value_index, (value_name, coverage_name) in enumerate((
-        ("frontAtmIvZScore16", "frontAtmIvZScore16Coverage"),
+    for value_index, (value_name, coverage_name) in enumerate(
         (
-            "volatilityRiskPremiumZScore16",
-            "volatilityRiskPremiumZScore16Coverage",
-        ),
-    )):
+            ("frontAtmIvZScore16", "frontAtmIvZScore16Coverage"),
+            (
+                "volatilityRiskPremiumZScore16",
+                "volatilityRiskPremiumZScore16Coverage",
+            ),
+        )
+    ):
         current_value = current_values[value_index]
         if current_value is None:
             continue
-        prior = np.asarray([
-            values[value_index]
-            for values in recent
-            if values[value_index] is not None
-        ], dtype=np.float64)
+        prior = np.asarray(
+            [
+                values[value_index]
+                for values in recent
+                if values[value_index] is not None
+            ],
+            dtype=np.float64,
+        )
         result[coverage_name] = len(prior) / VOLATILITY_REGIME_WINDOW
         if len(prior) < VOLATILITY_REGIME_MIN_HISTORY:
             continue
@@ -406,19 +621,26 @@ def volatility_regime_zscore_features(
         if not math.isfinite(scale) or scale <= 1e-12:
             continue
         score = (current_value - float(prior.mean())) / scale
-        result[value_name] = float(np.clip(
-            score,
-            -VOLATILITY_REGIME_ZSCORE_CLIP,
-            VOLATILITY_REGIME_ZSCORE_CLIP,
-        ))
+        result[value_name] = float(
+            np.clip(
+                score,
+                -VOLATILITY_REGIME_ZSCORE_CLIP,
+                VOLATILITY_REGIME_ZSCORE_CLIP,
+            )
+        )
     return result
 
 
 def _surface_features(result: pd.DataFrame) -> None:
     """Add causal cross-sectional option-surface features in place."""
     neutral = (
-        "forwardLogMoneyness", "extrinsicValuePct", "atmIv", "ivSkew",
-        "atmTermSlope", "putCallIvSpread", "parityResidual",
+        "forwardLogMoneyness",
+        "extrinsicValuePct",
+        "atmIv",
+        "ivSkew",
+        "atmTermSlope",
+        "putCallIvSpread",
+        "parityResidual",
     )
     if "optionType" not in result or "expiration" not in result:
         for name in neutral:
@@ -430,10 +652,14 @@ def _surface_features(result: pd.DataFrame) -> None:
     strike = pd.to_numeric(result["strike"], errors="coerce").fillna(0.0)
     spot = pd.to_numeric(result["underlyingPrice"], errors="coerce").fillna(0.0)
     iv = pd.to_numeric(result["impliedVolatility"], errors="coerce").fillna(0.0)
-    years = pd.to_numeric(
-        result.get("timeToExpiryYears", result["dteDays"] / 365),
-        errors="coerce",
-    ).clip(lower=0).fillna(0.0)
+    years = (
+        pd.to_numeric(
+            result.get("timeToExpiryYears", result["dteDays"] / 365),
+            errors="coerce",
+        )
+        .clip(lower=0)
+        .fillna(0.0)
+    )
     rate = pd.to_numeric(result.get("riskFreeRate", 0.0), errors="coerce")
     dividend = pd.to_numeric(result.get("dividendYield", 0.0), errors="coerce")
     if not isinstance(rate, pd.Series):
@@ -443,17 +669,14 @@ def _surface_features(result: pd.DataFrame) -> None:
     rate = rate.fillna(0.0)
     dividend = dividend.fillna(0.0)
 
-    result["forwardLogMoneyness"] = (
-        result["logMoneyness"] + (rate - dividend) * years
-    )
+    result["forwardLogMoneyness"] = result["logMoneyness"] + (rate - dividend) * years
     intrinsic = np.select(
         (option_type.eq("call"), option_type.eq("put")),
         ((spot - strike).clip(lower=0), (strike - spot).clip(lower=0)),
         default=0.0,
     )
     result["extrinsicValuePct"] = (
-        (result["midPrice"] - intrinsic).clip(lower=0)
-        / spot.replace(0, np.nan)
+        (result["midPrice"] - intrinsic).clip(lower=0) / spot.replace(0, np.nan)
     ).fillna(0.0)
 
     grouping = [expiration, option_type]
@@ -512,8 +735,142 @@ def _surface_features(result: pd.DataFrame) -> None:
     discounted_strike = strike * np.exp(-rate * years)
     parity = call_mid - put_mid - (discounted_spot - discounted_strike)
     result["parityResidual"] = (
-        pd.Series(parity, index=result.index) / spot.replace(0, np.nan)
-    ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        (pd.Series(parity, index=result.index) / spot.replace(0, np.nan))
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
+
+
+def _quadratic_smile_fit(
+    x: np.ndarray,
+    y: np.ndarray,
+) -> tuple[float, float, float] | None:
+    """Fit one stable smile and return curvature, RMSE, and LOO ATM residual."""
+    if len(x) < SMILE_FIT_MIN_POINTS or len(x) != len(y):
+        return None
+    center = float(x.mean())
+    scale = float(x.std())
+    if not math.isfinite(scale) or scale <= 1e-8:
+        return None
+    standardized = (x - center) / scale
+    design = np.column_stack(
+        (
+            np.ones(len(standardized), dtype=np.float64),
+            standardized,
+            np.square(standardized),
+        )
+    )
+    coefficients, _, rank, _ = np.linalg.lstsq(design, y, rcond=None)
+    if rank != 3 or not np.isfinite(coefficients).all():
+        return None
+    fitted = design @ coefficients
+    residual = y - fitted
+    level = float(np.median(y))
+    if not math.isfinite(level) or level <= 0:
+        return None
+
+    def fitted_iv(log_moneyness: float) -> float:
+        z = (log_moneyness - center) / scale
+        return float(coefficients @ np.asarray((1.0, z, z * z)))
+
+    reference = SMILE_FIT_REFERENCE_LOG_MONEYNESS
+    curvature = 0.5 * (fitted_iv(-reference) + fitted_iv(reference)) - fitted_iv(0.0)
+    rmse_pct = float(np.sqrt(np.mean(np.square(residual))) / level)
+    atm_position = int(np.argmin(np.abs(x)))
+    gram_inverse = np.linalg.pinv(design.T @ design)
+    leverage = float(design[atm_position] @ gram_inverse @ design[atm_position])
+    if not math.isfinite(leverage) or leverage >= 1.0 - 1e-8:
+        return None
+    atm_residual_pct = float(
+        residual[atm_position] / (1.0 - leverage) / y[atm_position]
+    )
+    values = (curvature, rmse_pct, atm_residual_pct)
+    return values if all(math.isfinite(value) for value in values) else None
+
+
+def _contract_smile_residual_features(result: pd.DataFrame) -> None:
+    """Add executable leave-one-out IV residuals within each observed smile."""
+    residuals = np.zeros(len(result), dtype=np.float64)
+    coverage = np.zeros(len(result), dtype=np.float64)
+    for name, values in zip(
+        CONTRACT_SMILE_RESIDUAL_FEATURES,
+        (residuals, coverage),
+        strict=True,
+    ):
+        result[name] = values
+    required = {
+        "expiration",
+        "optionType",
+        "forwardLogMoneyness",
+        "impliedVolatility",
+        "bid",
+        "ask",
+    }
+    if result.empty or not required.issubset(result.columns):
+        return
+
+    surface = pd.DataFrame(
+        {
+            "position": np.arange(len(result), dtype=np.int64),
+            "expiration": result["expiration"].astype(str).to_numpy(),
+            "optionType": result["optionType"].astype(str).str.lower().to_numpy(),
+            "x": pd.to_numeric(
+                result["forwardLogMoneyness"], errors="coerce"
+            ).to_numpy(),
+            "iv": pd.to_numeric(
+                result["impliedVolatility"], errors="coerce"
+            ).to_numpy(),
+            "bid": pd.to_numeric(result["bid"], errors="coerce").to_numpy(),
+            "ask": pd.to_numeric(result["ask"], errors="coerce").to_numpy(),
+        }
+    )
+    surface = surface[
+        surface["optionType"].isin(("call", "put"))
+        & np.isfinite(surface["x"])
+        & (surface["x"].abs() <= SMILE_FIT_MAX_ABS_FORWARD_LOG_MONEYNESS)
+        & np.isfinite(surface["iv"])
+        & (surface["iv"] > 0)
+        & np.isfinite(surface["bid"])
+        & np.isfinite(surface["ask"])
+        & (surface["bid"] > 0)
+        & (surface["ask"] > 0)
+        & (surface["bid"] <= surface["ask"])
+    ]
+    for _, group in surface.groupby(["expiration", "optionType"], sort=False):
+        if len(group) < SMILE_FIT_MIN_POINTS or group["x"].nunique() < 3:
+            continue
+        x = group["x"].to_numpy(dtype=np.float64)
+        iv = group["iv"].to_numpy(dtype=np.float64)
+        scale = float(x.std())
+        if not math.isfinite(scale) or scale <= 1e-8:
+            continue
+        standardized = (x - float(x.mean())) / scale
+        design = np.column_stack(
+            (
+                np.ones(len(group), dtype=np.float64),
+                standardized,
+                np.square(standardized),
+            )
+        )
+        coefficients, _, rank, _ = np.linalg.lstsq(design, iv, rcond=None)
+        if rank != 3 or not np.isfinite(coefficients).all():
+            continue
+        residual = iv - design @ coefficients
+        gram_inverse = np.linalg.pinv(design.T @ design)
+        leverage = np.einsum("ij,jk,ik->i", design, gram_inverse, design)
+        denominator = 1.0 - leverage
+        valid = np.isfinite(residual) & np.isfinite(denominator) & (denominator > 1e-8)
+        positions = group["position"].to_numpy(dtype=np.int64)[valid]
+        values = residual[valid] / denominator[valid] / iv[valid]
+        residuals[positions] = np.clip(
+            values,
+            -CONTRACT_SMILE_RESIDUAL_MAX_ABS,
+            CONTRACT_SMILE_RESIDUAL_MAX_ABS,
+        )
+        coverage[positions] = 1.0
+
+    result["smileResidualPct"] = residuals
+    result["smileResidualCoverage"] = coverage
 
 
 def _market_surface_features(result: pd.DataFrame) -> None:
@@ -524,6 +881,7 @@ def _market_surface_features(result: pd.DataFrame) -> None:
         "front25DeltaRiskReversal",
         "front25DeltaButterfly",
         "front25DeltaCoverage",
+        *SMILE_FIT_FEATURES,
         "atmTermStructureSlope",
         "atmTermStructureCurvature",
         "atmTermSlopeCoverage",
@@ -541,11 +899,7 @@ def _market_surface_features(result: pd.DataFrame) -> None:
         bid = pd.to_numeric(result["bid"], errors="coerce")
         ask = pd.to_numeric(result["ask"], errors="coerce")
         executable = (
-            np.isfinite(bid)
-            & np.isfinite(ask)
-            & (bid > 0)
-            & (ask > 0)
-            & (bid <= ask)
+            np.isfinite(bid) & np.isfinite(ask) & (bid > 0) & (ask > 0) & (bid <= ask)
         )
         result["executableQuoteCoverage"] = float(executable.mean())
     else:
@@ -571,18 +925,20 @@ def _market_surface_features(result: pd.DataFrame) -> None:
     if not required.issubset(result.columns):
         return
 
-    surface = pd.DataFrame({
-        "expiration": result["expiration"].astype(str),
-        "optionType": result["optionType"].astype(str).str.lower(),
-        "iv": pd.to_numeric(result["impliedVolatility"], errors="coerce"),
-        "delta": pd.to_numeric(result.get("delta"), errors="coerce"),
-        "forwardLogMoneyness": pd.to_numeric(
-            result["forwardLogMoneyness"],
-            errors="coerce",
-        ),
-        "dteDays": pd.to_numeric(result["dteDays"], errors="coerce"),
-        "executable": executable,
-    })
+    surface = pd.DataFrame(
+        {
+            "expiration": result["expiration"].astype(str),
+            "optionType": result["optionType"].astype(str).str.lower(),
+            "iv": pd.to_numeric(result["impliedVolatility"], errors="coerce"),
+            "delta": pd.to_numeric(result.get("delta"), errors="coerce"),
+            "forwardLogMoneyness": pd.to_numeric(
+                result["forwardLogMoneyness"],
+                errors="coerce",
+            ),
+            "dteDays": pd.to_numeric(result["dteDays"], errors="coerce"),
+            "executable": executable,
+        }
+    )
     surface = surface[
         surface["executable"]
         & np.isfinite(surface["iv"])
@@ -595,6 +951,64 @@ def _market_surface_features(result: pd.DataFrame) -> None:
 
     front_dte = float(surface["dteDays"].min())
     front = surface[np.isclose(surface["dteDays"], front_dte)]
+    coordinates = front[
+        np.isfinite(front["forwardLogMoneyness"])
+        & (
+            front["forwardLogMoneyness"].abs()
+            <= SMILE_FIT_MAX_ABS_FORWARD_LOG_MONEYNESS
+        )
+    ]
+    out_of_the_money = coordinates[
+        (
+            coordinates["optionType"].eq("call")
+            & (coordinates["forwardLogMoneyness"] <= 0)
+        )
+        | (
+            coordinates["optionType"].eq("put")
+            & (coordinates["forwardLogMoneyness"] >= 0)
+        )
+    ]
+    negative_points = int(
+        out_of_the_money.loc[
+            out_of_the_money["forwardLogMoneyness"] < 0,
+            "forwardLogMoneyness",
+        ].nunique()
+    )
+    positive_points = int(
+        out_of_the_money.loc[
+            out_of_the_money["forwardLogMoneyness"] > 0,
+            "forwardLogMoneyness",
+        ].nunique()
+    )
+    if (
+        negative_points >= 2
+        and positive_points >= 2
+        and float(out_of_the_money["forwardLogMoneyness"].min())
+        <= -SMILE_FIT_REFERENCE_LOG_MONEYNESS
+        and float(out_of_the_money["forwardLogMoneyness"].max())
+        >= SMILE_FIT_REFERENCE_LOG_MONEYNESS
+    ):
+        fit_points = (
+            out_of_the_money.groupby(
+                "forwardLogMoneyness",
+                sort=True,
+            )["iv"]
+            .median()
+            .reset_index()
+        )
+        fit = _quadratic_smile_fit(
+            fit_points["forwardLogMoneyness"].to_numpy(dtype=np.float64),
+            fit_points["iv"].to_numpy(dtype=np.float64),
+        )
+        if fit is not None:
+            result["frontSmileFitCoverage"] = 1.0
+            for name, value in zip(
+                SMILE_FIT_FEATURES[:-1],
+                fit,
+                strict=True,
+            ):
+                result[name] = value
+
     term_points = []
     for _, expiry_rows in surface.groupby("expiration", sort=False):
         expiry_atm_values = []
@@ -613,10 +1027,12 @@ def _market_surface_features(result: pd.DataFrame) -> None:
                 expiry_atm_values.append(float(side_rows.loc[atm_index, "iv"]))
         if expiry_atm_values:
             expiry_dte = float(expiry_rows["dteDays"].min())
-            term_points.append((
-                math.sqrt(max(expiry_dte / 365.25, 0.0)),
-                float(np.median(expiry_atm_values)),
-            ))
+            term_points.append(
+                (
+                    math.sqrt(max(expiry_dte / 365.25, 0.0)),
+                    float(np.median(expiry_atm_values)),
+                )
+            )
     term_points = sorted(set(term_points))
     result["atmTermSlopeCoverage"] = min(len(term_points) / 2, 1.0)
     result["atmTermCurvatureCoverage"] = min(len(term_points) / 3, 1.0)
@@ -624,9 +1040,7 @@ def _market_surface_features(result: pd.DataFrame) -> None:
         term_x = np.asarray([item[0] for item in term_points])
         term_iv = np.asarray([item[1] for item in term_points])
         if np.ptp(term_x) > 1e-12:
-            result["atmTermStructureSlope"] = float(
-                np.polyfit(term_x, term_iv, 1)[0]
-            )
+            result["atmTermStructureSlope"] = float(np.polyfit(term_x, term_iv, 1)[0])
     if len(term_points) >= 3:
         first = term_points[0]
         middle = term_points[len(term_points) // 2]
@@ -644,8 +1058,7 @@ def _market_surface_features(result: pd.DataFrame) -> None:
     atm_values = []
     for side in ("call", "put"):
         side_rows = front[
-            front["optionType"].eq(side)
-            & np.isfinite(front["forwardLogMoneyness"])
+            front["optionType"].eq(side) & np.isfinite(front["forwardLogMoneyness"])
         ]
         if side_rows.empty:
             continue
@@ -666,10 +1079,7 @@ def _market_surface_features(result: pd.DataFrame) -> None:
 
     wing_values: dict[str, float] = {}
     for side, target_delta in (("call", 0.25), ("put", -0.25)):
-        side_rows = front[
-            front["optionType"].eq(side)
-            & np.isfinite(front["delta"])
-        ]
+        side_rows = front[front["optionType"].eq(side) & np.isfinite(front["delta"])]
         if side_rows.empty:
             continue
         delta_distance = (side_rows["delta"] - target_delta).abs()
@@ -682,9 +1092,7 @@ def _market_surface_features(result: pd.DataFrame) -> None:
         call_iv = wing_values["call"]
         put_iv = wing_values["put"]
         result["front25DeltaRiskReversal"] = call_iv - put_iv
-        result["front25DeltaButterfly"] = (
-            (call_iv + put_iv) / 2 - front_atm_iv
-        )
+        result["front25DeltaButterfly"] = (call_iv + put_iv) / 2 - front_atm_iv
 
     for window in REALIZED_VOL_WINDOWS:
         coverage = float(result[f"realizedVol{window}Coverage"].iloc[0])
@@ -723,10 +1131,7 @@ def _surface_dynamics_features(
 
     current_atm_coverage = scalar(result, "frontAtmIvCoverage")
     previous_atm_coverage = scalar(previous, "frontAtmIvCoverage")
-    if (
-        current_atm_coverage is not None
-        and previous_atm_coverage is not None
-    ):
+    if current_atm_coverage is not None and previous_atm_coverage is not None:
         coverage = min(current_atm_coverage, previous_atm_coverage)
         values["frontAtmIvChangeCoverage"] = coverage
         current_atm = scalar(result, "frontAtmIv")
@@ -754,23 +1159,65 @@ def _surface_dynamics_features(
 
     current_term_coverage = scalar(result, "atmTermSlopeCoverage")
     previous_term_coverage = scalar(previous, "atmTermSlopeCoverage")
-    if (
-        current_term_coverage is not None
-        and previous_term_coverage is not None
-    ):
+    if current_term_coverage is not None and previous_term_coverage is not None:
         coverage = min(current_term_coverage, previous_term_coverage)
         values["atmTermSlopeChangeCoverage"] = coverage
         current_slope = scalar(result, "atmTermStructureSlope")
         previous_slope = scalar(previous, "atmTermStructureSlope")
-        if (
-            coverage >= 1
-            and current_slope is not None
-            and previous_slope is not None
-        ):
-            values["atmTermStructureSlopeChange"] = (
-                current_slope - previous_slope
-            )
+        if coverage >= 1 and current_slope is not None and previous_slope is not None:
+            values["atmTermStructureSlopeChange"] = current_slope - previous_slope
     result[list(values)] = tuple(values.values())
+
+
+def _surface_velocity_features(result: pd.DataFrame) -> None:
+    """Normalize covered surface changes by the causal elapsed wall time."""
+    result[list(SURFACE_VELOCITY_FEATURES)] = 0.0
+    if result.empty:
+        return
+    gap = float(result["snapshotGapSeconds"].iloc[0])
+    gap_coverage = float(result["snapshotGapCoverage"].iloc[0])
+    if not math.isfinite(gap) or gap <= 0 or gap_coverage < 1.0:
+        return
+    elapsed_hours = gap / 3_600.0
+    pairs = (
+        (
+            "frontAtmIvChange",
+            "frontAtmIvChangeCoverage",
+            "frontAtmIvVelocityPerHour",
+            0.0,
+        ),
+        (
+            "front25DeltaRiskReversalChange",
+            "frontWingChangeCoverage",
+            "front25DeltaRiskReversalVelocityPerHour",
+            1.0,
+        ),
+        (
+            "front25DeltaButterflyChange",
+            "frontWingChangeCoverage",
+            "front25DeltaButterflyVelocityPerHour",
+            1.0,
+        ),
+        (
+            "atmTermStructureSlopeChange",
+            "atmTermSlopeChangeCoverage",
+            "atmTermStructureSlopeVelocityPerHour",
+            1.0,
+        ),
+    )
+    for change_name, coverage_name, velocity_name, minimum_coverage in pairs:
+        change = float(result[change_name].iloc[0])
+        coverage = float(result[coverage_name].iloc[0])
+        coverage_sufficient = (
+            coverage > 0.0 if minimum_coverage == 0.0 else coverage >= minimum_coverage
+        )
+        if math.isfinite(change) and math.isfinite(coverage) and coverage_sufficient:
+            velocity = np.clip(
+                change / elapsed_hours,
+                -SURFACE_VELOCITY_MAX_ABS_PER_HOUR,
+                SURFACE_VELOCITY_MAX_ABS_PER_HOUR,
+            )
+            result[velocity_name] = float(velocity)
 
 
 def engineer_snapshot(
@@ -778,42 +1225,79 @@ def engineer_snapshot(
     previous: pd.DataFrame | None = None,
     *,
     spot_history: Sequence[tuple[pd.Timestamp, float]] = (),
-    volatility_history: Sequence[
-        tuple[float | None, float | None]
-    ] = (),
+    benchmark_history: Sequence[tuple[pd.Timestamp, float]] = (),
+    volatility_history: Sequence[tuple[float | None, float | None]] = (),
 ) -> pd.DataFrame:
     """Add only current or prior-snapshot features; never reads future rows."""
     result = frame.copy()
     bid = pd.to_numeric(result["bid"], errors="coerce").fillna(0.0)
     ask = pd.to_numeric(result["ask"], errors="coerce").fillna(0.0)
-    mid = ((bid + ask) / 2).where((bid > 0) & (ask > 0), pd.to_numeric(result["lastPrice"], errors="coerce"))
+    mid = ((bid + ask) / 2).where(
+        (bid > 0) & (ask > 0), pd.to_numeric(result["lastPrice"], errors="coerce")
+    )
     spot = pd.to_numeric(result["underlyingPrice"], errors="coerce").replace(0, np.nan)
     strike = pd.to_numeric(result["strike"], errors="coerce").replace(0, np.nan)
     timestamp = pd.to_datetime(result["collectedAt"], utc=True)
     expiration = pd.to_datetime(result["expiration"], errors="coerce", utc=True)
-    last_trade_series = result["lastTradeDate"] if "lastTradeDate" in result else pd.Series(pd.NaT, index=result.index)
+    last_trade_series = (
+        result["lastTradeDate"]
+        if "lastTradeDate" in result
+        else pd.Series(pd.NaT, index=result.index)
+    )
     last_trade = pd.to_datetime(last_trade_series, errors="coerce", utc=True)
     result["midPrice"] = mid.fillna(0.0)
     result["spread"] = (ask - bid).clip(lower=0).fillna(0.0)
-    result["spreadPct"] = (result["spread"] / result["midPrice"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    result["logMoneyness"] = np.log(spot / strike).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    result["dteDays"] = ((expiration - timestamp).dt.total_seconds() / 86400).clip(lower=0).fillna(0.0)
-    volume = result["volume"] if "volume" in result else pd.Series(0.0, index=result.index)
-    open_interest = result["openInterest"] if "openInterest" in result else pd.Series(0.0, index=result.index)
-    result["volumeLog"] = np.log1p(pd.to_numeric(volume, errors="coerce").clip(lower=0)).fillna(0.0)
-    result["openInterestLog"] = np.log1p(pd.to_numeric(open_interest, errors="coerce").clip(lower=0)).fillna(0.0)
-    result["quoteAgeSeconds"] = ((timestamp - last_trade).dt.total_seconds()).clip(lower=0).fillna(0.0)
+    result["spreadPct"] = (
+        (result["spread"] / result["midPrice"].replace(0, np.nan))
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
+    result["logMoneyness"] = (
+        np.log(spot / strike).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    )
+    result["dteDays"] = (
+        ((expiration - timestamp).dt.total_seconds() / 86400).clip(lower=0).fillna(0.0)
+    )
+    volume = (
+        result["volume"] if "volume" in result else pd.Series(0.0, index=result.index)
+    )
+    open_interest = (
+        result["openInterest"]
+        if "openInterest" in result
+        else pd.Series(0.0, index=result.index)
+    )
+    result["volumeLog"] = np.log1p(
+        pd.to_numeric(volume, errors="coerce").clip(lower=0)
+    ).fillna(0.0)
+    result["openInterestLog"] = np.log1p(
+        pd.to_numeric(open_interest, errors="coerce").clip(lower=0)
+    ).fillna(0.0)
+    result["quoteAgeSeconds"] = (
+        ((timestamp - last_trade).dt.total_seconds()).clip(lower=0).fillna(0.0)
+    )
     result["underlyingReturn"] = 0.0
     if previous is not None and not previous.empty:
         previous_spot = float(previous["underlyingPrice"].iloc[0])
-        current_spot = float(spot.iloc[0]) if np.isfinite(spot.iloc[0]) else previous_spot
-        result["underlyingReturn"] = current_spot / previous_spot - 1 if previous_spot else 0.0
+        current_spot = (
+            float(spot.iloc[0]) if np.isfinite(spot.iloc[0]) else previous_spot
+        )
+        result["underlyingReturn"] = (
+            current_spot / previous_spot - 1 if previous_spot else 0.0
+        )
+    for name, value in benchmark_context_features(
+        result,
+        previous,
+        benchmark_history,
+    ).items():
+        result[name] = value
     market_state = result["marketState"].iloc[0] if "marketState" in result else None
-    regular_market_session, market_state_coverage = market_state_features(
-        market_state
-    )
+    regular_market_session, market_state_coverage = market_state_features(market_state)
     result["regularMarketSession"] = regular_market_session
     result["marketStateCoverage"] = market_state_coverage
+    for name, value in intraday_clock_features(result).items():
+        result[name] = value
+    for name, value in underlying_quote_age_features(result).items():
+        result[name] = value
     _contract_dynamics_features(result, previous)
     _executable_arbitrage_features(result)
     for name, value in snapshot_gap_features(result, previous).items():
@@ -821,14 +1305,16 @@ def engineer_snapshot(
     for name, value in realized_volatility_features(spot_history).items():
         result[name] = value
     _surface_features(result)
+    _contract_smile_residual_features(result)
     _market_surface_features(result)
     _surface_dynamics_features(result, previous)
+    _surface_velocity_features(result)
     for name, value in volatility_regime_zscore_features(
         result,
         volatility_history,
     ).items():
         result[name] = value
-    result[list(ENGINEERED_FEATURES)] = result[list(ENGINEERED_FEATURES)].replace(
-        [np.inf, -np.inf], np.nan
-    ).fillna(0.0)
+    result[list(ENGINEERED_FEATURES)] = (
+        result[list(ENGINEERED_FEATURES)].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    )
     return result

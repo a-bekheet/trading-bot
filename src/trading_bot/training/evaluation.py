@@ -2,16 +2,49 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, replace
 from typing import Callable
 
 import numpy as np
 
-from trading_bot.training.env import OptionsEnv, PORTFOLIO_GREEK_SLICE
+from trading_bot.training.env import (
+    MARKET_FEATURES,
+    OptionsEnv,
+    PORTFOLIO_GREEK_SLICE,
+)
 from trading_bot.training.schemas import Observation
 
 
 Policy = Callable[[Observation], np.ndarray]
+UNDERLYING_PRICE_INDEX = MARKET_FEATURES.index("underlyingPrice")
+
+
+def _plain_json_value(value):
+    """Convert NumPy scalar containers emitted by the environment to Python."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: _plain_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json_value(item) for item in value]
+    return value
+
+
+def delta_notional_weight(observation: Observation) -> float | None:
+    """Return signed portfolio Delta notional divided by current NAV."""
+    spot = float(observation.market[UNDERLYING_PRICE_INDEX])
+    nav = float(observation.portfolio[2])
+    delta = float(observation.portfolio[PORTFOLIO_GREEK_SLICE.start])
+    if (
+        not np.isfinite(spot)
+        or spot <= 0
+        or not np.isfinite(nav)
+        or nav <= 0
+        or not np.isfinite(delta)
+    ):
+        return None
+    return delta * spot / nav
 
 
 @dataclass(frozen=True)
@@ -28,6 +61,15 @@ class EpisodeReport:
     downside_deviation: float
     step_sharpe: float
     step_sortino: float
+    underlying_total_return: float
+    underlying_step_volatility: float
+    return_beta_to_underlying: float
+    return_beta_coverage: float
+    return_correlation_to_underlying: float
+    return_correlation_coverage: float
+    mean_abs_delta_notional_weight: float
+    max_abs_delta_notional_weight: float
+    delta_notional_weight_coverage: float
     turnover: float
     fees: float
     invalid_actions: int
@@ -52,6 +94,8 @@ class EpisodeTrace:
     report: EpisodeReport
     timestamps: tuple[str, ...]
     step_returns: tuple[float, ...]
+    navs: tuple[float, ...]
+    decisions: tuple[dict[str, object], ...]
 
 
 @dataclass(frozen=True)
@@ -82,7 +126,10 @@ def run_episode_trace(
     """Run one policy and retain returns aligned to arrival timestamps."""
     observation, _ = env.reset(seed=seed)
     navs = [float(observation.portfolio[2])]
+    spots = [float(observation.market[UNDERLYING_PRICE_INDEX])]
+    delta_weights = [delta_notional_weight(observation)]
     timestamps = []
+    decisions = []
     total_reward = fees = 0.0
     invalid_actions = executions = steps = 0
     trade_notional = 0.0
@@ -90,7 +137,9 @@ def run_episode_trace(
         observation.portfolio[PORTFOLIO_GREEK_SLICE]
     ).astype(float)
     while True:
-        observation, reward, terminated, truncated, info = env.step(policy(observation))
+        decision_timestamp = observation.timestamp
+        action = np.asarray(policy(observation), dtype=np.int64)
+        observation, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
         fees += float(info["fees"])
         invalid_actions += int(info["invalid_action_count"])
@@ -101,7 +150,18 @@ def run_episode_trace(
             np.abs(observation.portfolio[PORTFOLIO_GREEK_SLICE]),
         )
         navs.append(float(observation.portfolio[2]))
+        spots.append(float(observation.market[UNDERLYING_PRICE_INDEX]))
+        delta_weights.append(delta_notional_weight(observation))
         timestamps.append(observation.timestamp)
+        decisions.append({
+            "decision_timestamp": decision_timestamp,
+            "arrival_timestamp": observation.timestamp,
+            "orders": action.tolist(),
+            "executions": _plain_json_value(info["executions"]),
+            "invalid_actions": int(info["invalid_action_count"]),
+            "reward": float(reward),
+            "nav": float(observation.portfolio[2]),
+        })
         steps += 1
         if terminated or truncated:
             break
@@ -122,6 +182,43 @@ def run_episode_trace(
     downside = float(
         np.sqrt(np.square(np.minimum(step_returns, 0.0)).mean())
     ) if len(step_returns) else 0.0
+    spot_array = np.asarray(spots, dtype=np.float64)
+    valid_spot_path = bool(
+        len(spot_array) == len(nav_array)
+        and np.isfinite(spot_array).all()
+        and np.all(spot_array > 0)
+    )
+    underlying_returns = (
+        spot_array[1:] / spot_array[:-1] - 1.0
+        if valid_spot_path
+        else np.zeros_like(step_returns)
+    )
+    underlying_variance = (
+        float(underlying_returns.var()) if len(underlying_returns) else 0.0
+    )
+    beta_covered = len(step_returns) >= 2 and underlying_variance > 1e-12
+    centered_returns = step_returns - mean_return
+    centered_underlying = underlying_returns - (
+        float(underlying_returns.mean()) if len(underlying_returns) else 0.0
+    )
+    beta = (
+        float(np.mean(centered_returns * centered_underlying))
+        / underlying_variance
+        if beta_covered
+        else 0.0
+    )
+    correlation_denominator = volatility * math.sqrt(underlying_variance)
+    correlation_covered = beta_covered and correlation_denominator > 1e-12
+    correlation = (
+        float(np.mean(centered_returns * centered_underlying))
+        / correlation_denominator
+        if correlation_covered
+        else 0.0
+    )
+    covered_delta_weights = np.asarray(
+        [abs(value) for value in delta_weights if value is not None],
+        dtype=np.float64,
+    )
     final_greeks = observation.portfolio[PORTFOLIO_GREEK_SLICE]
     report = EpisodeReport(
         seed=seed,
@@ -136,6 +233,31 @@ def run_episode_trace(
         downside_deviation=downside,
         step_sharpe=mean_return / volatility if volatility > 1e-12 else 0.0,
         step_sortino=mean_return / downside if downside > 1e-12 else 0.0,
+        underlying_total_return=(
+            float(spot_array[-1] / spot_array[0] - 1.0)
+            if valid_spot_path
+            else 0.0
+        ),
+        underlying_step_volatility=math.sqrt(underlying_variance),
+        return_beta_to_underlying=beta,
+        return_beta_coverage=float(beta_covered),
+        return_correlation_to_underlying=correlation,
+        return_correlation_coverage=float(correlation_covered),
+        mean_abs_delta_notional_weight=(
+            float(covered_delta_weights.mean())
+            if len(covered_delta_weights)
+            else 0.0
+        ),
+        max_abs_delta_notional_weight=(
+            float(covered_delta_weights.max())
+            if len(covered_delta_weights)
+            else 0.0
+        ),
+        delta_notional_weight_coverage=(
+            len(covered_delta_weights) / len(delta_weights)
+            if delta_weights
+            else 0.0
+        ),
         turnover=trade_notional / navs[0] if navs[0] else 0.0,
         fees=fees,
         invalid_actions=invalid_actions,
@@ -153,6 +275,8 @@ def run_episode_trace(
         report=report,
         timestamps=tuple(timestamps),
         step_returns=tuple(float(value) for value in step_returns),
+        navs=tuple(float(value) for value in navs),
+        decisions=tuple(decisions),
     )
 
 
@@ -311,6 +435,9 @@ def cost_stressed_environment(
         max_abs_gamma=source.risk_limits["gamma"],
         max_abs_theta=source.risk_limits["theta"],
         max_abs_vega=source.risk_limits["vega"],
+        max_underlying_quote_age_seconds=(
+            source.max_underlying_quote_age_seconds
+        ),
     )
 
 

@@ -1,3 +1,4 @@
+import json
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -163,6 +164,39 @@ def drawdown_dataset() -> SnapshotDataset:
 
 
 class OptionsEnvTests(TestCase):
+    def test_json_state_round_trip_preserves_portfolio_and_action_mask(self):
+        dataset = three_snapshot_dataset()
+        env = OptionsEnv(dataset, slot_count=2, max_quantity=1)
+        observation, _ = env.reset()
+        buy = np.zeros(env.action_shape[0], dtype=int)
+        buy[0] = 1
+        observation, _, _, _, _ = env.step(buy)
+        state = env.snapshot_state()
+
+        restored = OptionsEnv(dataset, slot_count=2, max_quantity=1)
+        restored_observation, info = restored.restore_state(state)
+
+        self.assertTrue(info["restored"])
+        self.assertEqual(restored.snapshot_state(), state)
+        np.testing.assert_allclose(restored_observation.market, observation.market)
+        np.testing.assert_allclose(
+            restored_observation.portfolio,
+            observation.portfolio,
+        )
+        np.testing.assert_array_equal(
+            restored_observation.action_mask,
+            observation.action_mask,
+        )
+
+    def test_state_restore_rejects_a_different_execution_contract(self):
+        env = OptionsEnv(demo_dataset(), slot_count=2, max_quantity=1)
+        env.reset()
+        state = env.snapshot_state()
+
+        incompatible = OptionsEnv(demo_dataset(), slot_count=2, max_quantity=2)
+        with self.assertRaisesRegex(ValueError, "contract is incompatible"):
+            incompatible.restore_state(state)
+
     def test_explicit_nonregular_session_masks_every_trade(self):
         source = demo_dataset()
         snapshots = []
@@ -197,6 +231,50 @@ class OptionsEnvTests(TestCase):
         self.assertTrue(info["market_session"]["trading_enabled"])
         self.assertEqual(
             info["market_session"]["fallback"],
+            "legacy_unknown_permits_research_demo_fills",
+        )
+
+    def test_explicit_stale_underlying_quote_masks_every_trade(self):
+        source = demo_dataset()
+        snapshots = []
+        for snapshot in source.snapshots:
+            frame = snapshot.frame.copy()
+            frame["marketState"] = "REGULAR"
+            frame["underlyingPriceSource"] = "regularMarketPrice"
+            frame["underlyingQuoteTimeSource"] = "regularMarketTime"
+            frame["underlyingQuoteTime"] = "2026-07-21T13:00:00Z"
+            snapshots.append(Snapshot(snapshot.timestamp, frame))
+        env = OptionsEnv(
+            SnapshotDataset(tuple(snapshots), source.symbol),
+            slot_count=2,
+            max_underlying_quote_age_seconds=1_200,
+        )
+
+        observation, info = env.reset()
+
+        self.assertTrue(observation.action_mask[:, 0].all())
+        self.assertFalse(observation.action_mask[:, 1:].any())
+        self.assertEqual(info["market_data_freshness"], {
+            "quote_time": "2026-07-21T13:00:00Z",
+            "quote_time_source": "regularMarketTime",
+            "price_source": "regularMarketPrice",
+            "age_seconds": 3_600.0,
+            "coverage": 1.0,
+            "max_age_seconds": 1_200,
+            "trading_enabled": False,
+            "fallback": None,
+        })
+
+    def test_missing_quote_time_is_visible_and_legacy_tradeable(self):
+        env = OptionsEnv(demo_dataset(), slot_count=2)
+
+        observation, info = env.reset()
+
+        self.assertTrue(observation.action_mask[:, 1:].any())
+        self.assertEqual(info["market_data_freshness"]["coverage"], 0.0)
+        self.assertTrue(info["market_data_freshness"]["trading_enabled"])
+        self.assertEqual(
+            info["market_data_freshness"]["fallback"],
             "legacy_unknown_permits_research_demo_fills",
         )
 
@@ -812,6 +890,7 @@ class OptionsEnvTests(TestCase):
 
         self.assertEqual(next_observation.timestamp, "2026-07-21T14:01:00+00:00")
         self.assertEqual(info["executions"][0]["price"], 1.2)
+        json.dumps(info["executions"], allow_nan=False)
         self.assertEqual(info["invalid_action_count"], 0)
         self.assertFalse(terminated)
         self.assertTrue(truncated)

@@ -10,8 +10,13 @@ import statistics
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
+from trading_bot.market_data.freshness import (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+    underlying_quote_age,
+)
+from trading_bot.market_data.market_state import market_state_features
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
     ShortVolatilityConfig,
@@ -42,6 +47,7 @@ from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
     FEATURE_ABLATION_GROUPS,
     feature_ablation_indices,
+    normalize_auxiliary_target_exclusions,
     observation_vector,
 )
 from trading_bot.training.splits import walk_forward_splits
@@ -56,7 +62,34 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v50"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v65"
+
+
+def _architecture_latency(
+    cache: dict[tuple[RecurrentConfig, int], dict[str, Any]],
+    recurrent_config: RecurrentConfig,
+    sequence_length: int,
+    training_seed: int,
+    measure: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """Measure one fixed actor graph once per fold and reuse it across seeds."""
+    key = (recurrent_config, sequence_length)
+    measured = cache.get(key)
+    reused = measured is not None
+    if measured is None:
+        measured = {
+            **measure(),
+            "measurement_scope": "recurrent_architecture_per_fold",
+            "measured_training_seed": training_seed,
+        }
+        cache[key] = measured
+    return {
+        **measured,
+        "measurement_reused": reused,
+        "reused_for_training_seed": (
+            training_seed != measured["measured_training_seed"]
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -67,9 +100,12 @@ class WalkForwardConfig:
     embargo: int = 0
     step_size: int | None = None
     max_train_size: int | None = None
+    latest_fold_only: bool = False
     training_seed_offsets: tuple[int, ...] = (0,)
     training_seed_worst_weight: float = 0.25
     training_seed_dispersion_penalty: float = 0.25
+    selection_score_tolerance: float = 0.0
+    activation_min_score_advantage: float = 0.0
     test_seeds: tuple[int, ...] = (20_001,)
     bootstrap_samples: int = 2_000
     bootstrap_block_length: int | None = None
@@ -95,6 +131,8 @@ class WalkForwardConfig:
     def __post_init__(self) -> None:
         if min(self.min_train_size, self.validation_size, self.test_size) < 2:
             raise ValueError("walk-forward partitions require at least two snapshots")
+        if not isinstance(self.latest_fold_only, bool):
+            raise ValueError("latest_fold_only must be a boolean")
         if (
             not self.training_seed_offsets
             or len(set(self.training_seed_offsets))
@@ -118,6 +156,20 @@ class WalkForwardConfig:
         ):
             raise ValueError(
                 "training_seed_dispersion_penalty must be finite and non-negative"
+            )
+        if (
+            not math.isfinite(self.selection_score_tolerance)
+            or self.selection_score_tolerance < 0
+        ):
+            raise ValueError(
+                "selection_score_tolerance must be finite and non-negative"
+            )
+        if (
+            not math.isfinite(self.activation_min_score_advantage)
+            or self.activation_min_score_advantage < 0
+        ):
+            raise ValueError(
+                "activation_min_score_advantage must be finite and non-negative"
             )
         if len(self.test_seeds) != 1:
             raise ValueError(
@@ -184,11 +236,14 @@ class ModelSpec:
     parameter_budget: int | None = None
     auxiliary_coefficient: float | None = None
     auxiliary_horizons: tuple[int, ...] = (1,)
+    auxiliary_target_exclusions: tuple[str, ...] = ()
+    delta_neutrality_coefficient: float | None = None
     time_aware_discounting: bool | None = None
     burn_in_steps: int | None = None
     start_sampling: str | None = None
     factorized_ppo_objective: str | None = None
     entropy_objective: str | None = None
+    critic_layer_norm: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid", "mixture"}:
@@ -196,10 +251,11 @@ class ModelSpec:
                 "model kind must be gru, lstm, hybrid, or mixture"
             )
         if self.encoder not in {
-            "flat", "graph", "graph_set", "attention_set",
+            "flat", "graph", "graph_set", "surface_graph_set", "attention_set",
         }:
             raise ValueError(
-                "model encoder must be flat, graph, graph_set, or attention_set"
+                "model encoder must be flat, graph, graph_set, "
+                "surface_graph_set, or attention_set"
             )
         if min(
             self.hidden_size,
@@ -237,6 +293,14 @@ class ModelSpec:
         ):
             raise ValueError(
                 "model auxiliary_coefficient must be finite and non-negative"
+            )
+        if self.delta_neutrality_coefficient is not None and (
+            not math.isfinite(self.delta_neutrality_coefficient)
+            or self.delta_neutrality_coefficient < 0
+        ):
+            raise ValueError(
+                "model delta_neutrality_coefficient must be finite and "
+                "non-negative"
             )
         if self.time_aware_discounting is not None and not isinstance(
             self.time_aware_discounting,
@@ -286,6 +350,17 @@ class ModelSpec:
                 "model entropy_objective must be feasible_normalized, "
                 "raw_mean, or None"
             )
+        if not isinstance(self.critic_layer_norm, bool):
+            raise ValueError("model critic_layer_norm must be a boolean")
+        if (
+            self.critic_layer_norm
+            and self.kind != "hybrid"
+            and self.hidden_size < 2
+        ):
+            raise ValueError(
+                "model critic_layer_norm requires a critic width of at "
+                "least two"
+            )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
             not normalized_horizons
@@ -300,6 +375,13 @@ class ModelSpec:
                 "model auxiliary_horizons must be unique positive increasing integers"
             )
         object.__setattr__(self, "auxiliary_horizons", normalized_horizons)
+        object.__setattr__(
+            self,
+            "auxiliary_target_exclusions",
+            normalize_auxiliary_target_exclusions(
+                self.auxiliary_target_exclusions
+            ),
+        )
         feature_ablation_indices(self.disabled_feature_groups, 1)
 
     @property
@@ -341,6 +423,7 @@ class ModelSpec:
                 len(AUXILIARY_TARGET_FEATURES) * len(self.auxiliary_horizons)
             ),
             auxiliary_horizons=self.auxiliary_horizons,
+            critic_layer_norm=self.critic_layer_norm,
             masked_input_indices=feature_ablation_indices(
                 self.disabled_feature_groups,
                 env.slot_count,
@@ -348,11 +431,20 @@ class ModelSpec:
             graph_relation_indices=tuple(
                 CONTRACT_FEATURES.index(name)
                 for name in (
-                    "impliedVolatility",
-                    "delta",
-                    "logMoneyness",
-                    "dteDays",
+                    ("forwardLogMoneyness", "dteDays")
+                    if self.encoder == "surface_graph_set"
+                    else (
+                        "impliedVolatility",
+                        "delta",
+                        "logMoneyness",
+                        "dteDays",
+                    )
                 )
+            ),
+            graph_option_side_index=(
+                CONTRACT_FEATURES.index("delta")
+                if self.encoder == "surface_graph_set"
+                else None
             ),
         )
 
@@ -371,7 +463,12 @@ def resolve_recurrent_config(
     if model_spec.parameter_budget is None:
         return requested, parameter_count(requested)
 
-    minimum = replace(requested, hidden_size=1)
+    minimum_hidden_size = (
+        2
+        if model_spec.critic_layer_norm and model_spec.kind != "hybrid"
+        else 1
+    )
+    minimum = replace(requested, hidden_size=minimum_hidden_size)
     minimum_count = parameter_count(minimum)
     if minimum_count > model_spec.parameter_budget:
         raise ValueError(
@@ -379,7 +476,7 @@ def resolve_recurrent_config(
             f"minimum {minimum_count} for {model_spec.encoder}:{model_spec.kind}"
         )
 
-    low = 1
+    low = minimum_hidden_size
     high = model_spec.hidden_size
     best = minimum
     best_count = minimum_count
@@ -398,6 +495,58 @@ def resolve_recurrent_config(
 
 def _reports_to_dict(reports) -> list[dict[str, Any]]:
     return [report.to_dict() for report in reports]
+
+
+def _traces_to_dict(traces) -> list[dict[str, Any]]:
+    """Serialize auditable paths without coupling the UI to Torch objects."""
+    return [
+        {
+            "report": trace.report.to_dict(),
+            "timestamps": list(trace.timestamps),
+            "step_returns": list(trace.step_returns),
+            "navs": list(trace.navs),
+            "decisions": list(trace.decisions),
+        }
+        for trace in traces
+    ]
+
+
+def _partition_data_quality(dataset: SnapshotDataset) -> dict[str, Any]:
+    """Persist the execution-provenance coverage behind a result path."""
+    session_coverage = []
+    regular = []
+    quote_time_coverage = []
+    for snapshot in dataset.snapshots:
+        first = snapshot.frame.iloc[0]
+        is_regular, has_session = market_state_features(
+            first.get("marketState")
+        )
+        _, has_quote_time = underlying_quote_age(
+            snapshot.timestamp,
+            first.get("underlyingQuoteTime"),
+        )
+        session_coverage.append(float(has_session))
+        regular.append(float(is_regular))
+        quote_time_coverage.append(float(has_quote_time))
+    count = len(dataset)
+    session_rate = sum(session_coverage) / count
+    regular_rate = sum(regular) / count
+    quote_time_rate = sum(quote_time_coverage) / count
+    if session_rate == 0:
+        execution_provenance = "legacy_unknown_session_fallback"
+    elif regular_rate == 1:
+        execution_provenance = "provider_confirmed_regular"
+    else:
+        execution_provenance = "provider_nonregular_present"
+    return {
+        "snapshot_count": count,
+        "market_state_coverage": session_rate,
+        "regular_session_fraction": regular_rate,
+        "underlying_quote_time_coverage": quote_time_rate,
+        "execution_provenance": execution_provenance,
+        "first_timestamp": dataset.snapshots[0].timestamp,
+        "last_timestamp": dataset.snapshots[-1].timestamp,
+    }
 
 
 def _normalize_model_specs(
@@ -500,6 +649,11 @@ def _training_seed_aggregate(
     score_mean = statistics.fmean(scores)
     score_worst = min(scores)
     score_std = statistics.pstdev(scores)
+    score_standard_error = (
+        statistics.stdev(scores) / math.sqrt(len(scores))
+        if len(scores) > 1
+        else 0.0
+    )
     aggregate_score = (
         (1.0 - config.training_seed_worst_weight) * score_mean
         + config.training_seed_worst_weight * score_worst
@@ -520,6 +674,7 @@ def _training_seed_aggregate(
         "validation_selection_score_mean": score_mean,
         "validation_selection_score_worst": score_worst,
         "validation_selection_score_std": score_std,
+        "validation_selection_score_standard_error": score_standard_error,
         "validation_total_reward_mean": statistics.fmean(rewards),
         "robust_training_seed_validation_score": aggregate_score,
         "worst_weight": config.training_seed_worst_weight,
@@ -532,15 +687,29 @@ def _training_seed_aggregate(
 
 def _select_seed_robust_group(
     groups: Sequence[dict[str, Any]],
+    *,
+    minimum_score_tolerance: float = 0.0,
 ) -> dict[str, Any]:
-    """Select an eligible architecture from its seed-robust validation score."""
+    """Apply a one-standard-error rule, then prefer simpler deployment."""
+    if not math.isfinite(minimum_score_tolerance) or minimum_score_tolerance < 0:
+        raise ValueError("minimum_score_tolerance must be finite and non-negative")
+
+    def delta_neutrality_enabled(group: dict[str, Any]) -> bool:
+        representative = group["representative"]
+        training = representative.get("training_config")
+        coefficient = (
+            training.delta_neutrality_coefficient
+            if training is not None
+            else representative["model_spec"].delta_neutrality_coefficient
+        )
+        return bool(coefficient is not None and coefficient > 0)
+
     eligible = [group for group in groups if group["latency_eligible"]]
     if not eligible:
         raise ValueError("at least one latency-eligible candidate is required")
-    return min(
-        eligible,
-        key=lambda group: (
-            -group["aggregate"]["robust_training_seed_validation_score"],
+
+    def tie_break(group: dict[str, Any]) -> tuple[Any, ...]:
+        return (
             int(
                 group["representative"][
                     "model_spec"
@@ -550,6 +719,15 @@ def _select_seed_robust_group(
                 group["representative"]["model_spec"].entropy_objective
                 == "raw_mean"
             ),
+            int(delta_neutrality_enabled(group)),
+            int(
+                group["representative"]["model_spec"].critic_layer_norm
+            ),
+            int(bool(
+                group["representative"][
+                    "model_spec"
+                ].auxiliary_target_exclusions
+            )),
             max(
                 run["inference_latency"]["median_microseconds"]
                 for run in group["replicates"]
@@ -570,8 +748,125 @@ def _select_seed_robust_group(
                 == "uniform"
             ),
             group["representative"]["model_id"],
+        )
+
+    raw_best = min(
+        eligible,
+        key=lambda group: (
+            -group["aggregate"]["robust_training_seed_validation_score"],
+            *tie_break(group),
         ),
     )
+    best_score = float(
+        raw_best["aggregate"]["robust_training_seed_validation_score"]
+    )
+    uncertainty_tolerance = float(
+        raw_best["aggregate"]["validation_selection_score_standard_error"]
+    )
+    effective_tolerance = max(
+        minimum_score_tolerance,
+        uncertainty_tolerance,
+    )
+    competitive = [
+        group
+        for group in eligible
+        if float(
+            group["aggregate"]["robust_training_seed_validation_score"]
+        )
+        >= best_score - effective_tolerance
+    ]
+    selected = min(competitive, key=tie_break)
+    selected_score = float(
+        selected["aggregate"]["robust_training_seed_validation_score"]
+    )
+    selected["selection_rule"] = {
+        "rule": "one_standard_error_with_materiality_floor",
+        "best_model_id": raw_best["representative"]["model_id"],
+        "best_score": best_score,
+        "minimum_score_tolerance": minimum_score_tolerance,
+        "uncertainty_tolerance": uncertainty_tolerance,
+        "effective_score_tolerance": effective_tolerance,
+        "competitive_candidate_count": len(competitive),
+        "competitive_model_ids": [
+            group["representative"]["model_id"] for group in competitive
+        ],
+        "selected_model_id": selected["representative"]["model_id"],
+        "selected_score": selected_score,
+        "score_sacrificed_for_simplicity": best_score - selected_score,
+    }
+    return selected
+
+
+def _validation_no_op_activation_gate(
+    validation_envs: Sequence[OptionsEnv],
+    *,
+    selected_score: float,
+    deployment_score: float | None = None,
+    minimum_score_advantage: float,
+    seed: int,
+) -> dict[str, Any]:
+    """Require both seed-robust selection and deployed weights to beat no-op."""
+    if not validation_envs:
+        raise ValueError("activation gate requires validation environments")
+    if not math.isfinite(selected_score):
+        raise ValueError("activation selected_score must be finite")
+    if deployment_score is None:
+        deployment_score = selected_score
+    if not math.isfinite(deployment_score):
+        raise ValueError("activation deployment_score must be finite")
+    if (
+        not math.isfinite(minimum_score_advantage)
+        or minimum_score_advantage < 0
+    ):
+        raise ValueError(
+            "activation minimum_score_advantage must be finite and non-negative"
+        )
+    reports = [
+        run_episode(environment, no_op, seed + index)
+        for index, environment in enumerate(validation_envs)
+    ]
+    for report in reports:
+        invariants = (
+            report.total_reward,
+            report.max_drawdown,
+            report.downside_deviation,
+            report.turnover,
+            report.fees,
+            report.executions,
+            report.invalid_actions,
+            report.mean_abs_delta_notional_weight,
+        )
+        if any(abs(float(value)) > 1e-12 for value in invariants):
+            raise RuntimeError(
+                "validation no-op baseline violated zero-risk invariants"
+            )
+    baseline_score = 0.0
+    robust_score_advantage = float(selected_score - baseline_score)
+    deployment_score_advantage = float(deployment_score - baseline_score)
+    score_advantage = min(
+        robust_score_advantage,
+        deployment_score_advantage,
+    )
+    activated = (
+        robust_score_advantage > minimum_score_advantage
+        and deployment_score_advantage > minimum_score_advantage
+    )
+    return {
+        "scope": "validation_only",
+        "benchmark": "no_op",
+        "rule": "robust_and_deployed_scores_exceed_no_op_plus_margin",
+        "minimum_score_advantage": minimum_score_advantage,
+        "selected_agent_score": score_advantage + baseline_score,
+        "robust_training_seed_score": selected_score,
+        "deployed_checkpoint_score": deployment_score,
+        "no_op_score": baseline_score,
+        "score_advantage": score_advantage,
+        "robust_score_advantage": robust_score_advantage,
+        "deployed_checkpoint_score_advantage": deployment_score_advantage,
+        "activated": activated,
+        "sandbox_policy": "selected_agent" if activated else "no_op",
+        "validation_reports": _reports_to_dict(reports),
+    }
 
 
 def run_walk_forward_training(
@@ -593,6 +888,7 @@ def run_walk_forward_training(
         embargo=walk_forward_config.embargo,
         step_size=walk_forward_config.step_size,
         max_train_size=walk_forward_config.max_train_size,
+        latest_only=walk_forward_config.latest_fold_only,
     )
     if not folds:
         raise ValueError("dataset is too short for the requested walk-forward split")
@@ -633,6 +929,9 @@ def run_walk_forward_training(
             seed=training_config.seed + fold.fold,
         )
         benchmark_observation, _ = train_env.reset(seed=fold_training.seed)
+        latency_cache: dict[
+            tuple[RecurrentConfig, int], dict[str, Any]
+        ] = {}
         candidate_runs = []
         for candidate in model_specs:
             resolved = resolved_configs.get(candidate.identifier)
@@ -644,10 +943,18 @@ def run_walk_forward_training(
                 fold_training,
                 algorithm=candidate.algorithm,
                 auxiliary_horizons=candidate.auxiliary_horizons,
+                auxiliary_target_exclusions=(
+                    candidate.auxiliary_target_exclusions
+                ),
                 auxiliary_coefficient=(
                     fold_training.auxiliary_coefficient
                     if candidate.auxiliary_coefficient is None
                     else candidate.auxiliary_coefficient
+                ),
+                delta_neutrality_coefficient=(
+                    fold_training.delta_neutrality_coefficient
+                    if candidate.delta_neutrality_coefficient is None
+                    else candidate.delta_neutrality_coefficient
                 ),
                 time_aware_discounting=(
                     fold_training.time_aware_discounting
@@ -699,15 +1006,21 @@ def run_walk_forward_training(
                         "trained model parameter count does not match its "
                         "resolved configuration"
                     )
-                inference_latency = benchmark_recurrent_inference(
-                    model,
-                    benchmark_observation,
+                inference_latency = _architecture_latency(
+                    latency_cache,
+                    recurrent_config,
                     candidate_training.sequence_length,
-                    warmup_iterations=(
-                        walk_forward_config.latency_warmup_iterations
-                    ),
-                    measured_iterations=(
-                        walk_forward_config.latency_measured_iterations
+                    candidate_training.seed,
+                    lambda: benchmark_recurrent_inference(
+                        model,
+                        benchmark_observation,
+                        candidate_training.sequence_length,
+                        warmup_iterations=(
+                            walk_forward_config.latency_warmup_iterations
+                        ),
+                        measured_iterations=(
+                            walk_forward_config.latency_measured_iterations
+                        ),
                     ),
                 )
                 latency_eligible = (
@@ -766,6 +1079,14 @@ def run_walk_forward_training(
                     "validation_turnover": float(
                         selected["evaluation_turnover"]
                     ),
+                    "validation_abs_beta_to_underlying": float(
+                        selected["evaluation_abs_beta_to_underlying"]
+                    ),
+                    "validation_mean_abs_delta_notional_weight": float(
+                        selected[
+                            "evaluation_mean_abs_delta_notional_weight"
+                        ]
+                    ),
                     "selection_scope": selected["evaluation_scope"],
                     "episodes_completed": len(metrics),
                     "stopped_early": bool(
@@ -793,6 +1114,14 @@ def run_walk_forward_training(
                         candidate,
                         auxiliary_horizons=fold_training.auxiliary_horizons,
                     ).identifier,
+                    "auxiliary_target_reference_model_id": replace(
+                        candidate,
+                        auxiliary_target_exclusions=(),
+                    ).identifier,
+                    "delta_neutrality_reference_model_id": replace(
+                        candidate,
+                        delta_neutrality_coefficient=0.0,
+                    ).identifier,
                     "discount_reference_model_id": replace(
                         candidate,
                         time_aware_discounting=None,
@@ -812,6 +1141,10 @@ def run_walk_forward_training(
                     "entropy_objective_reference_model_id": replace(
                         candidate,
                         entropy_objective=None,
+                    ).identifier,
+                    "critic_layer_norm_reference_model_id": replace(
+                        candidate,
+                        critic_layer_norm=False,
                     ).identifier,
                 })
 
@@ -849,8 +1182,29 @@ def run_walk_forward_training(
                 f"{walk_forward_config.max_median_inference_latency_us}; "
                 f"observed {observed}"
             )
-        winning_group = _select_seed_robust_group(eligible_groups)
+        winning_group = _select_seed_robust_group(
+            eligible_groups,
+            minimum_score_tolerance=(
+                walk_forward_config.selection_score_tolerance
+            ),
+        )
         winning_run = winning_group["representative"]
+        selection_rule = winning_group["selection_rule"]
+        activation_gate = _validation_no_op_activation_gate(
+            (validation_env,),
+            selected_score=winning_group["aggregate"][
+                "robust_training_seed_validation_score"
+            ],
+            deployment_score=winning_run["validation_selection_score"],
+            minimum_score_advantage=(
+                walk_forward_config.activation_min_score_advantage
+            ),
+            seed=(
+                winning_run["training_seed"]
+                + 10_000
+                + winning_run["selected_episode"]
+            ),
+        )
         candidate_results = [
             {
                 "model_id": run["model_id"],
@@ -862,6 +1216,12 @@ def run_walk_forward_training(
                 "effective_auxiliary_horizons": list(
                     run["training_config"].auxiliary_horizons
                 ),
+                "effective_auxiliary_target_exclusions": list(
+                    run["training_config"].auxiliary_target_exclusions
+                ),
+                "effective_delta_neutrality_coefficient": run[
+                    "training_config"
+                ].delta_neutrality_coefficient,
                 "effective_time_aware_discounting": run[
                     "training_config"
                 ].time_aware_discounting,
@@ -886,6 +1246,16 @@ def run_walk_forward_training(
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": group["latency_eligible"],
+                "selection_competitive": (
+                    run["model_id"]
+                    in selection_rule["competitive_model_ids"]
+                ),
+                "score_gap_to_best": (
+                    selection_rule["best_score"]
+                    - group["aggregate"][
+                        "robust_training_seed_validation_score"
+                    ]
+                ),
                 "ineligibility_reason": (
                     None
                     if group["latency_eligible"]
@@ -965,6 +1335,10 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_auxiliary_enabled": None,
                 "validation_reward_lift_vs_configured_horizons": None,
                 "validation_score_lift_vs_configured_horizons": None,
+                "validation_reward_lift_vs_full_auxiliary_targets": None,
+                "validation_score_lift_vs_full_auxiliary_targets": None,
+                "validation_reward_lift_vs_delta_neutrality_disabled": None,
+                "validation_score_lift_vs_delta_neutrality_disabled": None,
                 "validation_reward_lift_vs_time_aware_discounting": None,
                 "validation_score_lift_vs_time_aware_discounting": None,
                 "validation_reward_lift_vs_burn_in": None,
@@ -975,6 +1349,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_joint_factorized_objective": None,
                 "validation_reward_lift_vs_feasible_normalized_entropy": None,
                 "validation_score_lift_vs_feasible_normalized_entropy": None,
+                "validation_reward_lift_vs_critic_layer_norm_disabled": None,
+                "validation_score_lift_vs_critic_layer_norm_disabled": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -996,6 +1372,12 @@ def run_walk_forward_training(
                         "validation_downside_deviation"
                     ],
                     "turnover": run["validation_turnover"],
+                    "abs_beta_to_underlying": run[
+                        "validation_abs_beta_to_underlying"
+                    ],
+                    "mean_abs_delta_notional_weight": run[
+                        "validation_mean_abs_delta_notional_weight"
+                    ],
                 },
             }
             for group in grouped_runs
@@ -1059,6 +1441,42 @@ def run_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["auxiliary_horizon_reference_model_id"]
+                    ]
+                )
+            auxiliary_target_reference = validation_scores.get(
+                run["auxiliary_target_reference_model_id"]
+            )
+            if (
+                run["model_spec"].auxiliary_target_exclusions
+                and auxiliary_target_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_full_auxiliary_targets"
+                ] = aggregate_score - auxiliary_target_reference
+                result[
+                    "validation_reward_lift_vs_full_auxiliary_targets"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["auxiliary_target_reference_model_id"]
+                    ]
+                )
+            delta_neutrality_reference = validation_scores.get(
+                run["delta_neutrality_reference_model_id"]
+            )
+            if (
+                run["training_config"].delta_neutrality_coefficient > 0
+                and delta_neutrality_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_delta_neutrality_disabled"
+                ] = aggregate_score - delta_neutrality_reference
+                result[
+                    "validation_reward_lift_vs_delta_neutrality_disabled"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["delta_neutrality_reference_model_id"]
                     ]
                 )
             discount_reference = validation_scores.get(
@@ -1142,6 +1560,24 @@ def run_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["entropy_objective_reference_model_id"]
+                    ]
+                )
+            critic_layer_norm_reference = validation_scores.get(
+                run["critic_layer_norm_reference_model_id"]
+            )
+            if (
+                run["model_spec"].critic_layer_norm
+                and critic_layer_norm_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_critic_layer_norm_disabled"
+                ] = aggregate_score - critic_layer_norm_reference
+                result[
+                    "validation_reward_lift_vs_critic_layer_norm_disabled"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["critic_layer_norm_reference_model_id"]
                     ]
                 )
         model = winning_run["model"]
@@ -1297,6 +1733,7 @@ def run_walk_forward_training(
                 "validation": validation_env.manifest.fingerprint,
                 "test": test_env.manifest.fingerprint,
             },
+            "test_data_quality": _partition_data_quality(test_data),
             "selection": {
                 "scope": selected["evaluation_scope"],
                 "episode": selected["episode"],
@@ -1331,6 +1768,12 @@ def run_walk_forward_training(
                     "turnover_penalty": (
                         selected_training.selection_turnover_penalty
                     ),
+                    "absolute_beta_penalty": (
+                        selected_training.selection_abs_beta_penalty
+                    ),
+                    "delta_notional_penalty": (
+                        selected_training.selection_delta_notional_penalty
+                    ),
                     "cross_ticker_std_penalty": (
                         selected_training.selection_cross_ticker_std_penalty
                     ),
@@ -1344,9 +1787,14 @@ def run_walk_forward_training(
                         walk_forward_config.training_seed_dispersion_penalty
                     ),
                 },
+                "simplicity_rule": selection_rule,
+                "activation_gate": activation_gate,
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
                     "raw_mean_entropy_objective_ablation",
+                    "delta_neutrality_training_ablation",
+                    "critic_layer_norm_ablation",
+                    "auxiliary_target_ablation",
                     "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
@@ -1371,6 +1819,13 @@ def run_walk_forward_training(
                 "candidates": candidate_results,
             },
             "test": _reports_to_dict(test_reports),
+            "heldout_traces": {
+                "agent": _traces_to_dict(test_traces),
+                "baselines": {
+                    name: _traces_to_dict(traces)
+                    for name, traces in baseline_traces.items()
+                },
+            },
             "baselines": {
                 name: _reports_to_dict(reports)
                 for name, reports in baseline_reports.items()
@@ -1452,6 +1907,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--step-size", type=int)
     parser.add_argument("--max-train-size", type=int)
     parser.add_argument(
+        "--latest-fold-only",
+        action="store_true",
+        help=(
+            "evaluate only the latest chronological fold, assigning all "
+            "history before its embargoed validation/test tail to training"
+        ),
+    )
+    parser.add_argument(
         "--training-seed-offset",
         action="append",
         type=int,
@@ -1495,13 +1958,33 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--latency-measured-iterations", type=int, default=100)
     parser.add_argument("--max-median-inference-latency-us", type=float)
     parser.add_argument(
+        "--selection-score-tolerance",
+        type=float,
+        default=0.0,
+        help=(
+            "minimum validation-score tolerance for the one-standard-error "
+            "simplest-competitive selection rule"
+        ),
+    )
+    parser.add_argument(
+        "--activation-min-score-advantage",
+        type=float,
+        default=0.0,
+        help=(
+            "validation advantage over no-op required to activate the selected "
+            "agent in the sandbox"
+        ),
+    )
+    parser.add_argument(
         "--kind",
         choices=("gru", "lstm", "hybrid", "mixture"),
         default="gru",
     )
     parser.add_argument(
         "--encoder",
-        choices=("flat", "graph", "graph_set", "attention_set"),
+        choices=(
+            "flat", "graph", "graph_set", "surface_graph_set", "attention_set",
+        ),
         default="flat",
     )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
@@ -1539,7 +2022,24 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum trainable parameters; hidden-size becomes the search cap",
     )
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
+    parser.add_argument(
+        "--critic-layer-norm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "normalize recurrent features only on the critic branch; "
+            "actor inference is unchanged"
+        ),
+    )
+    parser.add_argument(
+        "--critic-layer-norm-ablation",
+        action="store_true",
+        help=(
+            "add matched candidates with critic-only LayerNorm disabled"
+        ),
+    )
     parser.add_argument("--episodes", type=int, default=25)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--burn-in-steps", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=128)
@@ -1575,6 +2075,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--selection-drawdown-penalty", type=float, default=0.0)
     parser.add_argument("--selection-downside-penalty", type=float, default=0.0)
     parser.add_argument("--selection-turnover-penalty", type=float, default=0.0)
+    parser.add_argument("--selection-abs-beta-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--selection-delta-notional-penalty",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument(
         "--selection-cross-ticker-std-penalty",
         type=float,
@@ -1587,6 +2093,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--ppo-epochs", type=int, default=4)
+    parser.add_argument("--minibatch-size", type=int, default=64)
+    parser.add_argument("--clip-ratio", type=float, default=0.2)
+    parser.add_argument("--value-clip", type=float, default=0.2)
+    parser.add_argument("--target-kl", type=float, default=0.03)
+    parser.add_argument("--value-coefficient", type=float, default=0.5)
+    parser.add_argument("--gradient-clip", type=float, default=0.5)
     parser.add_argument(
         "--time-aware-discounting",
         action=argparse.BooleanOptionalAction,
@@ -1619,6 +2132,22 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--delta-neutrality-coefficient",
+        type=float,
+        default=0.0,
+        help=(
+            "train-only penalty for absolute Delta notional divided by NAV; "
+            "validation and test rewards remain unshaped"
+        ),
+    )
+    parser.add_argument(
+        "--delta-neutrality-ablation",
+        action="store_true",
+        help=(
+            "add matched candidates with Delta-neutrality shaping disabled"
+        ),
+    )
+    parser.add_argument(
         "--auxiliary-coefficient",
         type=float,
         default=0.0,
@@ -1648,6 +2177,15 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "add matched one-step candidates for configured multi-horizon "
             "models"
+        ),
+    )
+    parser.add_argument(
+        "--auxiliary-target-ablation",
+        action="append",
+        choices=AUXILIARY_TARGET_FEATURES,
+        help=(
+            "repeat to add a matched validation candidate excluding one "
+            "named train-only prediction target"
         ),
     )
     parser.add_argument(
@@ -1718,6 +2256,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-abs-gamma", type=float)
     parser.add_argument("--max-abs-theta", type=float)
     parser.add_argument("--max-abs-vega", type=float)
+    parser.add_argument(
+        "--max-underlying-quote-age-seconds",
+        type=float,
+        default=DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+        help=(
+            "mask simulated option and underlying fills when an explicitly "
+            "timestamped provider quote is older than this threshold"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=7)
     return parser
 
@@ -1733,6 +2280,7 @@ def _walk_forward_config_from_args(
         embargo=args.embargo,
         step_size=args.step_size,
         max_train_size=args.max_train_size,
+        latest_fold_only=args.latest_fold_only,
         training_seed_offsets=tuple(args.training_seed_offset or (0,)),
         training_seed_worst_weight=args.training_seed_worst_weight,
         training_seed_dispersion_penalty=(
@@ -1759,6 +2307,10 @@ def _walk_forward_config_from_args(
         latency_measured_iterations=args.latency_measured_iterations,
         max_median_inference_latency_us=(
             args.max_median_inference_latency_us
+        ),
+        selection_score_tolerance=args.selection_score_tolerance,
+        activation_min_score_advantage=(
+            args.activation_min_score_advantage
         ),
     )
 
@@ -1804,6 +2356,7 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 algorithm=algorithm,
                 parameter_budget=args.parameter_budget,
                 auxiliary_horizons=auxiliary_horizons,
+                critic_layer_norm=args.critic_layer_norm,
             )
         )
     full_specs = tuple(specs)
@@ -1828,6 +2381,24 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             )
         specs.extend(
             replace(spec, auxiliary_coefficient=0.0)
+            for spec in full_specs
+        )
+    auxiliary_target_ablations = tuple(
+        args.auxiliary_target_ablation or ()
+    )
+    if len(set(auxiliary_target_ablations)) != len(
+        auxiliary_target_ablations
+    ):
+        raise ValueError("auxiliary target ablations must be unique")
+    if auxiliary_target_ablations:
+        if args.auxiliary_coefficient <= 0:
+            raise ValueError(
+                "--auxiliary-target-ablation requires "
+                "--auxiliary-coefficient > 0"
+            )
+        specs.extend(
+            replace(spec, auxiliary_target_exclusions=(target,))
+            for target in auxiliary_target_ablations
             for spec in full_specs
         )
     if args.fixed_step_discount_ablation:
@@ -1894,6 +2465,26 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             replace(spec, entropy_objective="raw_mean")
             for spec in full_specs
         )
+    if args.delta_neutrality_ablation:
+        if args.delta_neutrality_coefficient <= 0:
+            raise ValueError(
+                "--delta-neutrality-ablation requires "
+                "--delta-neutrality-coefficient > 0"
+            )
+        specs.extend(
+            replace(spec, delta_neutrality_coefficient=0.0)
+            for spec in full_specs
+        )
+    if args.critic_layer_norm_ablation:
+        if not args.critic_layer_norm:
+            raise ValueError(
+                "--critic-layer-norm-ablation requires "
+                "--critic-layer-norm"
+            )
+        specs.extend(
+            replace(spec, critic_layer_norm=False)
+            for spec in full_specs
+        )
     return _normalize_model_specs(specs)
 
 
@@ -1910,8 +2501,16 @@ def main() -> None:
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
                 burn_in_steps=args.burn_in_steps,
+                learning_rate=args.learning_rate,
                 gamma=args.gamma,
                 gae_lambda=args.gae_lambda,
+                ppo_epochs=args.ppo_epochs,
+                minibatch_size=args.minibatch_size,
+                clip_ratio=args.clip_ratio,
+                value_clip=args.value_clip,
+                target_kl=args.target_kl,
+                value_coefficient=args.value_coefficient,
+                gradient_clip=args.gradient_clip,
                 time_aware_discounting=args.time_aware_discounting,
                 discount_reference_seconds=args.discount_reference_seconds,
                 max_steps=args.max_steps,
@@ -1931,6 +2530,10 @@ def main() -> None:
                 ),
                 selection_downside_penalty=args.selection_downside_penalty,
                 selection_turnover_penalty=args.selection_turnover_penalty,
+                selection_abs_beta_penalty=args.selection_abs_beta_penalty,
+                selection_delta_notional_penalty=(
+                    args.selection_delta_notional_penalty
+                ),
                 selection_cross_ticker_std_penalty=(
                     args.selection_cross_ticker_std_penalty
                 ),
@@ -1940,6 +2543,9 @@ def main() -> None:
                 entropy_coefficient=args.entropy_coefficient,
                 entropy_objective=args.entropy_objective,
                 factorized_ppo_objective=args.factorized_ppo_objective,
+                delta_neutrality_coefficient=(
+                    args.delta_neutrality_coefficient
+                ),
                 auxiliary_coefficient=args.auxiliary_coefficient,
                 auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),
                 algorithm=args.algorithm,

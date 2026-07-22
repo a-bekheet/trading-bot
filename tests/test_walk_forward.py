@@ -13,9 +13,15 @@ except ImportError:
     torch = None
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
-from trading_bot.training.env import OptionsEnv
-from trading_bot.training.recurrent import build_recurrent_actor_critic
-from trading_bot.training.sequence import feature_ablation_indices
+from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
+from trading_bot.training.recurrent import (
+    RecurrentConfig,
+    build_recurrent_actor_critic,
+)
+from trading_bot.training.sequence import (
+    AUXILIARY_TARGET_FEATURES,
+    feature_ablation_indices,
+)
 from trading_bot.training.trainer import (
     TrainingConfig,
     _environment_kwargs_from_args,
@@ -25,14 +31,49 @@ from trading_bot.training.walk_forward import (
     ModelSpec,
     WALK_FORWARD_SCHEMA_VERSION,
     WalkForwardConfig,
+    _architecture_latency,
     _model_specs_from_args,
     _parser,
     _select_seed_robust_group,
     _training_seed_aggregate,
+    _validation_no_op_activation_gate,
     _walk_forward_config_from_args,
     resolve_recurrent_config,
     run_walk_forward_training,
 )
+
+
+class ArchitectureLatencyTests(TestCase):
+    def test_reuses_one_measurement_for_identical_seed_replicates(self):
+        config = RecurrentConfig(
+            input_size=4,
+            slot_count=1,
+            action_count=2,
+        )
+        calls = []
+
+        def measure():
+            calls.append(True)
+            return {"median_microseconds": 42.0}
+
+        cache = {}
+        first = _architecture_latency(cache, config, 2, 7, measure)
+        same_seed = _architecture_latency(cache, config, 2, 7, measure)
+        second = _architecture_latency(cache, config, 2, 8, measure)
+
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(first["measurement_reused"])
+        self.assertTrue(same_seed["measurement_reused"])
+        self.assertTrue(second["measurement_reused"])
+        self.assertFalse(first["reused_for_training_seed"])
+        self.assertFalse(same_seed["reused_for_training_seed"])
+        self.assertTrue(second["reused_for_training_seed"])
+        self.assertEqual(first["measured_training_seed"], 7)
+        self.assertEqual(second["median_microseconds"], 42.0)
+        self.assertEqual(
+            second["measurement_scope"],
+            "recurrent_architecture_per_fold",
+        )
 
 
 def walk_forward_dataset() -> SnapshotDataset:
@@ -140,6 +181,74 @@ class WalkForwardTrainingTests(TestCase):
             ):
                 WalkForwardConfig(3, 2, 2, training_seed_offsets=offsets)
 
+    def test_latest_fold_only_must_be_boolean(self):
+        with self.assertRaisesRegex(ValueError, "latest_fold_only"):
+            WalkForwardConfig(3, 2, 2, latest_fold_only=1)
+
+    def test_selection_score_tolerance_must_be_finite_and_non_negative(self):
+        for tolerance in (-1.0, float("nan"), float("inf")):
+            with self.subTest(tolerance=tolerance), self.assertRaisesRegex(
+                ValueError,
+                "selection_score_tolerance",
+            ):
+                WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    selection_score_tolerance=tolerance,
+                )
+
+    def test_activation_margin_must_be_finite_and_non_negative(self):
+        for margin in (-1.0, float("nan"), float("inf")):
+            with self.subTest(margin=margin), self.assertRaisesRegex(
+                ValueError,
+                "activation_min_score_advantage",
+            ):
+                WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    activation_min_score_advantage=margin,
+                )
+
+    def test_validation_no_op_gate_activates_only_above_margin(self):
+        environment = OptionsEnv(
+            walk_forward_dataset(),
+            slot_count=1,
+            starting_cash=1_000,
+        )
+
+        abstained = _validation_no_op_activation_gate(
+            (environment,),
+            selected_score=0.0001,
+            minimum_score_advantage=0.0001,
+            seed=7,
+        )
+        activated = _validation_no_op_activation_gate(
+            (environment,),
+            selected_score=0.00011,
+            minimum_score_advantage=0.0001,
+            seed=7,
+        )
+        unstable_checkpoint = _validation_no_op_activation_gate(
+            (environment,),
+            selected_score=0.0002,
+            deployment_score=-0.0001,
+            minimum_score_advantage=0.0001,
+            seed=7,
+        )
+
+        self.assertFalse(abstained["activated"])
+        self.assertEqual(abstained["sandbox_policy"], "no_op")
+        self.assertEqual(abstained["no_op_score"], 0.0)
+        self.assertTrue(activated["activated"])
+        self.assertEqual(activated["sandbox_policy"], "selected_agent")
+        self.assertFalse(unstable_checkpoint["activated"])
+        self.assertEqual(
+            unstable_checkpoint["score_advantage"],
+            unstable_checkpoint["deployed_checkpoint_score_advantage"],
+        )
+
     def test_seed_robust_selection_does_not_choose_best_single_run(self):
         spec = ModelSpec(hidden_size=4)
 
@@ -150,10 +259,14 @@ class WalkForwardTrainingTests(TestCase):
             *,
             latency=100.0,
             parameter_count=100,
+            model_spec=spec,
+            score_std=0.0,
+            seed_count=1,
+            score_standard_error=None,
         ):
             representative = {
                 "model_id": model_id,
-                "model_spec": spec,
+                "model_spec": model_spec,
                 "parameter_count": parameter_count,
                 "active_input_count": 10,
                 "optimizer_updates": 2,
@@ -164,17 +277,58 @@ class WalkForwardTrainingTests(TestCase):
                 "representative": representative,
                 "aggregate": {
                     "robust_training_seed_validation_score": robust_score,
+                    "training_seed_count": seed_count,
+                    "validation_selection_score_std": score_std,
+                    "validation_selection_score_standard_error": (
+                        score_std / (seed_count**0.5)
+                        if score_standard_error is None
+                        else score_standard_error
+                    ),
                 },
                 "replicates": [representative],
                 "latency_eligible": True,
             }
 
-        unstable = group("unstable", -1.0, 10.0)
+        unstable = group("unstable", -1.0, 10.0, latency=50.0)
         stable = group("stable", 1.0, 1.0)
 
         selected = _select_seed_robust_group((unstable, stable))
 
         self.assertIs(selected, stable)
+        self.assertEqual(
+            selected["selection_rule"]["competitive_model_ids"], ["stable"]
+        )
+
+        selected_for_speed = _select_seed_robust_group(
+            (unstable, stable), minimum_score_tolerance=2.0
+        )
+        self.assertIs(selected_for_speed, unstable)
+        self.assertEqual(
+            selected_for_speed["selection_rule"][
+                "score_sacrificed_for_simplicity"
+            ],
+            2.0,
+        )
+
+        uncertain_best = group(
+            "uncertain-best",
+            1.2,
+            1.2,
+            latency=200.0,
+            score_std=0.4,
+            seed_count=4,
+        )
+        simpler = group("simpler", 1.05, 1.05, latency=75.0)
+        selected_for_uncertainty = _select_seed_robust_group(
+            (uncertain_best, simpler)
+        )
+        self.assertIs(selected_for_uncertainty, simpler)
+        self.assertAlmostEqual(
+            selected_for_uncertainty["selection_rule"][
+                "uncertainty_tolerance"
+            ],
+            0.2,
+        )
 
         smaller_slow = group(
             "smaller-slow",
@@ -193,6 +347,68 @@ class WalkForwardTrainingTests(TestCase):
         self.assertIs(
             _select_seed_robust_group((smaller_slow, larger_fast)),
             larger_fast,
+        )
+
+        target_ablated = group(
+            "a-target-ablated",
+            1.0,
+            1.0,
+            model_spec=replace(
+                spec,
+                auxiliary_target_exclusions=(
+                    "medianContractDeltaHedgedSpotReturn",
+                ),
+            ),
+        )
+        full_targets = group("z-full-targets", 1.0, 1.0)
+        self.assertIs(
+            _select_seed_robust_group((target_ablated, full_targets)),
+            full_targets,
+        )
+
+        neutrality_enabled = group(
+            "a-neutrality-enabled",
+            1.0,
+            1.0,
+            model_spec=replace(
+                spec,
+                delta_neutrality_coefficient=0.001,
+            ),
+        )
+        neutrality_disabled = group(
+            "z-neutrality-disabled",
+            1.0,
+            1.0,
+            model_spec=replace(
+                spec,
+                delta_neutrality_coefficient=0.0,
+            ),
+        )
+        self.assertIs(
+            _select_seed_robust_group((
+                neutrality_enabled,
+                neutrality_disabled,
+            )),
+            neutrality_disabled,
+        )
+
+        critic_norm_enabled = group(
+            "a-critic-norm-enabled",
+            1.0,
+            1.0,
+            model_spec=replace(spec, critic_layer_norm=True),
+        )
+        critic_norm_disabled = group(
+            "z-critic-norm-disabled",
+            1.0,
+            1.0,
+        )
+        self.assertIs(
+            _select_seed_robust_group((
+                critic_norm_enabled,
+                critic_norm_disabled,
+            )),
+            critic_norm_disabled,
         )
 
     def test_deterministic_heldout_rejects_seed_pseudoreplication(self):
@@ -316,6 +532,7 @@ class WalkForwardTrainingTests(TestCase):
             "--training-seed-offset", "1000",
             "--training-seed-worst-weight", "0.4",
             "--training-seed-dispersion-penalty", "0.6",
+            "--latest-fold-only",
             "--reward-drawdown-penalty", "3",
             "--reward-downside-penalty", "4",
         ])
@@ -334,6 +551,7 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(config.training_seed_offsets, (0, 1000))
         self.assertEqual(config.training_seed_worst_weight, 0.4)
         self.assertEqual(config.training_seed_dispersion_penalty, 0.6)
+        self.assertTrue(config.latest_fold_only)
         environment = _environment_kwargs_from_args(args)
         self.assertEqual(environment["reward_drawdown_penalty"], 3)
         self.assertEqual(environment["reward_downside_penalty"], 4)
@@ -458,6 +676,29 @@ class WalkForwardTrainingTests(TestCase):
         with self.assertRaisesRegex(ValueError, "entropy_objective"):
             ModelSpec(entropy_objective="all_slots")
 
+    def test_cli_builds_matched_critic_layer_norm_ablation(self):
+        args = _parser().parse_args([
+            "--critic-layer-norm",
+            "--critic-layer-norm-ablation",
+        ])
+
+        enabled, disabled = _model_specs_from_args(args)
+
+        self.assertTrue(enabled.critic_layer_norm)
+        self.assertFalse(disabled.critic_layer_norm)
+        self.assertNotEqual(enabled.identifier, disabled.identifier)
+        env = OptionsEnv(walk_forward_dataset(), slot_count=1)
+        self.assertTrue(enabled.build(env).critic_layer_norm)
+        self.assertFalse(disabled.build(env).critic_layer_norm)
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--critic-layer-norm-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "critic_layer_norm"):
+            ModelSpec(critic_layer_norm=1)
+        with self.assertRaisesRegex(ValueError, "critic width"):
+            ModelSpec(hidden_size=1, critic_layer_norm=True)
+
     def test_cli_builds_matched_auxiliary_loss_ablation(self):
         args = _parser().parse_args([
             "--auxiliary-coefficient",
@@ -501,6 +742,93 @@ class WalkForwardTrainingTests(TestCase):
         with self.assertRaisesRegex(ValueError, "auxiliary_horizons"):
             ModelSpec(auxiliary_horizons=(2, 1))
 
+    def test_cli_builds_named_auxiliary_target_ablation(self):
+        target = "medianContractDeltaHedgedSpotReturn"
+        args = _parser().parse_args([
+            "--auxiliary-coefficient",
+            "0.05",
+            "--auxiliary-target-ablation",
+            target,
+        ])
+
+        full, ablated = _model_specs_from_args(args)
+
+        self.assertEqual(full.auxiliary_target_exclusions, ())
+        self.assertEqual(ablated.auxiliary_target_exclusions, (target,))
+        self.assertNotEqual(full.identifier, ablated.identifier)
+        env = OptionsEnv(walk_forward_dataset(), slot_count=1)
+        self.assertEqual(full.build(env), ablated.build(env))
+
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--auxiliary-target-ablation",
+                target,
+            ]))
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            _model_specs_from_args(_parser().parse_args([
+                "--auxiliary-coefficient",
+                "0.05",
+                "--auxiliary-target-ablation",
+                target,
+                "--auxiliary-target-ablation",
+                target,
+            ]))
+        with self.assertRaisesRegex(ValueError, "unknown auxiliary"):
+            ModelSpec(auxiliary_target_exclusions=("futureLeak",))
+        with self.assertRaisesRegex(ValueError, "remove every target"):
+            ModelSpec(auxiliary_target_exclusions=AUXILIARY_TARGET_FEATURES)
+
+    def test_cli_builds_delta_neutrality_training_ablation(self):
+        args = _parser().parse_args([
+            "--delta-neutrality-coefficient",
+            "0.0001",
+            "--delta-neutrality-ablation",
+            "--selection-abs-beta-penalty",
+            "0.2",
+            "--selection-delta-notional-penalty",
+            "0.3",
+            "--learning-rate",
+            "0.001",
+            "--ppo-epochs",
+            "2",
+            "--minibatch-size",
+            "3",
+            "--clip-ratio",
+            "0.1",
+            "--value-clip",
+            "0.15",
+            "--target-kl",
+            "0.02",
+            "--value-coefficient",
+            "0.4",
+            "--gradient-clip",
+            "0.3",
+        ])
+
+        enabled, disabled = _model_specs_from_args(args)
+
+        self.assertIsNone(enabled.delta_neutrality_coefficient)
+        self.assertEqual(disabled.delta_neutrality_coefficient, 0.0)
+        self.assertEqual(args.selection_abs_beta_penalty, 0.2)
+        self.assertEqual(args.selection_delta_notional_penalty, 0.3)
+        self.assertEqual(args.learning_rate, 0.001)
+        self.assertEqual(args.ppo_epochs, 2)
+        self.assertEqual(args.minibatch_size, 3)
+        self.assertEqual(args.clip_ratio, 0.1)
+        self.assertEqual(args.value_clip, 0.15)
+        self.assertEqual(args.target_kl, 0.02)
+        self.assertEqual(args.value_coefficient, 0.4)
+        self.assertEqual(args.gradient_clip, 0.3)
+        self.assertNotEqual(enabled.identifier, disabled.identifier)
+        env = OptionsEnv(walk_forward_dataset(), slot_count=1)
+        self.assertEqual(enabled.build(env), disabled.build(env))
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--delta-neutrality-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            ModelSpec(delta_neutrality_coefficient=-0.1)
+
     def test_cli_builds_factorized_and_single_leg_candidates(self):
         args = _parser().parse_args([
             "--candidate",
@@ -509,6 +837,8 @@ class WalkForwardTrainingTests(TestCase):
             "graph_set:mixture:ppo:0:single_leg",
             "--candidate",
             "attention_set:gru:ppo:factorized",
+            "--candidate",
+            "surface_graph_set:lstm:ppo:2:factorized",
             "--attention-heads",
             "2",
         ])
@@ -517,13 +847,36 @@ class WalkForwardTrainingTests(TestCase):
 
         self.assertEqual(
             [spec.action_decoder for spec in specs],
-            ["factorized", "single_leg", "factorized"],
+            ["factorized", "single_leg", "factorized", "factorized"],
         )
         self.assertEqual(specs[1].graph_neighbors, 0)
         self.assertEqual(specs[2].encoder, "attention_set")
         self.assertEqual(specs[2].attention_heads, 2)
         self.assertEqual(specs[2].graph_neighbors, 0)
+        self.assertEqual(specs[3].encoder, "surface_graph_set")
+        self.assertEqual(specs[3].graph_neighbors, 2)
         self.assertNotEqual(specs[0].identifier, specs[1].identifier)
+
+    def test_surface_graph_uses_coordinates_not_implied_volatility_for_topology(self):
+        env = OptionsEnv(walk_forward_dataset(), slot_count=1)
+
+        config = ModelSpec(
+            encoder="surface_graph_set",
+            graph_neighbors=1,
+        ).build(env)
+
+        self.assertEqual(config.graph_relation_indices, (
+            CONTRACT_FEATURES.index("forwardLogMoneyness"),
+            CONTRACT_FEATURES.index("dteDays"),
+        ))
+        self.assertEqual(
+            config.graph_option_side_index,
+            CONTRACT_FEATURES.index("delta"),
+        )
+        self.assertNotIn(
+            CONTRACT_FEATURES.index("impliedVolatility"),
+            config.graph_relation_indices,
+        )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_runner_selects_on_validation_then_reports_held_out_test(self):
@@ -575,6 +928,31 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(len(summary["folds"]), 1)
         self.assertEqual(fold["selection"]["scope"], "validation_research_demo")
         self.assertEqual(fold["test"][0]["steps"], 1)
+        self.assertEqual(fold["test_data_quality"], {
+            "snapshot_count": 2,
+            "market_state_coverage": 0.0,
+            "regular_session_fraction": 0.0,
+            "underlying_quote_time_coverage": 0.0,
+            "execution_provenance": "legacy_unknown_session_fallback",
+            "first_timestamp": "5",
+            "last_timestamp": "6",
+        })
+        heldout = fold["heldout_traces"]
+        self.assertEqual(len(heldout["agent"]), 1)
+        self.assertEqual(heldout["agent"][0]["report"], fold["test"][0])
+        self.assertEqual(len(heldout["agent"][0]["navs"]), 2)
+        self.assertEqual(len(heldout["agent"][0]["decisions"]), 1)
+        self.assertEqual(
+            set(heldout["baselines"]),
+            {
+                "no_op",
+                "first_feasible",
+                "buy_first_then_delta_hedge",
+                "long_volatility_delta_hedge",
+                "cash_secured_short_put_delta_hedge",
+                "underlying_trend",
+            },
+        )
         self.assertEqual(fold["heldout_evaluation_contract"], {
             "deterministic_policy": True,
             "path_count": 1,
@@ -592,7 +970,7 @@ class WalkForwardTrainingTests(TestCase):
             5_000 - candidate["parameter_count"],
         )
         self.assertEqual(candidate["model"]["hidden_size"], 8)
-        self.assertEqual(candidate["resolved_model"]["hidden_size"], 8)
+        self.assertLessEqual(candidate["resolved_model"]["hidden_size"], 8)
         self.assertEqual(
             candidate["inference_latency"]["scope"],
             "actor_only_streaming_batch_1_training_observation",
@@ -804,6 +1182,9 @@ class WalkForwardTrainingTests(TestCase):
             [
                 "dimensionwise_factorized_objective_ablation",
                 "raw_mean_entropy_objective_ablation",
+                "delta_neutrality_training_ablation",
+                "critic_layer_norm_ablation",
+                "auxiliary_target_ablation",
                 "worst_training_seed_median_inference_latency",
                 "parameter_count",
                 "active_input_count",
@@ -819,12 +1200,42 @@ class WalkForwardTrainingTests(TestCase):
             "robust_training_seed_validation_score",
         )
         self.assertEqual(
+            selection["simplicity_rule"]["rule"],
+            "one_standard_error_with_materiality_floor",
+        )
+        self.assertEqual(
+            selection["simplicity_rule"]["minimum_score_tolerance"],
+            0.0,
+        )
+        self.assertEqual(selection["activation_gate"]["benchmark"], "no_op")
+        self.assertEqual(
+            selection["activation_gate"]["minimum_score_advantage"],
+            0.0,
+        )
+        self.assertEqual(
+            selection["activation_gate"]["sandbox_policy"],
+            (
+                "selected_agent"
+                if selection["activation_gate"]["activated"]
+                else "no_op"
+            ),
+        )
+        self.assertTrue(
+            all(
+                "selection_competitive" in result
+                and "score_gap_to_best" in result
+                for result in candidate_results
+            )
+        )
+        self.assertEqual(
             selection["score_definition"],
             {
                 "reward": "validation_total_reward",
                 "drawdown_penalty": 0.0,
                 "downside_penalty": 0.0,
                 "turnover_penalty": 0.0,
+                "absolute_beta_penalty": 0.0,
+                "delta_notional_penalty": 0.0,
                 "cross_ticker_std_penalty": 0.0,
                 "worst_ticker_weight": 0.0,
                 "training_seed_worst_weight": 0.25,
@@ -907,6 +1318,22 @@ class WalkForwardTrainingTests(TestCase):
                 auxiliary_coefficient=0.0,
                 auxiliary_horizons=(1, 2),
             ),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                auxiliary_horizons=(1, 2),
+                auxiliary_target_exclusions=(
+                    "medianContractDeltaHedgedSpotReturn",
+                ),
+            ),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                auxiliary_horizons=(1, 2),
+                delta_neutrality_coefficient=0.0,
+            ),
         )
         with TemporaryDirectory() as directory:
             summary = run_walk_forward_training(
@@ -928,6 +1355,7 @@ class WalkForwardTrainingTests(TestCase):
                     evaluation_interval=1,
                     auxiliary_coefficient=0.05,
                     auxiliary_horizons=(1, 2),
+                    delta_neutrality_coefficient=0.001,
                     seed=29,
                 ),
                 Path(directory),
@@ -935,11 +1363,17 @@ class WalkForwardTrainingTests(TestCase):
             )
 
         results = summary["folds"][0]["model_selection"]["candidates"]
-        enabled, one_step, disabled = results
+        enabled, one_step, disabled, target_ablated, neutrality_disabled = (
+            results
+        )
         self.assertEqual(enabled["effective_auxiliary_coefficient"], 0.05)
         self.assertEqual(enabled["effective_auxiliary_horizons"], [1, 2])
         self.assertEqual(one_step["effective_auxiliary_horizons"], [1])
         self.assertEqual(disabled["effective_auxiliary_coefficient"], 0.0)
+        self.assertEqual(
+            target_ablated["effective_auxiliary_target_exclusions"],
+            ["medianContractDeltaHedgedSpotReturn"],
+        )
         self.assertIsNone(
             enabled["validation_score_lift_vs_auxiliary_enabled"]
         )
@@ -962,6 +1396,102 @@ class WalkForwardTrainingTests(TestCase):
             one_step["validation_reward_lift_vs_configured_horizons"],
             one_step["selection"]["validation_total_reward"]
             - enabled["selection"]["validation_total_reward"],
+        )
+        self.assertAlmostEqual(
+            target_ablated[
+                "validation_score_lift_vs_full_auxiliary_targets"
+            ],
+            target_ablated["selection"]["validation_selection_score"]
+            - enabled["selection"]["validation_selection_score"],
+        )
+        self.assertAlmostEqual(
+            target_ablated[
+                "validation_reward_lift_vs_full_auxiliary_targets"
+            ],
+            target_ablated["selection"]["validation_total_reward"]
+            - enabled["selection"]["validation_total_reward"],
+        )
+        self.assertEqual(
+            enabled["effective_delta_neutrality_coefficient"],
+            0.001,
+        )
+        self.assertEqual(
+            neutrality_disabled["effective_delta_neutrality_coefficient"],
+            0.0,
+        )
+        self.assertAlmostEqual(
+            enabled[
+                "validation_score_lift_vs_delta_neutrality_disabled"
+            ],
+            enabled["selection"]["validation_selection_score"]
+            - neutrality_disabled["selection"][
+                "validation_selection_score"
+            ],
+        )
+        self.assertAlmostEqual(
+            enabled[
+                "validation_reward_lift_vs_delta_neutrality_disabled"
+            ],
+            enabled["selection"]["validation_total_reward"]
+            - neutrality_disabled["selection"]["validation_total_reward"],
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_critic_layer_norm_ablation_reports_validation_only_lift(self):
+        candidates = (
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                critic_layer_norm=True,
+            ),
+            ModelSpec(kind="gru", encoder="flat", hidden_size=4),
+        )
+        with TemporaryDirectory() as directory:
+            summary = run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    min_train_size=3,
+                    validation_size=2,
+                    test_size=2,
+                    test_seeds=(54,),
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=2,
+                ),
+                candidates,
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                    evaluation_interval=1,
+                    seed=32,
+                ),
+                Path(directory),
+                env_kwargs={"slot_count": 1, "starting_cash": 1_000},
+            )
+
+        normalized, plain = summary["folds"][0]["model_selection"][
+            "candidates"
+        ]
+        self.assertTrue(normalized["resolved_model"]["critic_layer_norm"])
+        self.assertFalse(plain["resolved_model"]["critic_layer_norm"])
+        self.assertAlmostEqual(
+            normalized[
+                "validation_score_lift_vs_critic_layer_norm_disabled"
+            ],
+            normalized["selection"]["validation_selection_score"]
+            - plain["selection"]["validation_selection_score"],
+        )
+        self.assertAlmostEqual(
+            normalized[
+                "validation_reward_lift_vs_critic_layer_norm_disabled"
+            ],
+            normalized["selection"]["validation_total_reward"]
+            - plain["selection"]["validation_total_reward"],
+        )
+        self.assertIsNone(
+            plain["validation_score_lift_vs_critic_layer_norm_disabled"]
         )
 
     @skipUnless(torch is not None, "install the optional ml extra")
@@ -1254,6 +1784,13 @@ class WalkForwardTrainingTests(TestCase):
             ModelSpec("lstm", "flat", hidden_size=32, parameter_budget=5_000),
             ModelSpec("hybrid", "flat", hidden_size=32, parameter_budget=5_000),
             ModelSpec("mixture", "flat", hidden_size=32, parameter_budget=5_000),
+            ModelSpec(
+                "mixture",
+                "flat",
+                hidden_size=32,
+                parameter_budget=5_000,
+                critic_layer_norm=True,
+            ),
             ModelSpec(
                 "gru",
                 "graph",
