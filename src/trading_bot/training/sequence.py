@@ -22,14 +22,13 @@ from trading_bot.training.features import (
     INTRADAY_CLOCK_FEATURES,
     REALIZED_VOL_WINDOWS,
     SMILE_FIT_FEATURES,
+    SURFACE_VELOCITY_FEATURES,
 )
 from trading_bot.training.schemas import Observation
 
 
 FEATURE_ABLATION_GROUPS = {
-    "slot_identity": (
-        "slotContinuity",
-    ),
+    "slot_identity": ("slotContinuity",),
     "position_state": (
         "positionQuantity",
         "positionAveragePrice",
@@ -89,6 +88,7 @@ FEATURE_ABLATION_GROUPS = {
         "atmTermStructureSlopeChange",
         "atmTermSlopeChangeCoverage",
     ),
+    "surface_velocity": SURFACE_VELOCITY_FEATURES,
     "volatility_regime": (
         "realizedVol4",
         "realizedVol16",
@@ -149,9 +149,7 @@ def normalize_auxiliary_target_exclusions(
         raise ValueError("auxiliary target exclusions must be unique")
     unknown = set(normalized) - set(AUXILIARY_TARGET_FEATURES)
     if unknown:
-        raise ValueError(
-            f"unknown auxiliary target exclusions: {sorted(unknown)}"
-        )
+        raise ValueError(f"unknown auxiliary target exclusions: {sorted(unknown)}")
     if len(normalized) == len(AUXILIARY_TARGET_FEATURES):
         raise ValueError("auxiliary target exclusions cannot remove every target")
     return normalized
@@ -163,15 +161,14 @@ def auxiliary_target_exclusion_indices(
 ) -> tuple[int, ...]:
     """Return flattened multi-horizon indices disabled only in the loss mask."""
     normalized = normalize_auxiliary_target_exclusions(exclusions)
-    target_indices = tuple(
-        AUXILIARY_TARGET_FEATURES.index(name) for name in normalized
-    )
+    target_indices = tuple(AUXILIARY_TARGET_FEATURES.index(name) for name in normalized)
     width = len(AUXILIARY_TARGET_FEATURES)
     return tuple(
         horizon_index * width + target_index
         for horizon_index in range(len(horizons))
         for target_index in target_indices
     )
+
 
 _AUXILIARY_LEVEL_FEATURES = (
     "underlyingPrice",
@@ -188,12 +185,8 @@ _AUXILIARY_LEVEL_COVERAGE = {
     "atmTermStructureSlope": ("atmTermSlopeCoverage", 1.0),
 }
 
-_CONTRACT_FEATURE_INDEX = {
-    name: index for index, name in enumerate(CONTRACT_FEATURES)
-}
-_MARKET_FEATURE_INDEX = {
-    name: index for index, name in enumerate(MARKET_FEATURES)
-}
+_CONTRACT_FEATURE_INDEX = {name: index for index, name in enumerate(CONTRACT_FEATURES)}
+_MARKET_FEATURE_INDEX = {name: index for index, name in enumerate(MARKET_FEATURES)}
 
 
 def _delta_hedged_endpoint_is_observable(market: np.ndarray) -> bool:
@@ -211,32 +204,33 @@ def _delta_hedged_endpoint_is_observable(market: np.ndarray) -> bool:
     regular = market[_MARKET_FEATURE_INDEX["regularMarketSession"]]
     state_coverage = market[_MARKET_FEATURE_INDEX["marketStateCoverage"]]
     quote_age = market[_MARKET_FEATURE_INDEX["underlyingQuoteAgeSeconds"]]
-    quote_age_coverage = market[
-        _MARKET_FEATURE_INDEX["underlyingQuoteAgeCoverage"]
-    ]
+    quote_age_coverage = market[_MARKET_FEATURE_INDEX["underlyingQuoteAgeCoverage"]]
     return bool(
         np.isfinite(regular)
         and regular >= 0.5
         and np.isfinite(state_coverage)
         and state_coverage >= 0.5
         and np.isfinite(quote_age)
-        and 0 <= quote_age
-        <= DELTA_HEDGED_AUXILIARY_MAX_UNDERLYING_QUOTE_AGE_SECONDS
+        and 0 <= quote_age <= DELTA_HEDGED_AUXILIARY_MAX_UNDERLYING_QUOTE_AGE_SECONDS
         and np.isfinite(quote_age_coverage)
         and quote_age_coverage >= 0.5
     )
-_SPOT_SCALED_CONTRACT_INDICES = np.asarray([
-    _CONTRACT_FEATURE_INDEX[name]
-    for name in (
-        "strike",
-        "lastPrice",
-        "bid",
-        "ask",
-        "midPrice",
-        "spread",
-        "positionAveragePrice",
-    )
-])
+
+
+_SPOT_SCALED_CONTRACT_INDICES = np.asarray(
+    [
+        _CONTRACT_FEATURE_INDEX[name]
+        for name in (
+            "strike",
+            "lastPrice",
+            "bid",
+            "ask",
+            "midPrice",
+            "spread",
+            "positionAveragePrice",
+        )
+    ]
+)
 _SIGNED_SURFACE_MARKET_FEATURES = (
     "front25DeltaRiskReversal",
     "front25DeltaButterfly",
@@ -248,6 +242,7 @@ _SIGNED_SURFACE_MARKET_FEATURES = (
     "front25DeltaRiskReversalChange",
     "front25DeltaButterflyChange",
     "atmTermStructureSlopeChange",
+    *SURFACE_VELOCITY_FEATURES,
 )
 _SIGNED_CONTRACT_FEATURES = (
     "positionQuantity",
@@ -257,18 +252,19 @@ _SIGNED_CONTRACT_FEATURES = (
     "ivChange",
     "smileResidualPct",
 )
-_SIGNED_CONTRACT_INDICES = np.asarray([
-    _CONTRACT_FEATURE_INDEX[name]
-    for name in _SIGNED_CONTRACT_FEATURES
-])
-_SIGNED_CONTRACT_SCALES = np.asarray((
-    1.0,
-    1.0,
-    100.0,
-    10.0,
-    10.0,
-    10.0,
-))
+_SIGNED_CONTRACT_INDICES = np.asarray(
+    [_CONTRACT_FEATURE_INDEX[name] for name in _SIGNED_CONTRACT_FEATURES]
+)
+_SIGNED_CONTRACT_SCALES = np.asarray(
+    (
+        1.0,
+        1.0,
+        100.0,
+        10.0,
+        10.0,
+        10.0,
+    )
+)
 
 
 def feature_ablation_indices(
@@ -293,16 +289,12 @@ def feature_ablation_indices(
                 indices.add(MARKET_FEATURES.index(name))
                 continue
             if name in PORTFOLIO_FEATURES:
-                indices.add(
-                    portfolio_start + PORTFOLIO_FEATURES.index(name)
-                )
+                indices.add(portfolio_start + PORTFOLIO_FEATURES.index(name))
                 continue
             contract_index = _CONTRACT_FEATURE_INDEX[name]
             for slot in range(slot_count):
                 indices.add(
-                    contract_start
-                    + slot * len(CONTRACT_FEATURES)
-                    + contract_index
+                    contract_start + slot * len(CONTRACT_FEATURES) + contract_index
                 )
     return tuple(sorted(indices))
 
@@ -324,9 +316,8 @@ def _dimensionless_components(
         contracts[:, _SPOT_SCALED_CONTRACT_INDICES] / spot_scale
     )
     signed_contract_values = contracts[:, _SIGNED_CONTRACT_INDICES]
-    contracts[:, _SIGNED_CONTRACT_INDICES] = (
-        np.sign(signed_contract_values)
-        * np.log1p(abs(signed_contract_values) * _SIGNED_CONTRACT_SCALES)
+    contracts[:, _SIGNED_CONTRACT_INDICES] = np.sign(signed_contract_values) * np.log1p(
+        abs(signed_contract_values) * _SIGNED_CONTRACT_SCALES
     )
     # Gamma times a 10% spot move is the approximate corresponding Delta
     # change and remains comparable across differently priced underlyings.
@@ -352,9 +343,8 @@ def _dimensionless_components(
     if len(market) == len(MARKET_FEATURES):
         market_indices = _MARKET_FEATURE_INDEX
         return_index = market_indices["underlyingReturn"]
-        market[return_index] = (
-            np.sign(market[return_index])
-            * np.log1p(abs(market[return_index]) * 100.0)
+        market[return_index] = np.sign(market[return_index]) * np.log1p(
+            abs(market[return_index]) * 100.0
         )
         for name in ("benchmarkReturn", "relativeUnderlyingReturn"):
             index = market_indices[name]
@@ -363,43 +353,30 @@ def _dimensionless_components(
         gap_index = market_indices["snapshotGapSeconds"]
         market[gap_index] = np.log1p(max(market[gap_index], 0.0)) / 10.0
         quote_age_index = market_indices["underlyingQuoteAgeSeconds"]
-        market[quote_age_index] = (
-            np.log1p(max(market[quote_age_index], 0.0)) / 10.0
-        )
+        market[quote_age_index] = np.log1p(max(market[quote_age_index], 0.0)) / 10.0
         benchmark_age_index = market_indices["benchmarkQuoteAgeSeconds"]
         market[benchmark_age_index] = (
             np.log1p(max(market[benchmark_age_index], 0.0)) / 10.0
         )
         for window in REALIZED_VOL_WINDOWS:
             volatility_index = market_indices[f"realizedVol{window}"]
-            market[volatility_index] = np.log1p(
-                max(market[volatility_index], 0.0)
-            )
+            market[volatility_index] = np.log1p(max(market[volatility_index], 0.0))
             trend_index = market_indices[f"underlyingLogReturn{window}"]
             trend = market[trend_index]
-            market[trend_index] = (
-                np.sign(trend) * np.log1p(abs(trend) * 100.0)
-            )
-            benchmark_volatility_index = market_indices[
-                f"benchmarkRealizedVol{window}"
-            ]
+            market[trend_index] = np.sign(trend) * np.log1p(abs(trend) * 100.0)
+            benchmark_volatility_index = market_indices[f"benchmarkRealizedVol{window}"]
             market[benchmark_volatility_index] = np.log1p(
                 max(market[benchmark_volatility_index], 0.0)
             )
-            benchmark_trend_index = market_indices[
-                f"benchmarkLogReturn{window}"
-            ]
+            benchmark_trend_index = market_indices[f"benchmarkLogReturn{window}"]
             benchmark_trend = market[benchmark_trend_index]
-            market[benchmark_trend_index] = (
-                np.sign(benchmark_trend)
-                * np.log1p(abs(benchmark_trend) * 100.0)
+            market[benchmark_trend_index] = np.sign(benchmark_trend) * np.log1p(
+                abs(benchmark_trend) * 100.0
             )
         front_iv_index = market_indices["frontAtmIv"]
         market[front_iv_index] = np.log1p(max(market[front_iv_index], 0.0))
         smile_rmse_index = market_indices["frontSmileFitRmsePct"]
-        market[smile_rmse_index] = np.log1p(
-            max(market[smile_rmse_index], 0.0)
-        )
+        market[smile_rmse_index] = np.log1p(max(market[smile_rmse_index], 0.0))
         for name in _SIGNED_SURFACE_MARKET_FEATURES:
             index = market_indices[name]
             value = market[index]
@@ -413,33 +390,35 @@ def _dimensionless_components(
         nav_scale = max(abs(nav), 1.0)
         underlying_notional = abs(float(portfolio[7])) * spot_scale
         deployed_capital = max(
-            abs(float(portfolio[0]))
-            + abs(float(portfolio[1]))
-            + underlying_notional,
+            abs(float(portfolio[0])) + abs(float(portfolio[1])) + underlying_notional,
             1.0,
         )
         values = [
-                portfolio[0] / nav_scale,
-                portfolio[1] / nav_scale,
-                nav / deployed_capital,
-                portfolio[3] * spot_scale / nav_scale,
-                portfolio[4] * spot_scale**2 / nav_scale,
-                portfolio[5] / nav_scale,
-                portfolio[6] / nav_scale,
-                portfolio[7] * spot_scale / nav_scale,
+            portfolio[0] / nav_scale,
+            portfolio[1] / nav_scale,
+            nav / deployed_capital,
+            portfolio[3] * spot_scale / nav_scale,
+            portfolio[4] * spot_scale**2 / nav_scale,
+            portfolio[5] / nav_scale,
+            portfolio[6] / nav_scale,
+            portfolio[7] * spot_scale / nav_scale,
         ]
         if len(portfolio) == 10:
-            values.extend((
-                portfolio[8] / nav_scale,
-                portfolio[9] * spot_scale / nav_scale,
-            ))
+            values.extend(
+                (
+                    portfolio[8] / nav_scale,
+                    portfolio[9] * spot_scale / nav_scale,
+                )
+            )
         elif len(portfolio) == 12:
-            values.extend((
-                portfolio[8] / nav_scale,
-                portfolio[9] * spot_scale / nav_scale,
-                portfolio[10],
-                portfolio[11],
-            ))
+            values.extend(
+                (
+                    portfolio[8] / nav_scale,
+                    portfolio[9] * spot_scale / nav_scale,
+                    portfolio[10],
+                    portfolio[11],
+                )
+            )
         portfolio = np.asarray(values, dtype=np.float64)
 
     for values in (market, contracts, portfolio):
@@ -457,10 +436,7 @@ def observation_vector(observation: Observation) -> np.ndarray:
     contract_size = contracts.size
     portfolio_size = portfolio.size
     result = np.empty(
-        market_size
-        + contract_size
-        + portfolio_size
-        + observation.valid_mask.size,
+        market_size + contract_size + portfolio_size + observation.valid_mask.size,
         dtype=np.float32,
     )
     contract_start = market_size
@@ -523,8 +499,7 @@ def cross_sectional_contract_change_targets(
     current_valid_count = len(current_valid_ids)
     if (
         not current_indices
-        or len(current_indices) / current_valid_count
-        < CONTRACT_AUXILIARY_MIN_COVERAGE
+        or len(current_indices) / current_valid_count < CONTRACT_AUXILIARY_MIN_COVERAGE
     ):
         return values.astype(np.float32), available
 
@@ -556,10 +531,10 @@ def cross_sectional_contract_change_targets(
         future_mid = (future_bid[quote_available] + future_ask[quote_available]) / 2
         mid_returns = np.log(future_mid / current_mid)
         spread_changes = (
-            (future_ask[quote_available] - future_bid[quote_available]) / future_mid
-            - (current_ask[quote_available] - current_bid[quote_available])
-            / current_mid
-        )
+            future_ask[quote_available] - future_bid[quote_available]
+        ) / future_mid - (
+            current_ask[quote_available] - current_bid[quote_available]
+        ) / current_mid
         median_mid_return = float(np.median(mid_returns))
         median_spread_change = float(np.median(spread_changes))
         values[0] = np.sign(median_mid_return) * np.log1p(
@@ -581,19 +556,16 @@ def cross_sectional_contract_change_targets(
     )
     iv_coverage = float(iv_available.sum()) / current_valid_count
     if iv_coverage >= CONTRACT_AUXILIARY_MIN_COVERAGE:
-        median_iv_change = float(np.median(
-            future_iv[iv_available] - current_iv[iv_available]
-        ))
-        values[2] = np.sign(median_iv_change) * np.log1p(
-            abs(median_iv_change) * 10.0
+        median_iv_change = float(
+            np.median(future_iv[iv_available] - current_iv[iv_available])
         )
+        values[2] = np.sign(median_iv_change) * np.log1p(abs(median_iv_change) * 10.0)
         available[2] = 1.0
 
     current_market = np.asarray(current.market, dtype=np.float64)
     future_market = np.asarray(future.market, dtype=np.float64)
-    if (
-        len(current_market) == len(MARKET_FEATURES)
-        and len(future_market) == len(MARKET_FEATURES)
+    if len(current_market) == len(MARKET_FEATURES) and len(future_market) == len(
+        MARKET_FEATURES
     ):
         spot_index = _MARKET_FEATURE_INDEX["underlyingPrice"]
         current_spot = current_market[spot_index]
@@ -613,17 +585,13 @@ def cross_sectional_contract_change_targets(
             current_mid = (
                 current_bid[hedge_available] + current_ask[hedge_available]
             ) / 2
-            future_mid = (
-                future_bid[hedge_available] + future_ask[hedge_available]
-            ) / 2
+            future_mid = (future_bid[hedge_available] + future_ask[hedge_available]) / 2
             delta_hedged_spot_returns = (
                 future_mid
                 - current_mid
                 - current_delta[hedge_available] * (future_spot - current_spot)
             ) / current_spot
-            median_delta_hedged_return = float(np.median(
-                delta_hedged_spot_returns
-            ))
+            median_delta_hedged_return = float(np.median(delta_hedged_spot_returns))
             values[3] = np.sign(median_delta_hedged_return) * np.log1p(
                 abs(median_delta_hedged_return) * 100.0
             )
@@ -645,9 +613,8 @@ def auxiliary_market_change_targets(
     """
     current_market = np.asarray(current.market, dtype=np.float64)
     future_market = np.asarray(future.market, dtype=np.float64)
-    if (
-        len(current_market) != len(MARKET_FEATURES)
-        or len(future_market) != len(MARKET_FEATURES)
+    if len(current_market) != len(MARKET_FEATURES) or len(future_market) != len(
+        MARKET_FEATURES
     ):
         raise ValueError("observation market layout does not match auxiliary targets")
     indices = {name: index for index, name in enumerate(MARKET_FEATURES)}
@@ -713,11 +680,15 @@ def multi_horizon_auxiliary_targets(
     normalized = tuple(horizons)
     if (
         not normalized
-        or any(not isinstance(item, int) or isinstance(item, bool) for item in normalized)
+        or any(
+            not isinstance(item, int) or isinstance(item, bool) for item in normalized
+        )
         or any(item < 1 for item in normalized)
         or tuple(sorted(set(normalized))) != normalized
     ):
-        raise ValueError("auxiliary horizons must be unique positive increasing integers")
+        raise ValueError(
+            "auxiliary horizons must be unique positive increasing integers"
+        )
     transition_count = max(len(observations) - 1, 0)
     width = len(normalized) * len(AUXILIARY_TARGET_FEATURES)
     values = np.zeros((transition_count, width), dtype=np.float32)
@@ -765,7 +736,9 @@ def build_windows(
             SequenceWindow(
                 features=vectors[start:end],
                 actions=np.stack(actions[start:end]) if actions is not None else None,
-                rewards=np.asarray(rewards[start:end], dtype=np.float32) if rewards is not None else None,
+                rewards=np.asarray(rewards[start:end], dtype=np.float32)
+                if rewards is not None
+                else None,
             )
         )
     return result

@@ -25,7 +25,7 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v8"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v9"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 DEFAULT_ARENA_TRAINING_SEED_OFFSETS = (0, 1, 2)
 DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE = 1e-4
@@ -179,38 +179,34 @@ def recurrent_arena_models(
         )
         for kind in ("gru", "lstm", "mixture")
     )
-    flat_smile_residual_ablations = tuple(
-        ModelSpec(
-            kind=kind,
-            encoder="flat",
-            hidden_size=hidden_size,
-            initial_hold_bias=initial_hold_bias,
-            algorithm="ppo",
-            action_decoder="single_leg",
-            disabled_feature_groups=("contract_smile_residual",),
+
+    def sparse_feature_ablations(group: str) -> tuple[ModelSpec, ...]:
+        return tuple(
+            ModelSpec(
+                kind=kind,
+                encoder=encoder,
+                hidden_size=hidden_size,
+                graph_hidden_size=(
+                    hidden_size if encoder == "surface_graph_set" else 32
+                ),
+                graph_layers=1 if encoder == "surface_graph_set" else 2,
+                graph_neighbors=1 if encoder == "surface_graph_set" else 3,
+                initial_hold_bias=initial_hold_bias,
+                algorithm="ppo",
+                action_decoder="single_leg",
+                disabled_feature_groups=(group,),
+            )
+            for encoder in ("flat", "surface_graph_set")
+            for kind in ("gru", "lstm", "mixture")
         )
-        for kind in ("gru", "lstm", "mixture")
-    )
-    surface_smile_residual_ablations = tuple(
-        ModelSpec(
-            kind=kind,
-            encoder="surface_graph_set",
-            hidden_size=hidden_size,
-            graph_hidden_size=hidden_size,
-            graph_layers=1,
-            graph_neighbors=1,
-            initial_hold_bias=initial_hold_bias,
-            algorithm="ppo",
-            action_decoder="single_leg",
-            disabled_feature_groups=("contract_smile_residual",),
-        )
-        for kind in ("gru", "lstm", "mixture")
-    )
+
+    smile_residual_ablations = sparse_feature_ablations("contract_smile_residual")
+    surface_velocity_ablations = sparse_feature_ablations("surface_velocity")
     return (
         flat_controls
         + surface_gnn_agents
-        + flat_smile_residual_ablations
-        + surface_smile_residual_ablations
+        + smile_residual_ablations
+        + surface_velocity_ablations
     )
 
 

@@ -374,20 +374,26 @@ with agent_tab:
                     ),
                 },
             )
-            ablations = feature_ablation_results(runs)
+            ablations = pd.concat(
+                [
+                    feature_ablation_results(runs, "contract_smile_residual"),
+                    feature_ablation_results(runs, "surface_velocity"),
+                ],
+                ignore_index=True,
+            )
             if not ablations.empty:
-                st.subheader("Contract smile-residual experiment")
+                st.subheader("Engineered-feature experiments")
                 st.caption(
-                    "Matched validation comparison with only the causal "
-                    "contract-level smile residual removed. Positive feature "
-                    "lift means the signal helped; held-out data is excluded."
+                    "Matched validation comparisons remove exactly one causal "
+                    "feature group. Positive feature lift means the signal "
+                    "helped; held-out data is excluded."
                 )
-                grouped = ablations.groupby(["Encoder", "Agent"], as_index=False).agg(
+                grouped = ablations.groupby(
+                    ["Feature", "Encoder", "Agent"],
+                    as_index=False,
+                ).agg(
                     **{
-                        "Mean feature lift (bp)": (
-                            "Feature lift (bp)",
-                            "mean",
-                        ),
+                        "Mean feature lift (bp)": ("Feature lift (bp)", "mean"),
                         "Helped tickers": (
                             "Feature helped",
                             lambda values: int((values == "Yes").sum()),
@@ -395,7 +401,13 @@ with agent_tab:
                         "Evaluated tickers": ("Ticker", "nunique"),
                     }
                 )
-                grouped["Candidate"] = grouped["Encoder"] + " / " + grouped["Agent"]
+                grouped["Candidate"] = (
+                    grouped["Feature"]
+                    + " / "
+                    + grouped["Encoder"]
+                    + " / "
+                    + grouped["Agent"]
+                )
                 ablation_chart, ablation_table = st.columns((2, 3))
                 with ablation_chart:
                     st.bar_chart(

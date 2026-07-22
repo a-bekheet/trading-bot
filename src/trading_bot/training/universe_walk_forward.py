@@ -60,7 +60,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v46"
+    "research-demo.universe-walk-forward.v47"
 )
 
 

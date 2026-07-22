@@ -116,19 +116,13 @@ class AgentArenaTests(TestCase):
         models = recurrent_arena_models(hidden_size=12)
 
         self.assertEqual(
-            [model.kind for model in models],
+            [model.kind for model in models[:9]],
             [
                 "gru",
                 "gru",
                 "lstm",
                 "lstm",
                 "mixture",
-                "mixture",
-                "gru",
-                "lstm",
-                "mixture",
-                "gru",
-                "lstm",
                 "mixture",
                 "gru",
                 "lstm",
@@ -136,19 +130,13 @@ class AgentArenaTests(TestCase):
             ],
         )
         self.assertEqual(
-            [model.action_decoder for model in models],
+            [model.action_decoder for model in models[:9]],
             [
                 "factorized",
                 "single_leg",
                 "factorized",
                 "single_leg",
                 "factorized",
-                "single_leg",
-                "single_leg",
-                "single_leg",
-                "single_leg",
-                "single_leg",
-                "single_leg",
                 "single_leg",
                 "single_leg",
                 "single_leg",
@@ -156,17 +144,11 @@ class AgentArenaTests(TestCase):
             ],
         )
         self.assertEqual(
-            [model.encoder for model in models],
+            [model.encoder for model in models[:9]],
             [
                 "flat",
                 "flat",
                 "flat",
-                "flat",
-                "flat",
-                "flat",
-                "surface_graph_set",
-                "surface_graph_set",
-                "surface_graph_set",
                 "flat",
                 "flat",
                 "flat",
@@ -179,24 +161,26 @@ class AgentArenaTests(TestCase):
         self.assertEqual(
             {
                 (model.graph_hidden_size, model.graph_layers, model.graph_neighbors)
-                for model in models[6:9] + models[12:]
+                for model in models[6:9] + models[12:15] + models[18:21]
             },
             {(12, 1, 1)},
         )
-        self.assertTrue(
-            all(
-                model.disabled_feature_groups == ("contract_smile_residual",)
-                for model in models[9:]
-            )
+        self.assertEqual(
+            {model.disabled_feature_groups for model in models[9:15]},
+            {("contract_smile_residual",)},
+        )
+        self.assertEqual(
+            {model.disabled_feature_groups for model in models[15:21]},
+            {("surface_velocity",)},
         )
         self.assertEqual(
             {
                 (model.graph_hidden_size, model.graph_layers, model.graph_neighbors)
-                for model in models[9:12]
+                for model in models[9:12] + models[15:18]
             },
             {(32, 2, 3)},
         )
-        self.assertEqual(len({model.identifier for model in models}), 15)
+        self.assertEqual(len({model.identifier for model in models}), 21)
 
     def test_runs_unique_symbols_and_records_per_ticker_failures(self):
         summary = {

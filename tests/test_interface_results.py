@@ -154,7 +154,7 @@ class InterfaceResultTests(TestCase):
 
     def test_discovers_and_projects_readiness_only_arena_manifest(self):
         manifest = {
-            "schema_version": "research-demo.agent-arena.v8",
+            "schema_version": "research-demo.agent-arena.v9",
             "preflight": [
                 {
                     "symbol": "AAPL",
@@ -323,6 +323,12 @@ class InterfaceResultTests(TestCase):
         self.assertAlmostEqual(results.iloc[0]["Feature lift (bp)"], 2.0)
         self.assertEqual(results.iloc[0]["Feature helped"], "Yes")
         self.assertEqual(results.iloc[0]["Training seeds"], 3)
+
+        ablated["model"]["disabled_feature_groups"] = ("surface_velocity",)
+        velocity = feature_ablation_results([summary], "surface_velocity")
+
+        self.assertEqual(velocity.iloc[0]["Feature"], "Surface Velocity")
+        self.assertAlmostEqual(velocity.iloc[0]["Feature lift (bp)"], 2.0)
 
     def test_promotion_gate_requires_all_deployment_evidence(self):
         summary = result_summary()

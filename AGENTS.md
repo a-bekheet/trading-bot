@@ -370,6 +370,10 @@ decoder and otherwise identical model settings. Keep these matched identities
 intact so `validation_score_lift_vs_full` is populated. The interface must show
 whether each winner enabled or ablated the signal and summarize only validation
 lift; never use held-out results to decide whether the feature remains enabled.
+The arena additionally carries six exact `surface_velocity` removals with the
+same flat/GNN, recurrent-family, decoder, seed, and budget identities. Keep the
+raw change and coverage inputs enabled in these removals so the comparison asks
+only whether explicit elapsed-time normalization helps.
 
 The default arena uses training-seed offsets 0, 1, and 2. Model selection first
 finds the highest seed-robust validation score, then retains every eligible
@@ -421,7 +425,7 @@ closed. Keep all failed reasons visible in the drill-down and never weaken a
 gate merely to produce a deployable-looking result.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v23`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v24`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
@@ -523,6 +527,16 @@ missing expiration or wing must never become an unexplained numeric zero.
 Keep these factors once in `MARKET_FEATURES`, not repeated per contract, and
 route `term_structure` and `surface_dynamics` through named walk-forward
 ablations before attributing lift.
+
+Cadence-normalized surface velocity is a separate representation hypothesis.
+Divide only covered front-ATM, 25-delta risk-reversal/butterfly, and ATM-term-
+slope changes by the same causal positive `snapshotGapSeconds` expressed in
+hours, then bound each rate at plus or minus two volatility units per hour.
+Missing or invalid gap coverage must produce zero velocity while the existing
+change and coverage fields remain visible. Keep all four rates in the named
+`surface_velocity` ablation; never call a validation lift alpha, and do not add
+the rates to auxiliary targets because they are deterministic transforms of
+targets already present there.
 
 Underlying return, 4/16-snapshot cumulative log returns, and 4/16-snapshot
 realized-volatility estimates are market features, not contract features;

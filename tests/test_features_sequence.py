@@ -15,6 +15,7 @@ from trading_bot.training.features import (
     INTRADAY_CLOCK_FEATURES,
     MARKET_ENGINEERED_FEATURES,
     SMILE_FIT_FEATURES,
+    SURFACE_VELOCITY_FEATURES,
     benchmark_context_features,
     engineer_snapshot,
     intraday_clock_features,
@@ -1351,13 +1352,22 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(prior["atmTermSlopeChangeCoverage"], 0)
         self.assertAlmostEqual(now["frontAtmIvChange"], 0.02)
         self.assertEqual(now["frontAtmIvChangeCoverage"], 1)
+        self.assertAlmostEqual(now["frontAtmIvVelocityPerHour"], 1.2)
         self.assertAlmostEqual(
             now["front25DeltaRiskReversalChange"],
             -0.02,
         )
         self.assertAlmostEqual(
+            now["front25DeltaRiskReversalVelocityPerHour"],
+            -1.2,
+        )
+        self.assertAlmostEqual(
             now["front25DeltaButterflyChange"],
             0.02,
+        )
+        self.assertAlmostEqual(
+            now["front25DeltaButterflyVelocityPerHour"],
+            1.2,
         )
         self.assertEqual(now["frontWingChangeCoverage"], 1)
         self.assertAlmostEqual(
@@ -1365,9 +1375,55 @@ class FeatureSequenceTests(TestCase):
             now["atmTermStructureSlope"] - prior["atmTermStructureSlope"],
         )
         self.assertEqual(now["atmTermSlopeChangeCoverage"], 1)
+        self.assertAlmostEqual(
+            now["atmTermStructureSlopeVelocityPerHour"],
+            np.clip(now["atmTermStructureSlopeChange"] * 60, -2.0, 2.0),
+        )
+        self.assertTrue((previous[list(SURFACE_VELOCITY_FEATURES)] == 0).all().all())
         self.assertTrue(
             np.isfinite(current[list(MARKET_ENGINEERED_FEATURES)]).all().all()
         )
+
+    def test_surface_velocity_uses_elapsed_time_and_requires_gap_coverage(self):
+        previous = engineer_snapshot(
+            surface_snapshot(
+                "2026-07-21T14:00:00Z",
+                (0.20, 0.24, 0.31),
+                front_call_wing=0.24,
+                front_put_wing=0.28,
+            )
+        )
+        one_hour = engineer_snapshot(
+            surface_snapshot(
+                "2026-07-21T15:00:00Z",
+                (0.22, 0.255, 0.34),
+                front_call_wing=0.27,
+                front_put_wing=0.33,
+            ),
+            previous,
+        )
+        repeated_time = engineer_snapshot(
+            surface_snapshot(
+                "2026-07-21T14:00:00Z",
+                (0.22, 0.255, 0.34),
+                front_call_wing=0.27,
+                front_put_wing=0.33,
+            ),
+            previous,
+        )
+
+        self.assertAlmostEqual(
+            one_hour.iloc[0]["frontAtmIvVelocityPerHour"],
+            0.02,
+        )
+        self.assertAlmostEqual(
+            one_hour.iloc[0]["front25DeltaRiskReversalVelocityPerHour"],
+            -0.02,
+        )
+        self.assertTrue(
+            (repeated_time[list(SURFACE_VELOCITY_FEATURES)] == 0).all().all()
+        )
+        self.assertEqual(repeated_time.iloc[0]["snapshotGapCoverage"], 0)
 
     def test_dimensionless_vector_is_bounded_and_price_scale_invariant(self):
         def make_observation(scale: float) -> Observation:
@@ -1521,7 +1577,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v23")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v24")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

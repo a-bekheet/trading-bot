@@ -102,7 +102,8 @@ multi-leg and exact sparse single-leg policies. Three additional
 `surface_graph_set` agents pair the sparse decoder with local strike/expiry and
 opposite-side message passing. Six matched sparse agents remove only the causal
 contract-level smile residual across flat/surface-GNN and GRU/LSTM/mixture
-families, for 15 candidates per ticker. Repeat
+families. Six more remove only cadence-normalized surface velocity, for 21
+candidates per ticker. Repeat
 `--symbol` to choose another set. The command keeps identical budgets and split
 rules across tickers and uses the latest possible chronological fold, assigning
 all earlier eligible history to training. Each invocation gets a timestamped
@@ -266,7 +267,13 @@ across graph nodes. Executable ATM points across expirations now produce a
 market-level term-structure slope and discrete curvature. One-snapshot changes
 in front ATM IV, 25-delta risk reversal/butterfly, and term slope expose surface
 dynamics without asking the recurrent model to reconstruct sparse factors from
-changing contract slots. ATM, wing, term, change, executable-quote, Greek, and
+changing contract slots. Four additional velocities divide those covered
+changes by the causal snapshot gap in hours and clip them to plus or minus two
+volatility units per hour. This lets a compact recurrent policy distinguish a
+fast surface shock from the same change over a long collection interval without
+inferring a division from two inputs. Missing or nonpositive gaps remain neutral,
+and the four values are removable through `surface_velocity`. ATM, wing, term,
+change, executable-quote, Greek, and
 realized-volatility coverage features distinguish missing surfaces from genuine
 zero signals. Wing and term selection ignore zero-bid or otherwise unexecutable
 quotes. The IV-minus-
@@ -317,7 +324,7 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v23` transform. Prices, strikes, and average entry price are
+`dimensionless.v24` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
@@ -896,6 +903,39 @@ configurations (30 surface-GNN), 225 independently trained seed replicates, and
 15 explicit held-out HOLD decisions; the guard, not missing model artifacts,
 accounts for the zero operational fills. Arena schema advances to v8; package
 version is 0.81.0.
+
+v0.82 adds cadence-normalized IV-surface dynamics as an explicit, ablatable
+agent input. Front ATM IV, 25-delta risk reversal, 25-delta butterfly, and ATM
+term-slope changes are divided by the strictly causal elapsed snapshot time and
+bounded at plus or minus two volatility units per hour. Existing change and
+coverage fields remain intact, so missing history never becomes an observed zero
+velocity and the recurrent model can still learn the raw move separately. This
+is a compact representation hypothesis motivated by recent IV-surface-feedback
+work, not an alpha claim.
+
+The default arena adds six exact `surface_velocity` removals across flat and
+surface-GNN GRU/LSTM/gated-mixture sparse policies, increasing the declared
+tournament from 15 to 21 configurations per ticker and from 225 to 315 training-
+seed replicates across five tickers. A same-machine random-policy benchmark found
+noise-level actor differences: 106.7 microseconds for the full flat GRU versus
+107.5 for its physically compacted ablation, while the full model used 104 more
+parameters. Surface-GNN parameter count was unchanged because market inputs are
+masked in place. Feature engineering for 30 deduplicated AAPL states measured
+1.17 seconds median and remains outside the per-decision path. A five-ticker
+quality profile found 28-32 gap-covered states and 9-12 ATM/wing-change-covered
+states per ticker. Term-slope velocity was unavailable for four tickers and
+covered twice for GOOG; no velocity was non-finite or clipped, no contract key
+duplicated within a snapshot, and each market value was consistent across its
+contract rows. Sparse term coverage is a declared limitation, not a numeric zero
+signal. A declared AAPL `--allow-unready-tail` plumbing run completed all 63
+seed-trained replicas and 21 candidates without failure, selected the full flat
+factorized GRU at 105.4 microseconds, and populated six exact velocity ablation
+pairs. Every validation comparison and held-out return tied at zero because the
+tail was PRE, so the sandbox abstained. The immediately following locked default
+run stopped all five tickers in 1.6 seconds with five expected readiness statuses
+and no trainer invocation. Environment,
+feature-vector, checkpoint, walk-forward, universe, and arena schemas advance to
+v29, `dimensionless.v24`, v56, v64, v47, and v9; package version is 0.82.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The
