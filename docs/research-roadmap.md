@@ -367,6 +367,15 @@ negative evidence: larger recurrent mixtures did not dominate, and the next
 research cycle should prioritize better regular-session data and longer paths
 before increasing architecture complexity.
 
+The v0.75 arena adds a matched action-surface experiment for every recurrent
+family. Exact single-leg policies won validation on all five initial tickers;
+versus the prior factorized arena, held-out fills fell from 42 to 7, fees from
+$20.48 to $2.98, and mean loss from 0.154% to 0.025%. The improvement is mainly
+cost and turnover control, not forecast alpha, and GOOG's zero return is not a
+positive edge. The optimized deterministic sparse actor cut its own alternating
+benchmark median by 4.8%, although it remains about 9.6% slower than the
+factorized GRU because exact joint decoding still adds fixed work.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

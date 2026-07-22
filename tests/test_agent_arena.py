@@ -14,15 +14,19 @@ from trading_bot.training.walk_forward import WalkForwardConfig
 
 
 class AgentArenaTests(TestCase):
-    def test_fixed_arena_contains_three_distinct_recurrent_agents(self):
+    def test_fixed_arena_matches_three_recurrent_families_and_two_decoders(self):
         models = recurrent_arena_models(hidden_size=12)
 
         self.assertEqual([model.kind for model in models], [
-            "gru", "lstm", "mixture",
+            "gru", "gru", "lstm", "lstm", "mixture", "mixture",
+        ])
+        self.assertEqual([model.action_decoder for model in models], [
+            "factorized", "single_leg", "factorized", "single_leg",
+            "factorized", "single_leg",
         ])
         self.assertEqual({model.encoder for model in models}, {"flat"})
         self.assertEqual({model.hidden_size for model in models}, {12})
-        self.assertEqual(len({model.identifier for model in models}), 3)
+        self.assertEqual(len({model.identifier for model in models}), 6)
 
     def test_runs_unique_symbols_and_records_per_ticker_failures(self):
         summary = {

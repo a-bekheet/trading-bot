@@ -347,7 +347,10 @@ insufficient. Training and market fetching stay outside Streamlit reruns.
 
 `agent-arena` is the reproducible integration-demo entry point. Keep candidate
 families, split sizes, training budget, costs, and risk rules identical across
-its tickers unless the changed contract is explicit in the artifact. A failure
+its tickers unless the changed contract is explicit in the artifact. Every
+GRU/LSTM/gated-mixture family receives both factorized multi-leg and exact
+single-leg candidates so action sparsity is validation-selected rather than
+silently fixed. A failure
 for one ticker must be written with its exception type and message while other
 tickers continue. Do not average returns into a portfolio claim: each row is an
 independent, validation-selected research-demo path with its own provenance.
@@ -534,6 +537,11 @@ masks before sampling, decode to the existing environment action array, reject
 training actions with multiple non-hold rows, and retain one scalar log
 probability/entropy per step. It cannot express same-snapshot spreads or hedges,
 so keep factorized decoding available and select between them on validation.
+For deterministic actor-only single-leg inference, global hold is intrinsically
+safe: bypass per-row safe-hold cloning, mask only the flattened non-hold logits
+in place, and decode the winning joint index. Keep stochastic training and
+full-logit evaluation on the exact masked categorical path, and preserve action
+equivalence between both paths with flat and set-encoder tests.
 ATM-IV and volatility-premium rolling z-scores filter valid values from the 16
 strictly prior snapshots. Require four prior values, use population mean/standard
 deviation, clip to ±8, and emit zero when current coverage is absent or prior

@@ -18,7 +18,7 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v1"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v2"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 
 
@@ -27,7 +27,7 @@ def recurrent_arena_models(
     hidden_size: int = 8,
     initial_hold_bias: float = 0.0,
 ) -> tuple[ModelSpec, ...]:
-    """Return the fixed GRU/LSTM/gated-mixture comparison set."""
+    """Return matched recurrent families with dense and sparse action heads."""
     return tuple(
         ModelSpec(
             kind=kind,
@@ -35,8 +35,10 @@ def recurrent_arena_models(
             hidden_size=hidden_size,
             initial_hold_bias=initial_hold_bias,
             algorithm="ppo",
+            action_decoder=action_decoder,
         )
         for kind in ("gru", "lstm", "mixture")
+        for action_decoder in ("factorized", "single_leg")
     )
 
 

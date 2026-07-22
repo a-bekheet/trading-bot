@@ -92,9 +92,11 @@ agent-arena
 ```
 
 By default it independently compares flat PPO GRU, LSTM, and gated-mixture
-agents on AAPL, NVDA, MSFT, AMZN, and GOOG. Repeat `--symbol` to choose another
-set. The command keeps identical budgets and split rules across tickers, writes
-one walk-forward artifact per ticker plus `agent-arena.json`, and records a
+agents on AAPL, NVDA, MSFT, AMZN, and GOOG. Every recurrent family gets both a
+factorized multi-leg policy and an exact sparse single-leg policy, for six
+matched candidates per ticker. Repeat `--symbol` to choose another set. The
+command keeps identical budgets and split rules across tickers, writes one
+walk-forward artifact per ticker plus `agent-arena.json`, and records a
 per-ticker failure without discarding completed runs.
 
 For a one-ticker drill-down with explicit settings:
@@ -730,6 +732,21 @@ provenance before the existing per-run drill-down. The initial five-ticker run
 completed without orchestration failures, selected GRU three times, LSTM once,
 and the gated mixture once, and produced five negative held-out paths. Package
 version is 0.74.0.
+
+v0.75 turns action sparsity into a selected agent property instead of a fixed
+assumption. Each GRU, LSTM, and gated-mixture arena family now competes with
+matched factorized multi-leg and exact single-leg decoders. The sparse decoder
+won validation on all five initial tickers. Relative to the earlier factorized
+arena, held-out fills fell from 42 to 7, fees from $20.48 to $2.98, and mean
+return improved from -0.154% to -0.025%; GOOG moved from -0.443% to flat. These
+paths remain too short and poorly session-covered for an alpha claim.
+
+The deterministic single-leg actor now bypasses training-only safe-row cloning
+and full joint-mask materialization, masks only non-hold logits in place, and
+decodes the winning joint index directly. A nine-repeat alternating AAPL GRU
+benchmark reduced its median from 113.6 to 108.2 microseconds (4.8%) and narrowed
+the overhead versus factorized from 15.9% to 9.6%. Arena schema advances to v2;
+package version is 0.75.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The

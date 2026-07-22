@@ -150,8 +150,11 @@ with agent_tab:
                 )
             with winner_chart:
                 st.caption("Validation-selected architecture count")
+                winner_labels = (
+                    arena["Selected agent"] + " / " + arena["Action policy"]
+                )
                 winner_counts = (
-                    arena["Selected agent"].value_counts().rename("Selections")
+                    winner_labels.value_counts().rename("Selections")
                 )
                 st.bar_chart(winner_counts, height=260)
             st.dataframe(
@@ -216,7 +219,12 @@ with agent_tab:
             )
 
         selected_name = (
-            heldout.iloc[0]["Agent"] if not heldout.empty else "Unavailable"
+            (
+                f"{heldout.iloc[0]['Agent']} · "
+                f"{heldout.iloc[0]['Action policy']}"
+            )
+            if not heldout.empty
+            else "Unavailable"
         )
         mean_return = (
             float(heldout["Test return"].mean()) if not heldout.empty else 0.0
@@ -266,7 +274,13 @@ with agent_tab:
             result_columns[2].metric("Max drawdown", f"{report['Max drawdown']:.3%}")
             result_columns[3].metric("Turnover", f"{report['Turnover']:.3f}x")
             result_columns[4].metric("Fees", f"${report['Fees']:,.2f}")
-            result_columns[5].metric("Executions", int(report["Executions"]))
+            result_columns[5].metric(
+                "Executions",
+                (
+                    f"{int(report['Executions'])} "
+                    f"({report['Fills / decision']:.2f}/decision)"
+                ),
+            )
 
         curve = equity_curve(run, selected_fold)
         if curve.empty:

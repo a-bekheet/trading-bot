@@ -59,6 +59,7 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
                 "model_id": candidate.get("model_id", "unknown"),
                 "Agent": AGENT_LABELS.get(kind, kind.upper()),
                 "Architecture": _architecture_label(model),
+                "Action policy": _decoder_label(model),
                 "Algorithm": str(model.get("algorithm", "unknown")).upper(),
                 "Validation score": _number(candidate_selection.get(
                     "robust_training_seed_validation_score"
@@ -77,7 +78,9 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
     if not records:
         return pd.DataFrame()
     frame = pd.DataFrame(records)
-    stable = frame[["model_id", "Agent", "Architecture", "Algorithm"]]
+    stable = frame[[
+        "model_id", "Agent", "Architecture", "Action policy", "Algorithm",
+    ]]
     stable = stable.drop_duplicates("model_id").set_index("model_id")
     numeric = frame.groupby("model_id", sort=False).agg({
         "Validation score": "mean",
@@ -100,16 +103,22 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
     for fold in summary.get("folds", []):
         winner = _selected_candidate(fold)
         label = _agent_label(winner)
+        action_policy = _decoder_label(winner.get("model", {}))
         for report in fold.get("test", []):
+            steps = int(report.get("steps", 0))
+            executions = int(report.get("executions", 0))
             records.append({
                 "Fold": int(fold.get("fold", len(records))),
                 "Agent": label,
+                "Action policy": action_policy,
                 "Test return": _number(report.get("total_return")),
                 "Final NAV": _number(report.get("final_nav")),
                 "Max drawdown": _number(report.get("max_drawdown")),
-                "Executions": int(report.get("executions", 0)),
+                "Executions": executions,
+                "Fills / decision": executions / steps if steps else 0.0,
                 "Turnover": _number(report.get("turnover")),
                 "Fees": _number(report.get("fees")),
+                "Invalid actions": int(report.get("invalid_actions", 0)),
                 "Step Sharpe": _number(report.get("step_sharpe")),
                 "Market beta": _number(
                     report.get("return_beta_to_underlying")
@@ -117,7 +126,7 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
                 "Mean |Delta notional|": _number(
                     report.get("mean_abs_delta_notional_weight")
                 ),
-                "Steps": int(report.get("steps", 0)),
+                "Steps": steps,
             })
     return pd.DataFrame(records)
 
@@ -141,13 +150,21 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
             for fold in run.get("folds", [])
         }
         agents = sorted(set(heldout["Agent"]))
+        action_policies = sorted(set(heldout["Action policy"]))
         records.append({
             "Ticker": symbol,
             "Selected agent": ", ".join(agents),
+            "Action policy": ", ".join(action_policies),
             "Held-out return": float(heldout["Test return"].mean()),
             "Final NAV": float(heldout["Final NAV"].mean()),
             "Max drawdown": float(heldout["Max drawdown"].max()),
             "Executions": int(heldout["Executions"].sum()),
+            "Fills / decision": (
+                float(heldout["Executions"].sum())
+                / float(heldout["Steps"].sum())
+                if heldout["Steps"].sum()
+                else 0.0
+            ),
             "Fees": float(heldout["Fees"].sum()),
             "Steps": int(heldout["Steps"].sum()),
             "Evidence": evidence_summary(run)["grade"],
@@ -280,6 +297,15 @@ def _architecture_label(model: dict[str, Any]) -> str:
     encoder = _humanize(str(model.get("encoder", "unknown")))
     kind = _humanize(str(model.get("kind", "unknown")))
     return f"{encoder} / {kind}"
+
+
+def _decoder_label(model: dict[str, Any]) -> str:
+    decoder = str(model.get("action_decoder", "factorized"))
+    if decoder == "single_leg":
+        return "Sparse single-leg"
+    if decoder == "factorized":
+        return "Factorized multi-leg"
+    return _humanize(decoder)
 
 
 def _humanize(value: str) -> str:

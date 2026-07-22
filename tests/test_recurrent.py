@@ -255,6 +255,14 @@ class RecurrentTests(TestCase):
                 self.assertEqual(auxiliary_calls, [])
 
         for config in (
+            RecurrentConfig(
+                5,
+                2,
+                3,
+                action_slot_count=3,
+                hidden_size=8,
+                action_decoder="single_leg",
+            ),
             self.graph_set_config(),
             self.attention_set_config(action_decoder="single_leg"),
         ):
@@ -268,6 +276,7 @@ class RecurrentTests(TestCase):
                     config.action_count,
                     dtype=torch.bool,
                 )
+                mask[:, 0, 1] = False
                 full_logits, _, _ = model(sequence, mask)
                 value_calls = []
                 value_handle = model.value.register_forward_hook(

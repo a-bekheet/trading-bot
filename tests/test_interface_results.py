@@ -127,9 +127,17 @@ class InterfaceResultTests(TestCase):
         evidence = evidence_summary(summary)
 
         self.assertEqual(leaderboard["Agent"].tolist(), ["GRU Agent", "LSTM Agent"])
+        self.assertEqual(
+            leaderboard["Action policy"].tolist(),
+            ["Factorized multi-leg", "Factorized multi-leg"],
+        )
         self.assertEqual(leaderboard["Selected folds"].tolist(), [1, 0])
         self.assertEqual(heldout.iloc[0]["Agent"], "GRU Agent")
+        self.assertEqual(
+            heldout.iloc[0]["Action policy"], "Factorized multi-leg"
+        )
         self.assertAlmostEqual(heldout.iloc[0]["Test return"], 0.01)
+        self.assertEqual(heldout.iloc[0]["Fills / decision"], 0.5)
         self.assertEqual(set(curve["Series"]), {"Selected agent", "No Op"})
         self.assertEqual(len(curve[curve["Series"] == "Selected agent"]), 2)
         self.assertEqual(ledger.iloc[0]["Contract"], "TEST-C")
@@ -155,6 +163,9 @@ class InterfaceResultTests(TestCase):
         nvda["symbol"] = "NVDA"
         nvda["_run_name"] = "arena"
         nvda["folds"][0]["model_selection"]["selected_model_id"] = "lstm"
+        nvda["folds"][0]["model_selection"]["candidates"][1]["model"][
+            "action_decoder"
+        ] = "single_leg"
 
         overview = arena_overview([aapl_new, aapl_old, nvda])
 
@@ -162,3 +173,6 @@ class InterfaceResultTests(TestCase):
         self.assertEqual(overview.iloc[0]["Experiment"], "new")
         self.assertAlmostEqual(overview.iloc[0]["Held-out return"], 0.01)
         self.assertEqual(overview.iloc[1]["Selected agent"], "LSTM Agent")
+        self.assertEqual(
+            overview.iloc[1]["Action policy"], "Sparse single-leg"
+        )

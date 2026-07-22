@@ -658,20 +658,24 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 )
                 if action_mask.shape != expected_mask_shape:
                     raise ValueError("action_mask does not match recurrent outputs")
-                safe_mask = self._safe_action_mask(action_mask)
                 if single_leg:
+                    action_mask = action_mask.bool()
                     hold_mask = torch.ones(
-                        *safe_mask.shape[:-2],
+                        *action_mask.shape[:-2],
                         1,
                         dtype=torch.bool,
-                        device=safe_mask.device,
+                        device=action_mask.device,
                     )
                     joint_mask = torch.cat(
-                        (hold_mask, safe_mask[..., 1:].flatten(start_dim=-2)),
+                        (
+                            hold_mask,
+                            action_mask[..., 1:].flatten(start_dim=-2),
+                        ),
                         dim=-1,
                     )
                     logits = logits.masked_fill(~joint_mask, float("-inf"))
                 else:
+                    safe_mask = self._safe_action_mask(action_mask)
                     logits = logits.masked_fill(~safe_mask, float("-inf"))
             return logits
 
@@ -896,6 +900,51 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             hidden_state=None,
         ):
             """Sample an action without evaluating critic or auxiliary heads."""
+            if deterministic and single_leg and action_mask is not None:
+                logits, hidden = self.policy_sequence(
+                    sequence,
+                    None,
+                    hidden_state,
+                )
+                if action_mask.ndim == 4:
+                    expected = (
+                        *sequence.shape[:2],
+                        policy_slot_count,
+                        config.action_count,
+                    )
+                    if action_mask.shape != expected:
+                        raise ValueError(
+                            "action_mask does not match recurrent outputs"
+                        )
+                    final_mask = action_mask[:, -1]
+                elif action_mask.ndim == 3:
+                    expected = (
+                        sequence.shape[0],
+                        policy_slot_count,
+                        config.action_count,
+                    )
+                    if action_mask.shape != expected:
+                        raise ValueError(
+                            "action_mask does not match recurrent outputs"
+                        )
+                    final_mask = action_mask
+                else:
+                    raise ValueError(
+                        "action_mask does not match recurrent outputs"
+                    )
+                final_logits = logits[:, -1]
+                non_hold_mask = final_mask[..., 1:].reshape(
+                    sequence.shape[0],
+                    -1,
+                ).bool()
+                final_logits[..., 1:].masked_fill_(
+                    ~non_hold_mask,
+                    float("-inf"),
+                )
+                action = self._decode_joint_actions(
+                    final_logits.argmax(dim=-1)
+                )
+                return action, hidden
             logits, hidden = self.policy_sequence(
                 sequence,
                 action_mask,
