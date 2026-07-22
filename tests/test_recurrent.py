@@ -14,6 +14,7 @@ class RecurrentTests(TestCase):
         *,
         kind: str = "gru",
         graph_neighbors: int = 2,
+        action_decoder: str = "factorized",
     ) -> RecurrentConfig:
         # market(2), three contracts(4 each), portfolio(3), valid mask(3)
         return RecurrentConfig(
@@ -32,6 +33,7 @@ class RecurrentTests(TestCase):
             graph_neighbors=graph_neighbors,
             graph_relation_indices=(0, 1),
             auxiliary_target_count=5,
+            action_decoder=action_decoder,
         )
 
     def test_positional_hidden_size_remains_backward_compatible(self):
@@ -43,6 +45,10 @@ class RecurrentTests(TestCase):
     def test_rejects_invalid_sparse_policy_prior(self):
         with self.assertRaisesRegex(ValueError, "initial_hold_bias"):
             RecurrentConfig(5, 2, 3, initial_hold_bias=-1)
+        with self.assertRaisesRegex(ValueError, "action_decoder"):
+            RecurrentConfig(5, 2, 3, action_decoder="autoregressive")
+        with self.assertRaisesRegex(ValueError, "non-hold"):
+            RecurrentConfig(5, 2, 1, action_decoder="single_leg")
 
     def test_rejects_invalid_masked_input_indices(self):
         with self.assertRaisesRegex(ValueError, "masked_input_indices"):
@@ -206,6 +212,46 @@ class RecurrentTests(TestCase):
         torch.testing.assert_close(bias[:, 1:], torch.zeros(33, 6))
 
     @skipUnless(torch is not None, "install the optional ml extra")
+    def test_single_leg_decoder_has_exact_joint_likelihood_and_masks(self):
+        torch.manual_seed(29)
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            2,
+            3,
+            action_slot_count=3,
+            hidden_size=8,
+            action_decoder="single_leg",
+        ))
+        sequence = torch.zeros(256, 1, 5)
+        mask = torch.ones(256, 3, 3, dtype=torch.bool)
+        mask[:, 0, 1] = False
+
+        logits, _, _ = model(sequence, mask)
+        actions = model.actions_from_logits(logits)
+        log_probabilities = model.action_log_probabilities(logits, actions)
+        entropies = model.action_entropies(logits)
+
+        self.assertEqual(tuple(logits.shape), (256, 7))
+        self.assertTrue(torch.isneginf(logits[:, 1]).all())
+        self.assertEqual(tuple(actions.shape), (256, 3))
+        self.assertTrue(((actions != 0).sum(dim=-1) <= 1).all())
+        self.assertEqual(tuple(log_probabilities.shape), (256, 1))
+        self.assertEqual(tuple(entropies.shape), (256, 1))
+
+        selected = torch.tensor([[0, 2, 0]])
+        selected_logits = logits[:1]
+        expected = torch.log_softmax(selected_logits, dim=-1)[:, 4]
+        torch.testing.assert_close(
+            model.action_log_probabilities(selected_logits, selected)[:, 0],
+            expected,
+        )
+        with self.assertRaisesRegex(ValueError, "at most one"):
+            model.action_log_probabilities(
+                selected_logits,
+                torch.tensor([[1, 0, 2]]),
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_encoder_masks_padded_contracts(self):
         # Layout: market(2), two contracts with three features, portfolio(3), valid(2).
         config = RecurrentConfig(
@@ -298,6 +344,36 @@ class RecurrentTests(TestCase):
             rtol=1e-5,
             atol=1e-6,
         )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_single_leg_graph_set_preserves_permutation_symmetry(self):
+        torch.manual_seed(35)
+        model = build_recurrent_actor_critic(self.graph_set_config(
+            action_decoder="single_leg",
+        ))
+        model.eval()
+        sequence = torch.randn(2, 4, 20)
+        sequence[..., -3:] = 1
+        mask = torch.ones(2, 4, 4, 3, dtype=torch.bool)
+        permutation = torch.tensor([2, 0, 1])
+        changed = sequence.clone()
+        contracts = sequence[..., 2:14].view(2, 4, 3, 4)
+        changed[..., 2:14] = contracts[:, :, permutation].reshape(2, 4, 12)
+        changed[..., -3:] = sequence[..., -3:][:, :, permutation]
+        changed_mask = torch.cat((mask[:, :, permutation], mask[:, :, 3:4]), dim=2)
+
+        logits, values, _ = model.forward_sequence(sequence, mask)
+        changed_logits, changed_values, _ = model.forward_sequence(
+            changed,
+            changed_mask,
+        )
+        rows = logits[..., 1:].view(2, 4, 4, 2)
+        changed_rows = changed_logits[..., 1:].view(2, 4, 4, 2)
+
+        torch.testing.assert_close(changed_logits[..., 0], logits[..., 0])
+        torch.testing.assert_close(changed_rows[..., :3, :], rows[..., permutation, :])
+        torch.testing.assert_close(changed_rows[..., 3, :], rows[..., 3, :])
+        torch.testing.assert_close(changed_values, values)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_set_ignores_padded_nodes_and_backpropagates_shared_head(self):

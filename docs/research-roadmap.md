@@ -33,7 +33,8 @@ Every candidate must eventually pass:
 | [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v9`, compact ATM-IV-minus-realized-volatility and term/dynamics state, stable contract identity, Greek budgets, and paired moving-block intervals implement the state/risk lesson. |
 | [IV-surface feedback for deep option hedging (revised 2026)](https://arxiv.org/abs/2407.21138) | A compact surface factorization includes ATM level, maturity and moneyness slopes, smile attenuation, smirk, and their dynamics; bounded recurrent hybrids outperform standalone networks in its numerical study. | Executable 25-delta risk-reversal/butterfly, ATM term slope/curvature, and one-snapshot factor changes now have explicit coverage once per market snapshot; test them through named tournament ablations. |
 | [Shortfall-aware RL option hedging (2026)](https://arxiv.org/abs/2601.01709) | Better static IV fit need not produce better dynamic hedging; replication-error and shortfall objectives under costs are separate evidence. | Keep realized path diagnostics primary. Defer shortfall/CVaR training until explicit option-liability episodes and enough independent paths exist. |
-| [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Use a sparse trainable hold prior now. Benchmark an autoregressive multi-leg option policy later; never post-process sampled rows in a way that breaks PPO likelihoods. |
+| [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Compare the factorized decoder with an exact single-leg joint categorical now. Defer autoregressive multi-leg decoding until this simpler restriction earns validation lift; never post-process sampled rows in a way that breaks PPO likelihoods. |
+| [Structured Policy Initialization for Large Discrete Actions (2026)](https://arxiv.org/abs/2601.04441) | Independence can create incoherent combinatorial actions, while learning full action structure can be slow and unstable; a pretrained structure model can improve convergence. | Keep the exact single-leg structural baseline lightweight. Consider learned multi-leg action structure only after sufficient trajectories exist for pretraining and the single-leg restriction is demonstrably too limiting. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
 | [When does Self-Prediction help? Understanding Auxiliary Tasks in Reinforcement Learning (2024)](https://arxiv.org/abs/2406.17718) | Predictive auxiliary objectives can improve RL representations, but their value depends on observation structure and distractions rather than being universal. | A masked multi-horizon Smooth-L1 head now supervises the shared recurrent encoder only on training transitions. Keep it only through matched one-step and disabled validation ablations. |
@@ -162,6 +163,16 @@ The policy head now has a trainable hold-logit prior and reward-scale entropy
 coefficient. This reduced untrained requested action density on the current
 AAPL surface without imposing a hard order cap or changing PPO likelihoods.
 Episode provenance reports requested option and hedge actions separately.
+
+An optional exact single-leg decoder now replaces the 33 independent row
+categoricals with one masked categorical over hold or one row/action pair. It
+trains under both PPO and REINFORCE with GRU, LSTM, hybrid, flat, graph, and
+graph-set encoders; graph-set option scores remain permutation equivariant. It
+reduces the default flat-hybrid head by 8,224 parameters but measured roughly
+11% slower in batch-one deterministic inference because the joint category must
+be decoded into the fixed environment array. The current tiny AAPL tournament
+tied at zero validation reward and selected it only by parameter count, so the
+factorized decoder remains the default and any coordination benefit is unproven.
 
 Walk-forward artifacts now include post-selection, paired circular moving-block
 comparisons of the agent against every baseline. They report cumulative

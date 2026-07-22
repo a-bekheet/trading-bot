@@ -28,7 +28,8 @@ does not place live trades.
   builds chronological windows. `recurrent.py` is an optional PyTorch GRU,
   LSTM, or hybrid actor-critic with flat, flattened-graph, or graph-set contract
   encoding. `trainer.py`
-  owns factorized PPO/GAE optimization, deterministic evaluation, safe
+  owns factorized and exact single-leg-joint PPO/GAE optimization,
+  deterministic evaluation, safe
   checkpoint restoration, and provenance. `walk_forward.py` owns validation-only
   model selection, held-out test evaluation, fold artifacts, and its CLI. These
   modules stay outside ordinary collector imports.
@@ -228,9 +229,13 @@ zero or use an unexecutable quote to manufacture a surface factor. A wing must
 be within 0.15 Delta of its target and ATM must be within 0.10 absolute forward
 log-moneyness; otherwise reduce coverage and leave the factor neutral.
 
-The trainer supports stateful factorized PPO and Monte-Carlo REINFORCE with a
-learned value baseline. PPO uses per-slot likelihood ratios, GAE, policy/value
-clipping, and target-KL stopping. REINFORCE uses discounted trajectory returns,
+The trainer supports stateful PPO and Monte-Carlo REINFORCE with a learned value
+baseline. The default factorized decoder uses per-slot likelihood ratios. The
+optional `single_leg` decoder uses one exact joint categorical over global hold
+plus every feasible row/non-hold-action pair, structurally permitting at most
+one order per snapshot. It is an explicit lower-complexity action-space
+candidate, not post-processing or an inferred execution cap. PPO uses GAE,
+policy/value clipping, and target-KL stopping. REINFORCE uses discounted trajectory returns,
 bootstraps bounded nonterminal rollouts only, and performs exactly one on-policy
 optimizer pass; never reuse its trajectory across epochs. Both algorithms use
 entropy regularization, gradient clipping, and contiguous recurrent chunks.
@@ -240,6 +245,11 @@ The default entropy coefficient is `1e-4`, calibrated to return-scale rewards.
 Do not hard-cap active rows or post-process sampled actions without deriving the
 matching joint likelihood; that would invalidate PPO ratios. Preserve requested
 option/underlying order counts and action-density metrics in every episode.
+Persist the decoder and number of likelihood factors. `single_leg` must encode
+masks before sampling, decode to the existing environment action array, reject
+training actions with multiple non-hold rows, and retain one scalar log
+probability/entropy per step. It cannot express same-snapshot spreads or hedges,
+so keep factorized decoding available and select between them on validation.
 Rollouts and deterministic evaluation must carry the actual GRU/LSTM hidden
 state one snapshot at a time. PPO minibatches are composed from contiguous
 truncated-backpropagation chunks initialized with the old policy's causal
@@ -318,6 +328,8 @@ underlying logits, and auxiliary predictions unchanged. Padded node content must
 remain inert. Preserve these invariants with tests whenever graph construction,
 pooling, action layout, or recurrent state changes. Do not assume `graph_set` is
 always faster: enforce a predeclared latency budget when speed affects selection.
+For `single_leg`, treat each option's contiguous non-hold joint-logit block as
+the equivariant row output; global hold and the underlying block stay invariant.
 With `graph_neighbors=0`, construct only pointwise self layers: do not allocate
 adjacency/degree tensors, call graph multiplication, or register dead neighbor
 weights. This self-only Deep Sets configuration must remain selectable alongside

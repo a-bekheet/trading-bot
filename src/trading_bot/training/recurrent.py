@@ -32,6 +32,7 @@ class RecurrentConfig:
     graph_neighbors: int = 3
     graph_relation_indices: tuple[int, ...] = ()
     initial_hold_bias: float = 5.0
+    action_decoder: str = "factorized"
     masked_input_indices: tuple[int, ...] = ()
     auxiliary_target_count: int = 0
     auxiliary_horizons: tuple[int, ...] = (1,)
@@ -53,6 +54,10 @@ class RecurrentConfig:
             raise ValueError("graph_neighbors cannot be negative")
         if not math.isfinite(self.initial_hold_bias) or self.initial_hold_bias < 0:
             raise ValueError("initial_hold_bias must be finite and nonnegative")
+        if self.action_decoder not in {"factorized", "single_leg"}:
+            raise ValueError("action_decoder must be factorized or single_leg")
+        if self.action_decoder == "single_leg" and self.action_count < 2:
+            raise ValueError("single_leg action decoder requires a non-hold action")
         if len(set(self.masked_input_indices)) != len(self.masked_input_indices):
             raise ValueError("masked_input_indices must be unique")
         if any(
@@ -89,6 +94,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
     if config.kind not in {"gru", "lstm", "hybrid"}:
         raise ValueError("kind must be 'gru', 'lstm', or 'hybrid'")
     graph_encoder = config.encoder in {"graph", "graph_set"}
+    single_leg = config.action_decoder == "single_leg"
     if config.encoder not in {"flat", "graph", "graph_set"}:
         raise ValueError("encoder must be 'flat', 'graph', or 'graph_set'")
     if graph_encoder and config.contract_feature_count is None:
@@ -101,6 +107,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
 
     temporal_input_size = config.input_size
     policy_slot_count = config.action_slot_count or config.slot_count
+    joint_action_count = 1 + policy_slot_count * (config.action_count - 1)
     effective_graph_neighbors = min(
         config.graph_neighbors,
         max(config.slot_count - 1, 0),
@@ -190,28 +197,46 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 self.policy = None
                 self.contract_policy = nn.Linear(
                     output_size + config.graph_hidden_size,
-                    config.action_count,
+                    config.action_count - 1 if single_leg else config.action_count,
                 )
                 self.underlying_policy = nn.Linear(
                     output_size,
-                    config.action_count,
+                    config.action_count - 1 if single_leg else config.action_count,
                 )
                 nn.init.zeros_(self.contract_policy.bias)
                 nn.init.zeros_(self.underlying_policy.bias)
-                with torch.no_grad():
-                    self.contract_policy.bias[0] = config.initial_hold_bias
-                    self.underlying_policy.bias[0] = config.initial_hold_bias
+                self.joint_hold = (
+                    nn.Linear(output_size, 1) if single_leg else None
+                )
+                if single_leg:
+                    nn.init.zeros_(self.joint_hold.weight)
+                    nn.init.constant_(
+                        self.joint_hold.bias,
+                        config.initial_hold_bias,
+                    )
+                else:
+                    with torch.no_grad():
+                        self.contract_policy.bias[0] = config.initial_hold_bias
+                        self.underlying_policy.bias[0] = config.initial_hold_bias
             else:
                 self.policy = nn.Linear(
                     output_size,
-                    policy_slot_count * config.action_count,
+                    (
+                        joint_action_count
+                        if single_leg
+                        else policy_slot_count * config.action_count
+                    ),
                 )
                 nn.init.zeros_(self.policy.bias)
                 with torch.no_grad():
-                    self.policy.bias.view(
-                        policy_slot_count,
-                        config.action_count,
-                    )[:, 0] = config.initial_hold_bias
+                    if single_leg:
+                        self.policy.bias[0] = config.initial_hold_bias
+                    else:
+                        self.policy.bias.view(
+                            policy_slot_count,
+                            config.action_count,
+                        )[:, 0] = config.initial_hold_bias
+                self.joint_hold = None
             self.value = nn.Linear(output_size, 1)
             self.auxiliary = (
                 nn.Linear(output_size, config.auxiliary_target_count)
@@ -371,24 +396,113 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                     dim=-1,
                 ))
                 underlying_logits = self.underlying_policy(encoded).unsqueeze(2)
-                logits = torch.cat((option_logits, underlying_logits), dim=2)
+                row_logits = torch.cat((option_logits, underlying_logits), dim=2)
+                logits = (
+                    torch.cat(
+                        (
+                            self.joint_hold(encoded),
+                            row_logits.flatten(start_dim=2),
+                        ),
+                        dim=-1,
+                    )
+                    if single_leg
+                    else row_logits
+                )
             else:
-                logits = self.policy(encoded).view(
-                    sequence.shape[0],
-                    sequence.shape[1],
-                    policy_slot_count,
-                    config.action_count,
+                policy_logits = self.policy(encoded)
+                logits = (
+                    policy_logits
+                    if single_leg
+                    else policy_logits.view(
+                        sequence.shape[0],
+                        sequence.shape[1],
+                        policy_slot_count,
+                        config.action_count,
+                    )
                 )
             if action_mask is not None:
                 if action_mask.ndim == 3:
                     action_mask = action_mask.unsqueeze(1).expand(
                         -1, sequence.shape[1], -1, -1
                     )
-                if action_mask.shape != logits.shape:
+                expected_mask_shape = (
+                    *sequence.shape[:2],
+                    policy_slot_count,
+                    config.action_count,
+                )
+                if action_mask.shape != expected_mask_shape:
                     raise ValueError("action_mask does not match recurrent outputs")
                 safe_mask = self._safe_action_mask(action_mask)
-                logits = logits.masked_fill(~safe_mask, float("-inf"))
+                if single_leg:
+                    hold_mask = torch.ones(
+                        *safe_mask.shape[:-2],
+                        1,
+                        dtype=torch.bool,
+                        device=safe_mask.device,
+                    )
+                    joint_mask = torch.cat(
+                        (hold_mask, safe_mask[..., 1:].flatten(start_dim=-2)),
+                        dim=-1,
+                    )
+                    logits = logits.masked_fill(~joint_mask, float("-inf"))
+                else:
+                    logits = logits.masked_fill(~safe_mask, float("-inf"))
             return logits, self.value(encoded).squeeze(-1)
+
+        @staticmethod
+        def _categorical(logits):
+            return torch.distributions.Categorical(logits=logits)
+
+        def _joint_action_indices(self, actions):
+            if actions.shape[-1] != policy_slot_count:
+                raise ValueError("actions do not match policy slot count")
+            if ((actions < 0) | (actions >= config.action_count)).any():
+                raise ValueError("actions are outside the encoded action range")
+            active = actions.ne(0)
+            if (active.sum(dim=-1) > 1).any():
+                raise ValueError("single_leg actions may contain at most one order")
+            row = active.to(torch.int64).argmax(dim=-1)
+            encoded = actions.gather(-1, row.unsqueeze(-1)).squeeze(-1)
+            return torch.where(
+                active.any(dim=-1),
+                1 + row * (config.action_count - 1) + encoded - 1,
+                torch.zeros_like(row),
+            )
+
+        def _decode_joint_actions(self, indices):
+            offset = (indices - 1).clamp_min(0)
+            row = offset // (config.action_count - 1)
+            encoded = offset % (config.action_count - 1) + 1
+            encoded = encoded * indices.ne(0)
+            actions = torch.zeros(
+                *indices.shape,
+                policy_slot_count,
+                dtype=torch.long,
+                device=indices.device,
+            )
+            return actions.scatter(-1, row.unsqueeze(-1), encoded.unsqueeze(-1))
+
+        def actions_from_logits(self, logits, *, deterministic=False):
+            """Sample encoded environment actions from policy logits."""
+            sampled = (
+                logits.argmax(dim=-1)
+                if deterministic
+                else self._categorical(logits).sample()
+            )
+            return self._decode_joint_actions(sampled) if single_leg else sampled
+
+        def action_log_probabilities(self, logits, actions):
+            """Return exact decoder log probabilities with a stable final axis."""
+            distribution = self._categorical(logits)
+            if single_leg:
+                indices = self._joint_action_indices(actions)
+                return distribution.log_prob(indices).unsqueeze(-1)
+            return distribution.log_prob(actions)
+
+        def action_entropies(self, logits):
+            """Return decoder entropy with one entry per likelihood factor."""
+            entropy = self._categorical(logits).entropy()
+            return entropy.unsqueeze(-1) if single_leg else entropy
 
         def forward_sequence(self, sequence, action_mask=None, hidden_state=None):
             """Return actor and critic outputs for every causal time step."""
@@ -456,10 +570,10 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 action_mask,
                 hidden_state,
             )
-            if deterministic:
-                action = logits.argmax(dim=-1)
-            else:
-                action = torch.distributions.Categorical(logits=logits).sample()
+            action = self.actions_from_logits(
+                logits,
+                deterministic=deterministic,
+            )
             return action, value, hidden
 
     return ActorCritic()

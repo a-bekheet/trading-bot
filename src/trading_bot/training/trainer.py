@@ -25,7 +25,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v23"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v24"
 
 
 @dataclass(frozen=True)
@@ -608,8 +608,7 @@ def train_actor_critic(
                     action_mask,
                     hidden_state=hidden_state,
                 )
-                distribution = torch.distributions.Categorical(logits=logits)
-                action = distribution.sample()
+                action = model.actions_from_logits(logits)
             hidden_state = _detach_hidden(hidden_state)
             action_array = action.squeeze(0).detach().cpu().numpy()
             requested_option_orders += int(
@@ -626,7 +625,9 @@ def train_actor_critic(
             action_masks.append(action_mask.squeeze(0))
             actions.append(action.squeeze(0))
             rewards.append(float(reward))
-            old_log_probabilities.append(distribution.log_prob(action).squeeze(0))
+            old_log_probabilities.append(
+                model.action_log_probabilities(logits, action).squeeze(0)
+            )
             old_values.append(value.squeeze(0))
             invalid_actions += int(info["invalid_action_count"])
             executions += len(info["executions"])
@@ -779,8 +780,10 @@ def train_actor_critic(
                     predicted_auxiliary = None
                 logits = sequence_logits[valid_steps]
                 predicted_values = sequence_values[valid_steps]
-                distribution = torch.distributions.Categorical(logits=logits)
-                new_log_probs = distribution.log_prob(actions_tensor[batch])
+                new_log_probs = model.action_log_probabilities(
+                    logits,
+                    actions_tensor[batch],
+                )
                 log_ratio = new_log_probs - old_log_probs_tensor[batch]
                 ratio = log_ratio.exp()
                 batch_advantages = advantages[batch].unsqueeze(-1)
@@ -811,7 +814,7 @@ def train_actor_critic(
                     value_loss = 0.5 * (
                         predicted_values - returns_tensor[batch]
                     ).square().mean()
-                entropy = distribution.entropy().mean()
+                entropy = model.action_entropies(logits).mean()
                 auxiliary_loss = predicted_values.sum() * 0.0
                 auxiliary_mae = predicted_values.sum() * 0.0
                 if auxiliary_enabled:
@@ -1032,6 +1035,12 @@ def train_actor_critic(
                 ),
                 "explained_variance": explained_variance,
                 "algorithm": config.algorithm,
+                "action_decoder": recurrent_config.action_decoder,
+                "action_likelihood_factors": (
+                    1
+                    if recurrent_config.action_decoder == "single_leg"
+                    else episode_env.action_shape[0]
+                ),
                 "optimizer_updates": len(update_metrics),
                 "ppo_updates": (
                     len(update_metrics) if config.algorithm == "ppo" else 0
@@ -1092,15 +1101,29 @@ def checkpoint_manifest(
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "mode": "research_demo",
         "algorithm": (
-            "stateful_factorized_ppo"
-            if training_config.algorithm == "ppo"
-            else "stateful_factorized_reinforce_baseline"
+            f"stateful_{'single_leg_joint' if recurrent_config.action_decoder == 'single_leg' else 'factorized'}_"
+            f"{'ppo' if training_config.algorithm == 'ppo' else 'reinforce_baseline'}"
         ),
-        "action_policy": {
-            "factorization": "independent_masked_rows",
-            "initial_hold_bias": recurrent_config.initial_hold_bias,
-            "hard_order_cap": None,
-        },
+        "action_policy": (
+            {
+                "factorization": "single_leg_joint_categorical",
+                "initial_hold_bias": recurrent_config.initial_hold_bias,
+                "hard_order_cap": None,
+                "maximum_orders_per_step": 1,
+                "joint_action_count": (
+                    1
+                    + primary_env.action_shape[0]
+                    * (primary_env.action_shape[1] - 1)
+                ),
+                "likelihood": "exact_joint_categorical",
+            }
+            if recurrent_config.action_decoder == "single_leg"
+            else {
+                "factorization": "independent_masked_rows",
+                "initial_hold_bias": recurrent_config.initial_hold_bias,
+                "hard_order_cap": None,
+            }
+        ),
         "temporal_training": {
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
@@ -1231,6 +1254,11 @@ def _parser() -> argparse.ArgumentParser:
         default="flat",
     )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
+    parser.add_argument(
+        "--action-decoder",
+        choices=("factorized", "single_leg"),
+        default="factorized",
+    )
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=128)
@@ -1354,6 +1382,7 @@ def main() -> None:
         market_feature_count=observation.market.size,
         portfolio_feature_count=observation.portfolio.size,
         initial_hold_bias=args.initial_hold_bias,
+        action_decoder=args.action_decoder,
         graph_relation_indices=tuple(
             CONTRACT_FEATURES.index(name)
             for name in ("impliedVolatility", "delta", "logMoneyness", "dteDays")
@@ -1402,7 +1431,7 @@ def main() -> None:
     )
     output_label = primary_env.dataset.symbol if len(environments) == 1 else "top50"
     output = args.output or Path("data/models") / (
-        f"{output_label}-{args.encoder}-{args.kind}.pt"
+        f"{output_label}-{args.encoder}-{args.kind}-{args.action_decoder}.pt"
     )
     save_checkpoint(
         output,

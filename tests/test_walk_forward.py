@@ -99,6 +99,23 @@ class WalkForwardTrainingTests(TestCase):
         with self.assertRaisesRegex(ValueError, "auxiliary_horizons"):
             ModelSpec(auxiliary_horizons=(2, 1))
 
+    def test_cli_builds_factorized_and_single_leg_candidates(self):
+        args = _parser().parse_args([
+            "--candidate",
+            "flat:gru:ppo:factorized",
+            "--candidate",
+            "graph_set:hybrid:ppo:0:single_leg",
+        ])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(
+            [spec.action_decoder for spec in specs],
+            ["factorized", "single_leg"],
+        )
+        self.assertEqual(specs[1].graph_neighbors, 0)
+        self.assertNotEqual(specs[0].identifier, specs[1].identifier)
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_runner_selects_on_validation_then_reports_held_out_test(self):
         with TemporaryDirectory() as directory:
@@ -685,6 +702,8 @@ class WalkForwardTrainingTests(TestCase):
             ModelSpec(algorithm="q_learning")
         with self.assertRaisesRegex(ValueError, "parameter_budget"):
             ModelSpec(parameter_budget=0)
+        with self.assertRaisesRegex(ValueError, "action_decoder"):
+            ModelSpec(action_decoder="beam_search")
 
     def test_rejects_invalid_latency_benchmark_lengths(self):
         with self.assertRaisesRegex(ValueError, "cannot be negative"):

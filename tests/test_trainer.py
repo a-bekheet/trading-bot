@@ -85,9 +85,12 @@ class TrainerTests(TestCase):
     def test_cli_selects_single_or_top50_training_universe(self):
         single = _parser().parse_args(["--symbol", "msft"])
         universe = _parser().parse_args(["--universe", "top50"])
+        sparse = _parser().parse_args(["--action-decoder", "single_leg"])
 
         self.assertEqual(_symbols_from_args(single), ("MSFT",))
         self.assertEqual(single.slot_assignment, "stable")
+        self.assertEqual(single.action_decoder, "factorized")
+        self.assertEqual(sparse.action_decoder, "single_leg")
         self.assertEqual(
             _parser().parse_args(["--slot-assignment", "ranked"]).slot_assignment,
             "ranked",
@@ -783,50 +786,68 @@ class TrainerTests(TestCase):
         )
 
     @skipUnless(torch is not None, "install the optional ml extra")
-    def test_multi_horizon_auxiliary_training_supports_all_recurrent_learners(self):
+    def test_multi_horizon_training_supports_all_recurrent_learners_and_decoders(self):
         for kind in ("gru", "lstm", "hybrid"):
             for algorithm in ("ppo", "reinforce"):
-                with self.subTest(kind=kind, algorithm=algorithm):
-                    env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
-                    observation, _ = env.reset(seed=71)
-                    recurrent = RecurrentConfig(
-                        input_size=observation_vector(observation).size,
-                        slot_count=2,
-                        action_count=7,
-                        action_slot_count=env.action_shape[0],
-                        hidden_size=4,
+                for action_decoder in ("factorized", "single_leg"):
+                    with self.subTest(
                         kind=kind,
-                        auxiliary_target_count=(
-                            2 * len(AUXILIARY_TARGET_FEATURES)
-                        ),
-                        auxiliary_horizons=(1, 2),
-                    )
-                    training = TrainingConfig(
-                        episodes=1,
-                        sequence_length=2,
-                        ppo_epochs=1,
-                        minibatch_size=2,
-                        evaluation_interval=1,
-                        auxiliary_coefficient=0.05,
-                        auxiliary_horizons=(1, 2),
                         algorithm=algorithm,
-                        seed=71,
-                    )
+                        action_decoder=action_decoder,
+                    ):
+                        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+                        observation, _ = env.reset(seed=71)
+                        recurrent = RecurrentConfig(
+                            input_size=observation_vector(observation).size,
+                            slot_count=2,
+                            action_count=7,
+                            action_slot_count=env.action_shape[0],
+                            hidden_size=4,
+                            kind=kind,
+                            action_decoder=action_decoder,
+                            auxiliary_target_count=(
+                                2 * len(AUXILIARY_TARGET_FEATURES)
+                            ),
+                            auxiliary_horizons=(1, 2),
+                        )
+                        training = TrainingConfig(
+                            episodes=1,
+                            sequence_length=2,
+                            ppo_epochs=1,
+                            minibatch_size=2,
+                            evaluation_interval=1,
+                            auxiliary_coefficient=0.05,
+                            auxiliary_horizons=(1, 2),
+                            algorithm=algorithm,
+                            seed=71,
+                        )
 
-                    model, metrics = train_actor_critic(
-                        env,
-                        recurrent,
-                        training,
-                    )
+                        model, metrics = train_actor_critic(
+                            env,
+                            recurrent,
+                            training,
+                        )
 
-                    self.assertEqual(model.auxiliary.out_features, 10)
-                    self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
-                    self.assertEqual(
-                        metrics[0]["auxiliary_target_coverage"]["t+2"][
-                            "underlyingReturn"
-                        ],
-                        0.5,
-                    )
+                        self.assertEqual(model.auxiliary.out_features, 10)
+                        self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
+                        self.assertEqual(metrics[0]["action_decoder"], action_decoder)
+                        self.assertEqual(
+                            metrics[0]["action_likelihood_factors"],
+                            1 if action_decoder == "single_leg" else 3,
+                        )
+                        self.assertEqual(metrics[0]["invalid_actions"], 0)
+                        if action_decoder == "single_leg":
+                            self.assertLessEqual(
+                                metrics[0]["requested_option_orders"]
+                                + metrics[0]["requested_underlying_orders"],
+                                metrics[0]["steps"],
+                            )
+                        self.assertEqual(
+                            metrics[0]["auxiliary_target_coverage"]["t+2"][
+                                "underlyingReturn"
+                            ],
+                            0.5,
+                        )
         with TemporaryDirectory() as directory:
             path = Path(directory) / "multi-horizon.pt"
             save_checkpoint(
@@ -841,6 +862,9 @@ class TrainerTests(TestCase):
         self.assertEqual(restored.config.auxiliary_horizons, (1, 2))
         self.assertEqual(manifest["auxiliary_prediction"]["horizons"], [1, 2])
         self.assertEqual(manifest["training"]["algorithm"], "reinforce")
+        self.assertEqual(manifest["algorithm"], "stateful_single_leg_joint_reinforce_baseline")
+        self.assertEqual(manifest["action_policy"]["maximum_orders_per_step"], 1)
+        self.assertEqual(manifest["action_policy"]["likelihood"], "exact_joint_categorical")
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_checkpoint_with_incompatible_feature_transform(self):

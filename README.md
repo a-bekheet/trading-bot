@@ -453,10 +453,30 @@ defaults to `1e-4`, matching basis-point reward scale more closely than the old
 underlying orders, mean orders per step, and action density so sparsity is
 measured rather than assumed.
 
+The default `factorized` action decoder can place several option/underlying
+orders at one snapshot. An optional `single_leg` decoder instead learns one
+exact categorical distribution over global hold plus every feasible
+row/non-hold-action pair—199 choices for the default 33×7 action surface. It
+therefore emits at most one order by construction while preserving exact PPO or
+REINFORCE likelihoods and the environment's masks; no sampled action is capped
+or rewritten. Enable it with `--action-decoder single_leg`. This simpler action
+space cannot open a same-snapshot spread or option-plus-hedge combination, so it
+is a validation candidate rather than a new default.
+
+On the current AAPL layout, a hidden-size-128 flat hybrid fell from 986,998 to
+978,774 parameters, while zero-neighbor graph-set fell from 215,923 to 215,634.
+The joint decoder was slower because decoding its selected category back into
+the environment vector costs more than row-wise argmax: local 1,000-iteration
+medians were 185.25 versus 205.50 microseconds for flat and 272.06 versus 300.65
+microseconds for graph-set. A tiny hidden-size-eight AAPL tournament tied at
+zero validation reward; the joint decoder won only through the smaller-parameter
+tie-break (25,563 versus 25,851) and made no held-out trades. These measurements
+justify keeping both decoders and provide no evidence of alpha.
+
 It writes a safely loadable PyTorch checkpoint and a readable `.pt.json`
 provenance sidecar containing the environment fingerprint, model/training
 configuration, selection decision, and episode metrics. The stateful trainer
-uses factorized per-contract PPO ratios, generalized advantage estimation,
+uses decoder-consistent exact PPO ratios, generalized advantage estimation,
 clipped policy and value updates, contiguous recurrent minibatches, target-KL
 early stopping, entropy regularization, and gradient clipping. It evaluates
 deterministic actions after each rollout and restores the best checkpoint.
@@ -514,6 +534,8 @@ train-walk-forward \
   --candidate graph:hybrid:ppo \
   --candidate graph_set:hybrid:ppo \
   --candidate graph_set:hybrid:ppo:0 \
+  --candidate flat:gru:ppo:single_leg \
+  --candidate graph_set:hybrid:ppo:0:single_leg \
   --hidden-size 256 \
   --parameter-budget 20000 \
   --latency-warmup-iterations 10 \
@@ -523,11 +545,14 @@ train-walk-forward \
   --ablation volatility_regime
 ```
 
-Repeat `--candidate ENCODER:KIND[:ALGORITHM[:GRAPH_NEIGHBORS]]` to run a
+Repeat
+`--candidate ENCODER:KIND[:ALGORITHM[:GRAPH_NEIGHBORS][:ACTION_DECODER]]` to run a
 leak-safe architecture and learning-algorithm tournament. The optional
 algorithm is `ppo` or `reinforce` and defaults to `--algorithm` when omitted.
 The optional integer neighbor override permits full and zero-neighbor graph
 candidates in one predeclared tournament; otherwise `--graph-neighbors` applies.
+The decoder is `factorized` or `single_leg`; for a non-graph candidate it may
+occupy the fourth field directly, as in `flat:gru:ppo:single_leg`.
 Every GRU, LSTM, hybrid, flat, flattened-graph, or graph-set candidate receives
 the same fold and training seed. Each candidate restores its best validation
 checkpoint; the

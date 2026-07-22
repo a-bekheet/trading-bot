@@ -48,7 +48,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v25"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v26"
 
 
 @dataclass(frozen=True)
@@ -129,6 +129,7 @@ class ModelSpec:
     graph_layers: int = 2
     graph_neighbors: int = 3
     initial_hold_bias: float = 5.0
+    action_decoder: str = "factorized"
     disabled_feature_groups: tuple[str, ...] = ()
     algorithm: str = "ppo"
     parameter_budget: int | None = None
@@ -153,6 +154,10 @@ class ModelSpec:
             raise ValueError("model dropout must be in [0, 1)")
         if self.algorithm not in {"ppo", "reinforce"}:
             raise ValueError("model algorithm must be ppo or reinforce")
+        if self.action_decoder not in {"factorized", "single_leg"}:
+            raise ValueError(
+                "model action_decoder must be factorized or single_leg"
+            )
         if self.parameter_budget is not None and self.parameter_budget < 1:
             raise ValueError("parameter_budget must be positive when provided")
         if self.auxiliary_coefficient is not None and (
@@ -187,7 +192,7 @@ class ModelSpec:
             separators=(",", ":"),
         ).encode("utf-8")
         digest = hashlib.sha256(canonical).hexdigest()[:10]
-        return f"{self.encoder}-{self.kind}-{digest}"
+        return f"{self.encoder}-{self.kind}-{self.action_decoder}-{digest}"
 
     def build(self, env: OptionsEnv) -> RecurrentConfig:
         observation, _ = env.reset(seed=0)
@@ -208,6 +213,7 @@ class ModelSpec:
             graph_layers=self.graph_layers,
             graph_neighbors=self.graph_neighbors,
             initial_hold_bias=self.initial_hold_bias,
+            action_decoder=self.action_decoder,
             auxiliary_target_count=(
                 len(AUXILIARY_TARGET_FEATURES) * len(self.auxiliary_horizons)
             ),
@@ -848,12 +854,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
     parser.add_argument(
+        "--action-decoder",
+        choices=("factorized", "single_leg"),
+        default="factorized",
+    )
+    parser.add_argument(
         "--candidate",
         action="append",
-        metavar="ENCODER:KIND[:ALGORITHM[:GRAPH_NEIGHBORS]]",
+        metavar="ENCODER:KIND[:ALGORITHM[:GRAPH_NEIGHBORS][:ACTION_DECODER]]",
         help=(
             "repeat to select architectures, PPO/REINFORCE, and optionally "
-            "the graph-neighbor count using validation only"
+            "the graph-neighbor count and action decoder using validation only"
         ),
     )
     parser.add_argument(
@@ -962,21 +973,27 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
     specs = []
     for candidate in candidates:
         parts = candidate.split(":")
-        if len(parts) not in {2, 3, 4}:
+        if len(parts) not in {2, 3, 4, 5}:
             raise ValueError(
                 "candidate must use ENCODER:KIND, ENCODER:KIND:ALGORITHM, "
-                "or ENCODER:KIND:ALGORITHM:GRAPH_NEIGHBORS"
+                "ENCODER:KIND:ALGORITHM:GRAPH_NEIGHBORS, or append "
+                "ACTION_DECODER"
             )
         encoder, kind = parts[:2]
         algorithm = parts[2] if len(parts) >= 3 else args.algorithm
+        action_decoder = args.action_decoder
         try:
-            graph_neighbors = (
-                int(parts[3]) if len(parts) == 4 else args.graph_neighbors
-            )
+            graph_neighbors = int(parts[3]) if len(parts) >= 4 else args.graph_neighbors
         except ValueError as error:
-            raise ValueError(
-                "candidate graph neighbors must be an integer"
-            ) from error
+            if len(parts) == 4 and parts[3] in {"factorized", "single_leg"}:
+                graph_neighbors = args.graph_neighbors
+                action_decoder = parts[3]
+            else:
+                raise ValueError(
+                    "candidate graph neighbors must be an integer"
+                ) from error
+        if len(parts) == 5:
+            action_decoder = parts[4]
         specs.append(
             ModelSpec(
                 kind=kind,
@@ -986,6 +1003,7 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 graph_layers=args.graph_layers,
                 graph_neighbors=graph_neighbors,
                 initial_hold_bias=args.initial_hold_bias,
+                action_decoder=action_decoder,
                 algorithm=algorithm,
                 parameter_budget=args.parameter_budget,
                 auxiliary_horizons=auxiliary_horizons,
