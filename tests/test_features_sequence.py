@@ -112,11 +112,13 @@ class FeatureSequenceTests(TestCase):
         )
         term_indices = feature_ablation_indices(("term_structure",), 2)
         dynamics_indices = feature_ablation_indices(("surface_dynamics",), 2)
+        identity_indices = feature_ablation_indices(("slot_identity",), 2)
 
         self.assertEqual(len(wing_indices), 3)
         self.assertEqual(len(quality_indices), 2)
         self.assertEqual(len(term_indices), 4)
         self.assertEqual(len(dynamics_indices), 7)
+        self.assertEqual(len(identity_indices), 2)
         self.assertEqual(
             len(contract_indices),
             2 * len(FEATURE_ABLATION_GROUPS["derived_contract_surface"]),
@@ -125,6 +127,7 @@ class FeatureSequenceTests(TestCase):
         self.assertFalse(set(term_indices) & set(dynamics_indices))
         self.assertTrue(all(index < len(MARKET_FEATURES) for index in wing_indices))
         self.assertTrue(all(index >= len(MARKET_FEATURES) for index in contract_indices))
+        self.assertTrue(all(index >= len(MARKET_FEATURES) for index in identity_indices))
         with self.assertRaisesRegex(ValueError, "unknown"):
             feature_ablation_indices(("future_leak",), 2)
 
@@ -305,7 +308,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v6")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v7")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

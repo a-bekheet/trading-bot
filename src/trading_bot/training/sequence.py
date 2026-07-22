@@ -12,6 +12,9 @@ from trading_bot.training.schemas import Observation
 
 
 FEATURE_ABLATION_GROUPS = {
+    "slot_identity": (
+        "slotContinuity",
+    ),
     "surface_wings": (
         "front25DeltaRiskReversal",
         "front25DeltaButterfly",

@@ -104,7 +104,7 @@ observation, reward, terminated, truncated, info = env.step(
 )
 ```
 
-It uses fixed padded contract slots, validity/action masks, bid/ask paper fills,
+It uses identity-stable padded contract slots, validity/action masks, bid/ask paper fills,
 cash constraints, portfolio Greek exposures, optional Greek risk budgets,
 deterministic seeds, and decomposed rewards. Its manifest is marked
 `research_demo`; it is not a historical backtest or a claim of trading
@@ -155,12 +155,20 @@ quotes. The IV-minus-
 realized signal stays neutral until some causal return history exists. Nearest
 wing contracts must also lie within 0.15 Delta of the 25-delta target, so an
 ATM-only chain cannot masquerade as a complete smile.
-Fixed policy slots are stratified across expiration and option type before
-taking deeper strikes. Chronological windows are available through
-`training.sequence`.
+The first snapshot stratifies policy slots across expiration and option type
+before taking deeper strikes. Later snapshots retain each surviving contract
+at the same index and rank only replacements into vacated slots. A held option
+that reappears after a quote gap is prioritized so it remains sellable; a
+currently visible held option is never displaced by that recovery. Every contract
+row carries `slotContinuity`, while `info` and training artifacts retain
+identity changes and churn. This prevents GRU/LSTM state from silently following
+a different option after a cross-sectional rank reversal. Use
+`--slot-assignment ranked` only as a declared legacy comparison; the
+`slot_identity` ablation masks the continuity input without changing assignment.
+Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v6` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v7` transform. Prices and strikes are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 the underlying position is scaled by its NAV weight, portfolio values become
 ratios, DTE is in years, and heavy-tailed age/liquidity fields are compressed.
@@ -364,10 +372,12 @@ shuffle contiguous truncated-backpropagation chunks instead of independently
 shuffling zero-padded windows; `--sequence-length` is the maximum gradient
 chunk length, not a claim that earlier state is erased. Deterministic inference
 feeds one observation at a time and caches the GRU/LSTM hidden state. On the
-included AAPL layout (847 inputs, 33 action slots, graph-hybrid model), a local
-CPU benchmark reduced median policy time from about 0.68 ms to 0.27 ms per
-step. Treat that 2.5x result as a machine-specific engineering measurement,
-not a trading-performance result.
+current AAPL layout (899 inputs and 33 action slots), a local 500-iteration CPU
+benchmark measured 207.00 microseconds median for the flat hybrid and 446.98
+microseconds for the graph hybrid. Stable steady-state slot assignment measured
+1.57 ms median versus 4.95 ms for full reranking; across the 17-transition AAPL
+no-op episode, the median environment loop fell from 144.38 ms to 84.53 ms.
+Treat these as machine-specific engineering measurements, not trading results.
 
 The categorical policy head starts with a configurable `5.0` logit bias toward
 hold, while every feasible action remains sampleable and the bias remains fully
@@ -489,8 +499,8 @@ is no ceiling, so timing does not affect selection unless explicitly requested.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are
-`surface_wings`, `term_structure`, `surface_dynamics`, `volatility_regime`,
-`data_quality`, and `derived_contract_surface`. Masking happens inside the
+`slot_identity`, `surface_wings`, `term_structure`, `surface_dynamics`,
+`volatility_regime`, `data_quality`, and `derived_contract_surface`. Masking happens inside the
 checkpointed model after
 the versioned transform, so training, restored inference, and graph/flat models
 use the same ablation. Artifacts report each ablated candidate's validation

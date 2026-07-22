@@ -24,7 +24,7 @@ CONTRACT_ENGINEERED_FEATURES = tuple(
 )
 CONTRACT_FEATURES = (
     "strike", "lastPrice", "bid", "ask", "impliedVolatility", "delta", "gamma",
-    "theta", "vega", *CONTRACT_ENGINEERED_FEATURES,
+    "theta", "vega", *CONTRACT_ENGINEERED_FEATURES, "slotContinuity",
 )
 MARKET_FEATURES = ("underlyingPrice", "riskFreeRate", *MARKET_ENGINEERED_FEATURES)
 GREEK_NAMES = ("delta", "gamma", "theta", "vega")
@@ -55,6 +55,7 @@ class OptionsEnv:
         manifest: EnvManifest | None = None,
         *,
         slot_count: int = 32,
+        slot_assignment: str = "stable",
         max_quantity: int = 3,
         starting_cash: float = 100_000.0,
         commission_per_contract: float = 0.65,
@@ -71,6 +72,8 @@ class OptionsEnv:
     ):
         if slot_count < 1 or max_quantity < 1:
             raise ValueError("slot_count and max_quantity must be positive")
+        if slot_assignment not in {"stable", "ranked"}:
+            raise ValueError("slot_assignment must be stable or ranked")
         if (
             commission_per_contract < 0
             or spread_multiplier < 0
@@ -92,6 +95,7 @@ class OptionsEnv:
             raise ValueError("environment manifest schema is incompatible")
         self.dataset = dataset
         self.slot_count = slot_count
+        self.slot_assignment = slot_assignment
         self.max_quantity = max_quantity
         self.starting_cash = starting_cash
         self.commission_per_contract = commission_per_contract
@@ -105,6 +109,7 @@ class OptionsEnv:
         manifest_values = {
             "symbol": dataset.symbol,
             "slot_count": slot_count,
+            "slot_assignment": slot_assignment,
             "max_quantity": max_quantity,
             "starting_cash": starting_cash,
             "commission_per_contract": commission_per_contract,
@@ -132,7 +137,8 @@ class OptionsEnv:
         self._cached_index = -1
         self._cached_observation: Observation | None = None
         self._cached_info: dict[str, Any] = {}
-        self._cached_slots: list[pd.Series] = []
+        self._cached_slots: list[pd.Series | None] = []
+        self._contract_home_slots: dict[str, int] = {}
 
     @classmethod
     def from_directory(cls, data_dir: Path, symbol: str, **kwargs: Any) -> "OptionsEnv":
@@ -142,7 +148,7 @@ class OptionsEnv:
             manifest = EnvManifest.for_directory(data_dir, symbol=dataset.symbol, **{
                 key: kwargs[key]
                 for key in (
-                    "slot_count", "max_quantity", "starting_cash",
+                    "slot_count", "slot_assignment", "max_quantity", "starting_cash",
                     "commission_per_contract", "spread_multiplier",
                     "underlying_lot_size", "max_abs_underlying_shares",
                     "underlying_commission_per_share",
@@ -169,6 +175,11 @@ class OptionsEnv:
         self._cash = self.starting_cash
         self._positions = {}
         self._underlying_shares = 0
+        self._cached_index = -1
+        self._cached_observation = None
+        self._cached_info = {}
+        self._cached_slots = []
+        self._contract_home_slots = {}
         options = options or {}
         start = int(options.get("start_index", 0))
         if not 0 <= start < len(self.dataset):
@@ -292,6 +303,9 @@ class OptionsEnv:
                 invalid_actions += 1
                 continue
             contract = current_slots[slot]
+            if contract is None:  # Defensive: the action mask must forbid this.
+                invalid_actions += 1
+                continue
             quantity = encoded if encoded <= self.max_quantity else encoded - self.max_quantity
             side = "buy" if encoded <= self.max_quantity else "sell"
             greek_change = self._contract_greeks(contract) * quantity * 100
@@ -368,19 +382,25 @@ class OptionsEnv:
         self,
         observation: Observation,
         info: dict[str, Any],
-        slots: list[pd.Series],
+        slots: list[pd.Series | None],
     ) -> None:
         """Cache exactly the slot state returned to the policy."""
         self._cached_index = self._index
         self._cached_observation = observation
         self._cached_info = info.copy()
         self._cached_slots = slots
+        for index, contract_id in enumerate(observation.contract_ids):
+            if contract_id is not None:
+                self._contract_home_slots.setdefault(contract_id, index)
 
     def _current_frame(self) -> pd.DataFrame:
         return self.dataset.snapshots[self._index].frame
 
-    def _slots(self, frame: pd.DataFrame) -> list[pd.Series]:
-        ranked = frame.copy()
+    def _ranked_slots(self, frame: pd.DataFrame) -> list[pd.Series]:
+        ranked = frame.drop_duplicates(
+            "contractSymbol",
+            keep="first",
+        ).copy()
         if "logMoneyness" in ranked:
             ranked["_moneynessDistance"] = pd.to_numeric(
                 ranked["logMoneyness"], errors="coerce"
@@ -424,24 +444,120 @@ class OptionsEnv:
         selected = pd.concat((held, remainder.head(max(0, self.slot_count - len(held)))))
         return [row for _, row in selected.head(self.slot_count).iterrows()]
 
+    def _slots(self, frame: pd.DataFrame) -> list[pd.Series | None]:
+        """Assign ranked contracts while preserving prior per-slot identity."""
+        if self.slot_assignment == "ranked" or self._cached_observation is None:
+            return self._ranked_slots(frame)
+
+        current_rows = {
+            str(row["contractSymbol"]): row
+            for _, row in frame.drop_duplicates(
+                "contractSymbol",
+                keep="first",
+            ).iterrows()
+        }
+        assigned: list[pd.Series | None] = [None] * self.slot_count
+        used: set[str] = set()
+        previous_contract_ids = (
+            self._cached_observation.contract_ids[:self.slot_count]
+        )
+        # A currently visible held contract keeps its immediately prior slot,
+        # even if another held contract later reappears with the same old home.
+        for index, contract_id in enumerate(previous_contract_ids):
+            if (
+                contract_id in self._positions
+                and contract_id in current_rows
+            ):
+                assigned[index] = current_rows[contract_id]
+                used.add(contract_id)
+        # Reappearing held contracts reclaim their original home when it is
+        # vacant, otherwise the first vacancy. They must remain sellable.
+        for contract_id in sorted(self._positions):
+            if contract_id in used or contract_id not in current_rows:
+                continue
+            home = self._contract_home_slots.get(contract_id)
+            if (
+                home is not None
+                and 0 <= home < self.slot_count
+                and assigned[home] is None
+            ):
+                target = home
+            else:
+                target = next(
+                    (
+                        index
+                        for index, row in enumerate(assigned)
+                        if row is None
+                    ),
+                    None,
+                )
+            if target is None:
+                continue
+            assigned[target] = current_rows[contract_id]
+            used.add(contract_id)
+        for index, contract_id in enumerate(previous_contract_ids):
+            if (
+                assigned[index] is not None
+                or contract_id is None
+                or contract_id in used
+                or contract_id not in current_rows
+            ):
+                continue
+            assigned[index] = current_rows[contract_id]
+            used.add(contract_id)
+
+        if all(row is not None for row in assigned):
+            return assigned
+
+        candidates = self._ranked_slots(frame)
+        vacant = iter(index for index, row in enumerate(assigned) if row is None)
+        for candidate in candidates:
+            contract_id = str(candidate["contractSymbol"])
+            if contract_id in used:
+                continue
+            try:
+                index = next(vacant)
+            except StopIteration:
+                break
+            assigned[index] = candidate
+            used.add(contract_id)
+        return assigned
+
     def _observation(
         self,
         frame: pd.DataFrame | None = None,
-        slots: list[pd.Series] | None = None,
+        slots: list[pd.Series | None] | None = None,
     ) -> tuple[Observation, dict[str, Any]]:
         frame = self._current_frame() if frame is None else frame
         slots = self._slots(frame) if slots is None else slots
         contracts = np.zeros((self.slot_count, len(CONTRACT_FEATURES)), dtype=np.float64)
         valid = np.zeros(self.slot_count, dtype=bool)
         ids: list[str | None] = [None] * self.slot_count
+        previous_ids = (
+            self._cached_observation.contract_ids
+            if self._cached_observation is not None
+            else None
+        )
         for index, contract in enumerate(slots):
+            if contract is None:
+                continue
             ids[index] = str(contract["contractSymbol"])
             valid[index] = self._quote_valid(contract)
             for feature_index, name in enumerate(CONTRACT_FEATURES):
-                contracts[index, feature_index] = float(contract.get(name, 0) or 0)
+                if name == "slotContinuity":
+                    contracts[index, feature_index] = float(
+                        previous_ids is not None
+                        and previous_ids[index] == ids[index]
+                    )
+                else:
+                    contracts[index, feature_index] = float(
+                        contract.get(name, 0) or 0
+                    )
         nav, exposures = self._portfolio_metrics(frame)
         action_mask = np.zeros(self.action_shape, dtype=bool)
         for index, contract in enumerate(slots):
+            if contract is None:
+                continue
             if not valid[index]:
                 continue
             action_mask[index, 0] = True
@@ -498,7 +614,7 @@ class OptionsEnv:
             exposures,
             np.array([self._underlying_shares], dtype=np.float64),
         ))
-        return Observation(
+        observation = Observation(
             self.dataset.snapshots[self._index].timestamp,
             market,
             contracts,
@@ -507,13 +623,44 @@ class OptionsEnv:
             action_mask,
             tuple(ids),
             underlying_action_quantities=self.underlying_action_quantities,
-        ), {
+        )
+        info = {
             "index": self._index,
             "data_source": self.manifest.data_source,
             "portfolio_features": PORTFOLIO_FEATURES,
             "market_features": MARKET_FEATURES,
             "risk_limits": self.risk_limits.copy(),
         }
+        if previous_ids is None:
+            info.update({
+                "slot_identity_status": "no_prior_snapshot",
+                "slot_retained_count": 0,
+                "slot_changed_count": 0,
+                "slot_comparable_count": 0,
+                "slot_churn_rate": None,
+            })
+        else:
+            comparable = sum(
+                previous is not None or current is not None
+                for previous, current in zip(previous_ids, ids, strict=True)
+            )
+            retained = sum(
+                previous is not None and previous == current
+                for previous, current in zip(previous_ids, ids, strict=True)
+            )
+            changed = sum(
+                previous != current
+                for previous, current in zip(previous_ids, ids, strict=True)
+                if previous is not None or current is not None
+            )
+            info.update({
+                "slot_identity_status": self.slot_assignment,
+                "slot_retained_count": retained,
+                "slot_changed_count": changed,
+                "slot_comparable_count": comparable,
+                "slot_churn_rate": changed / comparable if comparable else 0.0,
+            })
+        return observation, info
 
     def _execution_price(self, contract: pd.Series, side: str) -> float:
         """Return a deterministic fill with configurable spread stress."""

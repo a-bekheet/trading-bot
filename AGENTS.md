@@ -140,16 +140,23 @@ small and stable:
   describe the pre-step state; every leg must still be revalidated against the
   running cash and Greek state.
 - `info` retains executions, invalid-action count, P&L, fees, trade notional,
-  and reward components.
+  reward components, and slot retention/churn diagnostics.
 - `reward_components` must sum to the returned scalar reward. Gross P&L includes
   spread/mark effects, while commission and invalid-action penalties are
   separate components.
-- A missing contract is never silently transferred to another slot.
-- Non-held slots are surface-stratified: one near-ATM contract from each
+- A surviving contract keeps its exact slot unless a reappearing held position
+  needs visibility to remain sellable. A missing contract vacates only its own
+  slot; ordinary replacements never shift other identities. Currently visible
+  held contracts take priority when home-slot histories collide.
+- Initial and replacement slots are surface-stratified: one near-ATM contract from each
   expiration/type group is selected before deeper strikes, with spread and open
   interest as deterministic tie-breakers.
 - `step()` must execute against the exact cached slots and mask returned by the
-  preceding observation; only the next state may rerank the surface.
+  preceding observation. Under stable assignment, only vacant next-state slots
+  may rank replacements. `ranked` is an explicit comparison mode.
+- `slotContinuity` is zero on reset/replacement/padding and one only when the
+  same contract occupied that index in the preceding observation. Persist
+  retained, changed, comparable, and churn counts through training artifacts.
 - An episode with `N` snapshots has exactly `N-1` tradable transitions and
   truncates on arrival at the last snapshot; never permit an unmarkable extra
   fill at the terminal timestamp.
@@ -175,7 +182,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v6`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v7`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
 is expressed in years, and heavy-tailed fields are compressed and clipped. Raw

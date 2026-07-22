@@ -21,6 +21,7 @@ class EnvManifest:
     data_hash: str = ""
     symbol: str = ""
     slot_count: int = 32
+    slot_assignment: str = "stable"
     max_quantity: int = 3
     starting_cash: float = 100_000.0
     commission_per_contract: float = 0.65

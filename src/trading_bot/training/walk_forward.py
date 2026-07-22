@@ -46,7 +46,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v19"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v20"
 
 
 @dataclass(frozen=True)
@@ -357,6 +357,12 @@ def run_walk_forward_training(
                 <= walk_forward_config.max_median_inference_latency_us
             )
             selected = _selected_metric(metrics)
+            slot_changed_count = sum(
+                item["slot_changed_count"] for item in metrics
+            )
+            slot_comparable_count = sum(
+                item["slot_comparable_count"] for item in metrics
+            )
             candidate_runs.append({
                 "model_id": candidate.identifier,
                 "model_spec": candidate,
@@ -395,6 +401,13 @@ def run_walk_forward_training(
                 "stopped_early": bool(metrics[-1]["early_stop_selection"]),
                 "optimizer_updates": sum(
                     item["optimizer_updates"] for item in metrics
+                ),
+                "slot_changed_count": slot_changed_count,
+                "slot_comparable_count": slot_comparable_count,
+                "slot_churn_rate": (
+                    slot_changed_count / slot_comparable_count
+                    if slot_comparable_count
+                    else 0.0
                 ),
                 "full_model_id": replace(
                     candidate,
@@ -456,6 +469,9 @@ def run_walk_forward_training(
                 "episodes_completed": run["episodes_completed"],
                 "stopped_early": run["stopped_early"],
                 "optimizer_updates": run["optimizer_updates"],
+                "slot_changed_count": run["slot_changed_count"],
+                "slot_comparable_count": run["slot_comparable_count"],
+                "slot_churn_rate": run["slot_churn_rate"],
                 "validation_reward_lift_vs_full": None,
                 "validation_score_lift_vs_full": None,
                 "validation_reward_lift_vs_auxiliary_enabled": None,
@@ -823,6 +839,11 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--slot-count", type=int, default=32)
+    parser.add_argument(
+        "--slot-assignment",
+        choices=("stable", "ranked"),
+        default="stable",
+    )
     parser.add_argument("--max-quantity", type=int, default=3)
     parser.add_argument("--underlying-lot-size", type=int, default=25)
     parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
@@ -936,6 +957,7 @@ def main() -> None:
             args.output_dir,
             env_kwargs={
                 "slot_count": args.slot_count,
+                "slot_assignment": args.slot_assignment,
                 "max_quantity": args.max_quantity,
                 "underlying_lot_size": args.underlying_lot_size,
                 "max_abs_underlying_shares": args.max_abs_underlying_shares,

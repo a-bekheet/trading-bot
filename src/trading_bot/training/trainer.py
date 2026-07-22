@@ -25,7 +25,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v17"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v18"
 
 
 @dataclass(frozen=True)
@@ -552,6 +552,8 @@ def train_actor_critic(
         invalid_actions = executions = steps = 0
         requested_option_orders = 0
         requested_underlying_orders = 0
+        slot_changed_count = 0
+        slot_comparable_count = 0
         final_terminal = False
 
         while True:
@@ -589,6 +591,8 @@ def train_actor_critic(
             old_values.append(value.squeeze(0))
             invalid_actions += int(info["invalid_action_count"])
             executions += len(info["executions"])
+            slot_changed_count += int(info.get("slot_changed_count", 0))
+            slot_comparable_count += int(info.get("slot_comparable_count", 0))
             steps += 1
             reached_limit = steps >= rollout_step_limit
             if terminated or truncated or reached_limit:
@@ -991,6 +995,13 @@ def train_actor_critic(
                     (requested_option_orders + requested_underlying_orders)
                     / (steps * episode_env.action_shape[0])
                 ),
+                "slot_changed_count": slot_changed_count,
+                "slot_comparable_count": slot_comparable_count,
+                "slot_churn_rate": (
+                    slot_changed_count / slot_comparable_count
+                    if slot_comparable_count
+                    else 0.0
+                ),
             }
         )
         if stop_for_selection_patience:
@@ -1159,6 +1170,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--slot-count", type=int, default=32)
+    parser.add_argument(
+        "--slot-assignment",
+        choices=("stable", "ranked"),
+        default="stable",
+    )
     parser.add_argument("--max-quantity", type=int, default=3)
     parser.add_argument("--underlying-lot-size", type=int, default=25)
     parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
@@ -1231,6 +1247,7 @@ def main() -> None:
             args.data_dir,
             symbol,
             slot_count=args.slot_count,
+            slot_assignment=args.slot_assignment,
             max_quantity=args.max_quantity,
             underlying_lot_size=args.underlying_lot_size,
             max_abs_underlying_shares=args.max_abs_underlying_shares,

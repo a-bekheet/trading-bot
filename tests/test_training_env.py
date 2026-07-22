@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
-from trading_bot.training.env import OptionsEnv
+from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.manifest import EnvManifest
 
 
@@ -64,7 +64,131 @@ def three_snapshot_dataset() -> SnapshotDataset:
     )
 
 
+def slot_churn_dataset() -> SnapshotDataset:
+    snapshots = []
+    definitions = (
+        ("2026-07-21T14:00:00Z", (("A", 100), ("B", 101))),
+        ("2026-07-21T14:01:00Z", (("A", 100), ("B", 101))),
+        ("2026-07-21T14:02:00Z", (("B", 101), ("C", 102))),
+        ("2026-07-21T14:03:00Z", (("A", 100), ("B", 101), ("C", 102))),
+    )
+    spots = (100.1, 100.9, 101.5, 100.5)
+    for (timestamp, contracts), spot in zip(definitions, spots, strict=True):
+        rows = []
+        for symbol, strike in contracts:
+            rows.append({
+                "collectedAt": timestamp,
+                "contractSymbol": symbol,
+                "symbol": "TEST",
+                "expiration": "2026-08-21",
+                "optionType": "call",
+                "strike": strike,
+                "bid": 1.0,
+                "ask": 1.2,
+                "lastPrice": 1.1,
+                "impliedVolatility": 0.2,
+                "underlyingPrice": spot,
+                "riskFreeRate": 0.04,
+                "delta": 0.5,
+                "gamma": 0.01,
+                "theta": -0.1,
+                "vega": 0.2,
+            })
+        snapshots.append(Snapshot(
+            pd.to_datetime(timestamp, utc=True).isoformat(),
+            pd.DataFrame(rows),
+        ))
+    return SnapshotDataset(tuple(snapshots), "TEST")
+
+
 class OptionsEnvTests(TestCase):
+    def test_stable_slots_preserve_identity_and_expose_replacements(self):
+        env = OptionsEnv(slot_churn_dataset(), slot_count=2)
+        continuity_index = CONTRACT_FEATURES.index("slotContinuity")
+
+        first, first_info = env.reset(seed=5)
+        second, _, _, truncated, second_info = env.step(np.zeros(2, dtype=int))
+        third, _, _, _, third_info = env.step(np.zeros(2, dtype=int))
+
+        self.assertEqual(first.contract_ids, ("A", "B"))
+        np.testing.assert_array_equal(
+            first.contracts[:, continuity_index],
+            (0, 0),
+        )
+        self.assertEqual(first_info["slot_identity_status"], "no_prior_snapshot")
+        self.assertEqual(second.contract_ids, ("A", "B"))
+        np.testing.assert_array_equal(
+            second.contracts[:, continuity_index],
+            (1, 1),
+        )
+        self.assertFalse(truncated)
+        self.assertEqual(second_info["slot_retained_count"], 2)
+        self.assertEqual(second_info["slot_churn_rate"], 0.0)
+        self.assertEqual(third.contract_ids, ("C", "B"))
+        np.testing.assert_array_equal(
+            third.contracts[:, continuity_index],
+            (0, 1),
+        )
+        self.assertEqual(third_info["slot_retained_count"], 1)
+        self.assertEqual(third_info["slot_changed_count"], 1)
+        self.assertEqual(third_info["slot_comparable_count"], 2)
+        self.assertEqual(third_info["slot_churn_rate"], 0.5)
+        self.assertEqual(env.manifest.slot_assignment, "stable")
+
+    def test_ranked_slot_fallback_reports_identity_churn(self):
+        env = OptionsEnv(
+            slot_churn_dataset(),
+            slot_count=2,
+            slot_assignment="ranked",
+        )
+        continuity_index = CONTRACT_FEATURES.index("slotContinuity")
+        first, _ = env.reset()
+        second, _, _, _, info = env.step(np.zeros(2, dtype=int))
+
+        self.assertEqual(first.contract_ids, ("A", "B"))
+        self.assertEqual(second.contract_ids, ("B", "A"))
+        np.testing.assert_array_equal(
+            second.contracts[:, continuity_index],
+            (0, 0),
+        )
+        self.assertEqual(info["slot_identity_status"], "ranked")
+        self.assertEqual(info["slot_churn_rate"], 1.0)
+        reset, reset_info = env.reset(options={"start_index": 1})
+        np.testing.assert_array_equal(
+            reset.contracts[:, continuity_index],
+            (0, 0),
+        )
+        self.assertEqual(reset_info["slot_identity_status"], "no_prior_snapshot")
+
+    def test_held_contract_reclaims_home_slot_after_quote_gap(self):
+        env = OptionsEnv(slot_churn_dataset(), slot_count=2)
+        env.reset()
+
+        env.step(np.array([1, 0]))
+        missing, _, _, _, _ = env.step(np.zeros(2, dtype=int))
+        restored, _, _, _, info = env.step(np.zeros(2, dtype=int))
+
+        self.assertEqual(missing.contract_ids, ("C", "B"))
+        self.assertEqual(restored.contract_ids, ("A", "B"))
+        self.assertTrue(restored.action_mask[0, env.max_quantity + 1])
+        self.assertEqual(info["slot_changed_count"], 1)
+
+    def test_visible_held_contract_wins_home_collision(self):
+        env = OptionsEnv(slot_churn_dataset(), slot_count=2)
+        env.reset()
+
+        env.step(np.array([1, 0]))
+        env.step(np.zeros(2, dtype=int))
+        restored, _, _, _, _ = env.step(np.array([1, 0]))
+
+        self.assertEqual(restored.contract_ids, ("C", "A"))
+        self.assertTrue(restored.action_mask[0, env.max_quantity + 1])
+        self.assertTrue(restored.action_mask[1, env.max_quantity + 1])
+
+    def test_rejects_unknown_slot_assignment(self):
+        with self.assertRaisesRegex(ValueError, "slot_assignment"):
+            OptionsEnv(demo_dataset(), slot_assignment="random")
+
     def test_reset_is_deterministic_and_step_has_no_lookahead(self):
         env = OptionsEnv(
             demo_dataset(),
@@ -267,6 +391,13 @@ class OptionsEnvTests(TestCase):
             },
         )
         self.assertTrue(all(row["strike"] == 100 for row in selected))
+
+        duplicated = pd.concat((frame, frame.iloc[[0]]), ignore_index=True)
+        duplicate_safe = env._ranked_slots(duplicated)
+        self.assertEqual(
+            len({str(row["contractSymbol"]) for row in duplicate_safe}),
+            len(duplicate_safe),
+        )
 
     def test_single_snapshot_truncates_without_unmarkable_fill(self):
         source = demo_dataset()

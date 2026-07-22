@@ -48,7 +48,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v3"
+    "research-demo.universe-walk-forward.v4"
 )
 
 
@@ -376,6 +376,12 @@ def run_universe_walk_forward_training(
                 <= walk_forward_config.max_median_inference_latency_us
             )
             selected = _selected_metric(metrics)
+            slot_changed_count = sum(
+                item["slot_changed_count"] for item in metrics
+            )
+            slot_comparable_count = sum(
+                item["slot_comparable_count"] for item in metrics
+            )
             candidate_runs.append({
                 "model_id": candidate.identifier,
                 "model_spec": candidate,
@@ -395,6 +401,13 @@ def run_universe_walk_forward_training(
                 ),
                 "optimizer_updates": sum(
                     item["optimizer_updates"] for item in metrics
+                ),
+                "slot_changed_count": slot_changed_count,
+                "slot_comparable_count": slot_comparable_count,
+                "slot_churn_rate": (
+                    slot_changed_count / slot_comparable_count
+                    if slot_comparable_count
+                    else 0.0
                 ),
                 "selected": selected,
                 "full_model_id": replace(
@@ -463,6 +476,9 @@ def run_universe_walk_forward_training(
                 "active_input_count": run["active_input_count"],
                 "masked_input_count": run["masked_input_count"],
                 "optimizer_updates": run["optimizer_updates"],
+                "slot_changed_count": run["slot_changed_count"],
+                "slot_comparable_count": run["slot_comparable_count"],
+                "slot_churn_rate": run["slot_churn_rate"],
                 "episodes_completed": len(run["metrics"]),
                 "stopped_early": bool(
                     run["metrics"][-1]["early_stop_selection"]
@@ -802,6 +818,7 @@ def main() -> None:
             args.output_dir,
             env_kwargs={
                 "slot_count": args.slot_count,
+                "slot_assignment": args.slot_assignment,
                 "max_quantity": args.max_quantity,
                 "underlying_lot_size": args.underlying_lot_size,
                 "max_abs_underlying_shares": (

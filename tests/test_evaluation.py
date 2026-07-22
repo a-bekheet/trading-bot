@@ -175,6 +175,7 @@ class EvaluationTests(TestCase):
                 Path(directory),
                 "TEST",
                 slot_count=1,
+                slot_assignment="ranked",
                 max_quantity=1,
                 underlying_lot_size=25,
                 underlying_commission_per_share=0.01,
@@ -195,5 +196,7 @@ class EvaluationTests(TestCase):
 
         self.assertAlmostEqual(base_info["executions"][0]["price"], 100.1)
         self.assertAlmostEqual(stressed_info["executions"][0]["price"], 100.2)
+        self.assertEqual(stressed.slot_assignment, "ranked")
+        self.assertEqual(stressed.manifest.slot_assignment, "ranked")
         self.assertAlmostEqual(base_info["fees"], 0.25)
         self.assertAlmostEqual(stressed_info["fees"], 0.5)

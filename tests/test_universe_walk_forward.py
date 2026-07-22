@@ -138,6 +138,10 @@ class UniverseWalkForwardTests(TestCase):
         )
         self.assertEqual(fold["heldout"]["aggregate"]["symbol_count"], 2)
         self.assertEqual(fold["heldout"]["aggregate"]["report_count"], 2)
+        self.assertTrue(all(
+            candidate["slot_churn_rate"] == 0.0
+            for candidate in fold["model_selection"]["candidates"]
+        ))
         self.assertTrue(
             all(
                 evidence["agent"][0]["steps"] == 1

@@ -290,6 +290,7 @@ def cost_stressed_environment(
         source.dataset,
         manifest=manifest,
         slot_count=source.slot_count,
+        slot_assignment=source.slot_assignment,
         max_quantity=source.max_quantity,
         starting_cash=source.starting_cash,
         commission_per_contract=commission,

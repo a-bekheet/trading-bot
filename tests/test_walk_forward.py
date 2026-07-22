@@ -140,6 +140,7 @@ class WalkForwardTrainingTests(TestCase):
             0,
         )
         self.assertTrue(candidate["deployment_eligible"])
+        self.assertEqual(candidate["slot_churn_rate"], 0.0)
         self.assertIsNone(candidate["ineligibility_reason"])
         self.assertFalse(
             fold["model_selection"]["eligibility_constraint"]["enabled"]
