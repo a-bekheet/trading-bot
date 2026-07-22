@@ -8,6 +8,8 @@ from typing import Any, Iterable, Sequence
 
 import pandas as pd
 
+from trading_bot.execution.agent_store import AgentPaperStore
+
 
 AGENT_LABELS = {
     "gru": "GRU Agent",
@@ -17,6 +19,129 @@ AGENT_LABELS = {
 }
 
 ARENA_WATCH_STATUS_FILENAME = "_arena_watch_status.json"
+AGENT_PAPER_DATABASE_FILENAME = "agent_paper.db"
+PAPER_AGENT_WATCH_STATUS_FILENAME = "_paper_agent_watch_status.json"
+
+
+def load_paper_agent_watch_status(data_dir: Path) -> dict[str, Any] | None:
+    """Load the paper-agent service heartbeat without importing ML code."""
+    path = data_dir / PAPER_AGENT_WATCH_STATUS_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not str(
+        payload.get("schema_version", "")
+    ).startswith("research-demo.paper-agent-watch."):
+        return None
+    return payload
+
+
+def paper_agent_overview(data_dir: Path) -> pd.DataFrame:
+    """Project isolated live paper deployments without importing Torch."""
+    database = data_dir / AGENT_PAPER_DATABASE_FILENAME
+    if not database.is_file():
+        return pd.DataFrame()
+    records = []
+    deployments = AgentPaperStore(database).deployments()
+    current = []
+    seen_symbols: set[str] = set()
+    for deployment in deployments:
+        symbol = str(deployment.get("symbol", "")).upper()
+        if not symbol or symbol in seen_symbols:
+            continue
+        current.append(deployment)
+        seen_symbols.add(symbol)
+    for deployment in current:
+        environment = deployment.get("environment_state") or {}
+        contract = environment.get("environment_contract") or {}
+        recurrent = deployment.get("recurrent_state") or {}
+        initial_cash = _number(contract.get("starting_cash"))
+        nav = _number(deployment.get("last_nav"))
+        records.append({
+            "Agent ID": deployment.get("agent_id", "unknown"),
+            "Ticker": deployment.get("symbol", "unknown"),
+            "Runtime": _humanize(str(deployment.get("status", "unknown"))),
+            "Activation": (
+                "Active" if deployment.get("activated") else "Guarded"
+            ),
+            "Topology": _humanize(str(deployment.get("topology", "unknown"))),
+            "Decisions": int(deployment.get("decision_count", 0)),
+            "Executions": int(deployment.get("execution_count", 0)),
+            "Recurrent steps": int(recurrent.get("steps", 0)),
+            "Positions": len(environment.get("positions") or {}),
+            "Cash": _number(deployment.get("last_cash")),
+            "Equity": nav,
+            "Paper return": (
+                nav / initial_cash - 1.0
+                if initial_cash > 0 and pd.notna(nav)
+                else float("nan")
+            ),
+            "Last observation": deployment.get("last_observation_timestamp"),
+            "Last decision": deployment.get("last_decision_timestamp"),
+            "Message": deployment.get("message", ""),
+            "Checkpoint": deployment.get("checkpoint_path", ""),
+            "Updated": deployment.get("updated_at"),
+            "Deployment ID": deployment.get("deployment_id", ""),
+        })
+    return pd.DataFrame(records)
+
+
+def paper_agent_decisions(data_dir: Path, limit: int = 500) -> pd.DataFrame:
+    """Project proposed versus actually sandboxed orders and fills."""
+    database = data_dir / AGENT_PAPER_DATABASE_FILENAME
+    if not database.is_file():
+        return pd.DataFrame()
+    store = AgentPaperStore(database)
+    deployment_by_id = {}
+    seen_symbols: set[str] = set()
+    for item in store.deployments():
+        symbol = str(item.get("symbol", "")).upper()
+        if not symbol or symbol in seen_symbols:
+            continue
+        deployment_by_id[item["deployment_id"]] = item
+        seen_symbols.add(symbol)
+    records = []
+    for decision in store.decisions(limit=limit):
+        deployment = deployment_by_id.get(decision["deployment_id"])
+        if deployment is None:
+            continue
+        research_orders = decision.get("research_orders", [])
+        sandbox_orders = decision.get("sandbox_orders", [])
+        executions = decision.get("executions", [])
+        records.append({
+            "Timestamp": decision.get("snapshot_timestamp"),
+            "Ticker": deployment.get("symbol", "unknown"),
+            "Agent ID": deployment.get("agent_id", "unknown"),
+            "Activation": "Active" if decision.get("activated") else "Guarded",
+            "Research action": _decision_label(
+                research_orders,
+                executions if decision.get("activated") else [],
+                int(decision.get("invalid_action_count", 0)),
+            ),
+            "Sandbox action": _decision_label(
+                sandbox_orders,
+                executions,
+                int(decision.get("invalid_action_count", 0)),
+            ),
+            "Requested legs": sum(int(value) != 0 for value in research_orders),
+            "Sandbox legs": sum(int(value) != 0 for value in sandbox_orders),
+            "Executions": len(executions),
+            "Reward": _number(decision.get("reward")),
+            "Reward horizon": _humanize(
+                str(decision.get("reward_horizon", "unknown"))
+            ),
+            "Cash": _number(decision.get("cash")),
+            "NAV": _number(decision.get("nav")),
+            "Processed": decision.get("processed_at"),
+        })
+    frame = pd.DataFrame(records)
+    if not frame.empty:
+        frame["Timestamp"] = pd.to_datetime(frame["Timestamp"], utc=True)
+        frame["Processed"] = pd.to_datetime(frame["Processed"], utc=True)
+    return frame
 
 
 def load_arena_watch_status(data_dir: Path) -> dict[str, Any] | None:

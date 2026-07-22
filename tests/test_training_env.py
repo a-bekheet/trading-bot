@@ -163,6 +163,39 @@ def drawdown_dataset() -> SnapshotDataset:
 
 
 class OptionsEnvTests(TestCase):
+    def test_json_state_round_trip_preserves_portfolio_and_action_mask(self):
+        dataset = three_snapshot_dataset()
+        env = OptionsEnv(dataset, slot_count=2, max_quantity=1)
+        observation, _ = env.reset()
+        buy = np.zeros(env.action_shape[0], dtype=int)
+        buy[0] = 1
+        observation, _, _, _, _ = env.step(buy)
+        state = env.snapshot_state()
+
+        restored = OptionsEnv(dataset, slot_count=2, max_quantity=1)
+        restored_observation, info = restored.restore_state(state)
+
+        self.assertTrue(info["restored"])
+        self.assertEqual(restored.snapshot_state(), state)
+        np.testing.assert_allclose(restored_observation.market, observation.market)
+        np.testing.assert_allclose(
+            restored_observation.portfolio,
+            observation.portfolio,
+        )
+        np.testing.assert_array_equal(
+            restored_observation.action_mask,
+            observation.action_mask,
+        )
+
+    def test_state_restore_rejects_a_different_execution_contract(self):
+        env = OptionsEnv(demo_dataset(), slot_count=2, max_quantity=1)
+        env.reset()
+        state = env.snapshot_state()
+
+        incompatible = OptionsEnv(demo_dataset(), slot_count=2, max_quantity=2)
+        with self.assertRaisesRegex(ValueError, "contract is incompatible"):
+            incompatible.restore_state(state)
+
     def test_explicit_nonregular_session_masks_every_trade(self):
         source = demo_dataset()
         snapshots = []

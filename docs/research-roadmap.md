@@ -491,6 +491,20 @@ This delays the first arena but changes it from a guaranteed no-learning run to
 the first minimally actionable integration experiment; thirteen intraday states
 remain far too small for an alpha claim.
 
+The v0.85 paper-agent runtime turns selected artifacts into persistent operating
+objects without weakening those research gates. Every newest per-ticker winner
+is restored from its exact SHA-256-bound checkpoint, receives its own portfolio
+and recurrent cursor, and advances once per eligible post-test snapshot. A
+single SQLite transaction commits environment state, JSON-safe hidden state,
+and a unique decision ledger, making restarts idempotent. Recurrent warm-up uses
+only pre-deployment context and executes no orders. Guarded policies continue to
+emit inspectable research actions while the sandbox substitutes HOLD; only an
+activated winner can create simulated fills. A change-aware background watcher
+avoids checkpoint reloads when neither market data nor selections changed, and
+the Agent Lab shows current runtime state, paper equity, proposals, and fills.
+This is tangible paper operation, not live brokerage or evidence of alpha; old
+checkpoint schemas and pre-v0.84 noneligible cutoffs deliberately fail closed.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

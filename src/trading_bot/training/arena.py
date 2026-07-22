@@ -106,7 +106,11 @@ def _has_executable_option_quote(frame) -> bool:
     return False
 
 
-def _snapshot_readiness(snapshot, max_quote_age_seconds: float) -> dict[str, bool]:
+def snapshot_execution_readiness(
+    snapshot,
+    max_quote_age_seconds: float,
+) -> dict[str, bool]:
+    """Return the strict online/training execution checks for one snapshot."""
     first = snapshot.frame.iloc[0]
     regular, regular_coverage = market_state_features(first.get("marketState"))
     quote_age, quote_coverage = underlying_quote_age(
@@ -132,7 +136,7 @@ def _partition_readiness(
     fresh_quote_count = 0
     executable_quote_count = 0
     for snapshot in dataset.snapshots:
-        checks = _snapshot_readiness(snapshot, max_quote_age_seconds)
+        checks = snapshot_execution_readiness(snapshot, max_quote_age_seconds)
         regular_count += int(checks["regular"])
         fresh_quote_count += int(checks["fresh_underlying_quote"])
         executable_quote_count += int(checks["executable_option_quote"])
@@ -165,7 +169,7 @@ def eligible_arena_dataset(
     if not math.isfinite(max_quote_age_seconds) or max_quote_age_seconds < 0:
         raise ValueError("max_quote_age_seconds must be finite and non-negative")
     checks = [
-        _snapshot_readiness(snapshot, max_quote_age_seconds)
+        snapshot_execution_readiness(snapshot, max_quote_age_seconds)
         for snapshot in dataset.snapshots
     ]
     eligible_snapshots = tuple(

@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
+from trading_bot.execution.agent_store import AgentPaperStore
 from trading_bot.interface.results import (
     agent_decision_tape,
     agent_leaderboard,
@@ -17,6 +18,9 @@ from trading_bot.interface.results import (
     feature_ablation_results,
     heldout_results,
     load_arena_watch_status,
+    load_paper_agent_watch_status,
+    paper_agent_decisions,
+    paper_agent_overview,
     promotion_assessment,
     trade_ledger,
 )
@@ -119,6 +123,70 @@ def result_summary():
 
 
 class InterfaceResultTests(TestCase):
+    def test_loads_only_versioned_paper_agent_heartbeat(self):
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            path = data_dir / "_paper_agent_watch_status.json"
+            path.write_text("{}", encoding="utf-8")
+            self.assertIsNone(load_paper_agent_watch_status(data_dir))
+            expected = {
+                "schema_version": "research-demo.paper-agent-watch.v1",
+                "status": "running",
+            }
+            path.write_text(json.dumps(expected), encoding="utf-8")
+
+            self.assertEqual(load_paper_agent_watch_status(data_dir), expected)
+
+    def test_projects_persistent_paper_agent_state_and_guarded_decision(self):
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            store = AgentPaperStore(data_dir / "agent_paper.db")
+            store.commit_cycle(
+                {
+                    "deployment_id": "dep-1",
+                    "agent_id": "AAPL-surface-gru",
+                    "symbol": "AAPL",
+                    "model_id": "surface-gru",
+                    "topology": "surface_gnn",
+                    "checkpoint_path": "/tmp/aapl.pt",
+                    "checkpoint_sha256": "a" * 64,
+                    "activated": False,
+                    "activation_reason": "edge below threshold",
+                    "status": "guarded",
+                    "message": "processed 1 new decision(s)",
+                    "last_observation_timestamp": "2026-07-22T14:00:00Z",
+                    "last_decision_timestamp": "2026-07-22T14:00:00Z",
+                    "last_cash": 100_000.0,
+                    "last_nav": 100_000.0,
+                    "environment_state": {
+                        "environment_contract": {"starting_cash": 100_000.0},
+                        "positions": {},
+                    },
+                    "recurrent_state": {"steps": 4},
+                },
+                [{
+                    "snapshot_timestamp": "2026-07-22T14:00:00Z",
+                    "activated": False,
+                    "research_orders": [1, 0],
+                    "sandbox_orders": [0, 0],
+                    "executions": [],
+                    "reward": 0.0,
+                    "cash": 100_000.0,
+                    "nav": 100_000.0,
+                    "invalid_action_count": 0,
+                }],
+            )
+
+            overview = paper_agent_overview(data_dir)
+            decisions = paper_agent_decisions(data_dir)
+
+        self.assertEqual(overview.iloc[0]["Topology"], "Surface Gnn")
+        self.assertEqual(overview.iloc[0]["Activation"], "Guarded")
+        self.assertEqual(overview.iloc[0]["Recurrent steps"], 4)
+        self.assertEqual(decisions.iloc[0]["Research action"], "UNFILLED")
+        self.assertEqual(decisions.iloc[0]["Sandbox action"], "HOLD")
+        self.assertEqual(decisions.iloc[0]["Executions"], 0)
+
     def test_loads_valid_arena_watch_status_and_ignores_invalid_files(self):
         with TemporaryDirectory() as directory:
             data_dir = Path(directory)

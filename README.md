@@ -86,6 +86,13 @@ requires positive held-out and doubled-cost returns, improvement over no-op with
 statistical support, adequate history, regular-session provenance, and no
 invalid actions.
 
+The same tab also shows a persistent paper-agent loop. Each selected checkpoint
+gets an isolated account, exact checkpoint hash, recurrent hidden-state cursor,
+and idempotent decision ledger in `data/agent_paper.db`. The loop records the
+model's proposed orders on each new regular, fresh, executable post-evaluation
+snapshot. A winner that did not clear the validation activation gate is still
+visible, but its actual sandbox order is forced to HOLD.
+
 The remaining tabs let you choose a ticker, inspect its latest call or put
 snapshot, and submit fake option orders. Paper buys fill at the saved ask and
 paper sells fill at the saved bid.
@@ -136,6 +143,27 @@ retrain on every collector cycle. The Agent Results tab displays whether it is
 waiting, running, complete, or already current. `arena-watch --once` performs a
 single check; `arena-service uninstall` stops and removes the LaunchAgent.
 
+After a compatible arena finishes, advance the selected policies once:
+
+```bash
+paper-agents --data-dir data
+```
+
+On macOS, install the change-aware paper loop alongside the collector and arena
+watcher:
+
+```bash
+paper-agent-service install
+```
+
+It checks inputs every 30 seconds but reloads checkpoints only when a CSV or
+walk-forward summary changed. Its atomic heartbeat is
+`data/_paper_agent_watch_status.json`; stdout/stderr remain under `data/`.
+`paper-agent-watch --once` is the auditable one-cycle form, and
+`paper-agent-service uninstall` removes the service. Old checkpoints whose
+feature/checkpoint schema predates the runtime fail closed and remain visible as
+errors until a current arena produces compatible weights.
+
 For a one-ticker drill-down with explicit settings:
 
 ```bash
@@ -178,6 +206,15 @@ trades = broker.trades()
 `broker.buy(...)` and `broker.sell(...)` require explicit contract metadata,
 quantity, and fill price. The paper broker never fetches quotes and has no live
 broker adapter, which keeps execution decisions separate from market data.
+
+Automated policies do not share this manual account. Their separate
+`agent_paper.db` store atomically commits the portfolio state, model-bound
+recurrent cursor, and unique per-snapshot decision. This avoids double fills
+after a restart and prevents one ticker or checkpoint from mutating another
+agent's capital. The newest decision labels its reward as same-snapshot
+execution-only until a later eligible mark exists; current paper equity is the
+account result. It remains simulated execution only; no code path connects the
+agent store to a live broker.
 
 ## Project structure
 

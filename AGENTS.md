@@ -19,8 +19,10 @@ does not place live trades.
 - `src/trading_bot/market_data/`: ticker universe, Yahoo option retrieval,
   risk-free rates, and recurring CSV collection.
 - `src/trading_bot/analytics/`: deterministic financial calculations.
-- `src/trading_bot/execution/`: the paper broker and portfolio valuation. It
-  must remain independent of any future live-broker adapter.
+- `src/trading_bot/execution/`: the manual paper broker, portfolio valuation,
+  isolated agent store, selected-checkpoint runtime, change-aware watcher, and
+  its macOS service wrapper. It must remain independent of any future
+  live-broker adapter.
 - `src/trading_bot/interface/`: the Streamlit data explorer and its data loader.
 - `src/trading_bot/training/`: versioned research-demo schemas, manifests,
   snapshot loader, fixed-slot environment, deterministic baselines, and
@@ -84,7 +86,13 @@ Create those packages only when implementing their first real behavior.
    session-state coverage.
 9. `execution.paper_broker` stores fake cash, long positions, and fills in
    `data/paper_portfolio.db`; `execution.valuation` marks positions from CSVs.
-10. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
+10. `execution.agent_runtime` restores each newest selected checkpoint into an
+    isolated account in `data/agent_paper.db`. It processes only eligible
+    post-evaluation snapshots, atomically binds portfolio and recurrent state to
+    the checkpoint SHA-256, and substitutes HOLD unless validation activated
+    the policy. `agent_watch` invokes it only when data or run artifacts change;
+    `agent_service` is the macOS LaunchAgent wrapper.
+11. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
    `reset`/`step` API. It is `research_demo` only and must not be used as a
    historical-performance benchmark.
 
@@ -175,6 +183,37 @@ Future agents should read quotes from `interface.data.load_latest_snapshot`,
 make a decision, then call `PaperBroker.buy` or `PaperBroker.sell` with explicit
 contract metadata and price. Do not let an agent invent or silently substitute
 a missing quote.
+
+Selected recurrent agents use the stricter `AgentPaperStore` boundary instead
+of the manual `PaperBroker` account:
+
+- One deployment is the tuple of stable agent ID and exact checkpoint SHA-256.
+- Each deployment owns independent cash, positions, underlying shares,
+  collateral, risk state, recurrent hidden state, and snapshot cursor.
+- Portfolio and recurrent state are committed in the same SQLite transaction as
+  every new decision. `(deployment_id, snapshot_timestamp)` is unique, so a
+  restart cannot replay a paper fill.
+- Hold the database-specific advisory lock for the entire fleet cycle. A manual
+  command and background watcher must never restore and overwrite the same
+  deployment concurrently.
+- Restore only JSON-safe state and validate the complete environment contract.
+  Never use pickle for runtime cursor persistence.
+- Warm recurrent state on at most the checkpoint sequence length ending at the
+  held-out cutoff. Never execute or record those warm-up outputs.
+- Decisions begin strictly after the selected fold's held-out end. Current
+  checkpoint provenance and run-summary model ID/activation must agree.
+- Label the newest decision reward `same_snapshot_execution_only`; there is no
+  invented future mark. Earlier decisions processed with a real next snapshot
+  use `through_next_eligible_snapshot`. Paper equity, not a provisional reward,
+  is the current account result.
+- Record research orders even for guarded agents, but replace the executable
+  action vector with all-zero HOLD unless the validation gate activated it.
+- Only provider-confirmed regular snapshots with fresh underlying provenance
+  and an executable option quote may advance the runtime.
+- Old or incompatible checkpoints fail closed. Do not fall back to an older
+  model merely to show activity.
+- The agent database is simulated execution state and must never be wired to a
+  live broker adapter without a separately authorized milestone.
 
 ## RL research-demo contract
 

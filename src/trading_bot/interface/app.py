@@ -28,6 +28,9 @@ from trading_bot.interface.results import (
     feature_ablation_results,
     heldout_results,
     load_arena_watch_status,
+    load_paper_agent_watch_status,
+    paper_agent_decisions,
+    paper_agent_overview,
     promotion_assessment,
     trade_ledger,
 )
@@ -179,6 +182,81 @@ with agent_tab:
             )
         with st.expander("Arena evidence readiness"):
             st.dataframe(readiness, width="stretch", hide_index=True)
+    paper_agents = paper_agent_overview(DATA_DIR)
+    paper_decisions = paper_agent_decisions(DATA_DIR)
+    paper_watch = load_paper_agent_watch_status(DATA_DIR)
+    st.subheader("Running paper-agent loop")
+    st.caption(
+        "Each checkpoint has an isolated account and recurrent cursor. Proposed "
+        "orders are recorded on every new eligible snapshot, but only policies "
+        "that passed the validation gate may create simulated fills."
+    )
+    if paper_agents.empty:
+        st.info(
+            "No persistent paper-agent cycle has run yet. Start one with "
+            "`paper-agents --data-dir data`."
+        )
+    else:
+        if paper_watch:
+            st.caption(
+                f"Paper-agent heartbeat: "
+                f"{paper_watch.get('last_heartbeat_at', 'Unknown')} · "
+                f"{paper_watch.get('completed_count', 0)} completed · "
+                f"{paper_watch.get('failure_count', 0)} failed"
+            )
+            if paper_watch.get("status") in {"degraded", "error"}:
+                st.warning(
+                    "The paper-agent service is fail-closed because one or more "
+                    "selected checkpoints are incompatible or not yet eligible. "
+                    "The arena watcher will replace them after a current run."
+                )
+        runtime_metrics = st.columns(6)
+        runtime_metrics[0].metric("Deployments", len(paper_agents))
+        runtime_metrics[1].metric(
+            "Runtime active",
+            int((paper_agents["Runtime"] == "Active").sum()),
+        )
+        runtime_metrics[2].metric(
+            "Guarded",
+            int((paper_agents["Activation"] == "Guarded").sum()),
+        )
+        runtime_metrics[3].metric(
+            "Live decisions", int(paper_agents["Decisions"].sum())
+        )
+        runtime_metrics[4].metric(
+            "Paper fills", int(paper_agents["Executions"].sum())
+        )
+        runtime_metrics[5].metric(
+            "Median paper return",
+            f"{float(paper_agents['Paper return'].median()):.3%}",
+        )
+        st.dataframe(
+            paper_agents,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Cash": st.column_config.NumberColumn(format="$%.2f"),
+                "Equity": st.column_config.NumberColumn(format="$%.2f"),
+                "Paper return": st.column_config.NumberColumn(format="percent"),
+            },
+        )
+        with st.expander("Live paper-agent decision ledger"):
+            if paper_decisions.empty:
+                st.info(
+                    "Deployments are registered, but no eligible post-evaluation "
+                    "snapshot has arrived yet."
+                )
+            else:
+                st.dataframe(
+                    paper_decisions,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Reward": st.column_config.NumberColumn(format="%.6f"),
+                        "Cash": st.column_config.NumberColumn(format="$%.2f"),
+                        "NAV": st.column_config.NumberColumn(format="$%.2f"),
+                    },
+                )
     if not runs:
         st.subheader("No walk-forward agent run yet")
         st.write(
