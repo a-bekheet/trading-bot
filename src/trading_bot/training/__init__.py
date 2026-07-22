@@ -32,6 +32,7 @@ from trading_bot.training.sequence import (
 from trading_bot.training.splits import WalkForwardSplit, walk_forward_splits
 from trading_bot.training.trainer import (
     BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+    CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION,
     RECURRENT_POLICY_STATE_SCHEMA_VERSION,
     BatchedRecurrentPolicyState,
     BatchedStreamingRecurrentPolicy,
@@ -42,6 +43,7 @@ from trading_bot.training.trainer import (
     batched_recurrent_policy,
     benchmark_batched_recurrent_inference,
     benchmark_recurrent_inference,
+    critic_balance_diagnostics,
     evaluate_recurrent_policy,
     load_checkpoint,
     recurrent_policy,
@@ -61,6 +63,7 @@ from trading_bot.training.walk_forward import (
 
 __all__ = [
     "Action", "BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION",
+    "CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION",
     "BatchedRecurrentPolicyState", "BatchedStreamingRecurrentPolicy",
     "BootstrapComparison", "CostScenario", "EpisodeReport",
     "EpisodeTrace", "EnvManifest", "FEATURE_ABLATION_GROUPS",
@@ -72,6 +75,7 @@ __all__ = [
     "UNIVERSE_WALK_FORWARD_SCHEMA_VERSION",
     "batched_recurrent_policy", "benchmark_batched_recurrent_inference",
     "benchmark_recurrent_inference",
+    "critic_balance_diagnostics",
     "aggregate_selection_scores",
     "buy_first_then_delta_hedge", "cash_secured_short_put_delta_hedge",
     "cost_stressed_environment",

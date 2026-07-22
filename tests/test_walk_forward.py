@@ -610,6 +610,14 @@ class WalkForwardTrainingTests(TestCase):
             0,
         )
         self.assertTrue(candidate["deployment_eligible"])
+        self.assertEqual(
+            candidate["critic_balance_diagnostic"]["selection_effect"],
+            "diagnostic_only",
+        )
+        self.assertEqual(
+            set(candidate["critic_balance_diagnostic"]["per_symbol"]),
+            {"TEST"},
+        )
         self.assertEqual(candidate["slot_churn_rate"], 0.0)
         self.assertIsNone(candidate["ineligibility_reason"])
         self.assertFalse(

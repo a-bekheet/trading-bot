@@ -213,6 +213,20 @@ class UniverseWalkForwardTests(TestCase):
             == [17, 117]
             for candidate in fold["model_selection"]["candidates"]
         ))
+        self.assertTrue(all(
+            candidate["critic_balance_diagnostic"]["cross_symbol"][
+                "available"
+            ]
+            and set(candidate["critic_balance_diagnostic"]["per_symbol"])
+            == {"AAA", "BBB"}
+            and candidate["critic_balance_diagnostic"]["selection_effect"]
+            == "diagnostic_only"
+            for candidate in fold["model_selection"]["candidates"]
+        ))
+        self.assertEqual(
+            set(manifest["critic_balance_diagnostic"]["per_symbol"]),
+            {"AAA", "BBB"},
+        )
         self.assertIn(manifest["training"]["seed"], {17, 117})
         self.assertTrue(
             all(

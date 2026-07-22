@@ -37,6 +37,7 @@ from trading_bot.training.trainer import (
     TrainingConfig,
     _environment_kwargs_from_args,
     benchmark_recurrent_inference,
+    critic_balance_diagnostics,
     recurrent_policy,
     save_checkpoint,
     train_actor_critic,
@@ -58,7 +59,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v31"
+    "research-demo.universe-walk-forward.v32"
 )
 
 
@@ -495,6 +496,9 @@ def run_universe_walk_forward_training(
                         metrics
                     ),
                     "entropy_evidence": _entropy_evidence(metrics),
+                    "critic_balance_evidence": critic_balance_diagnostics(
+                        metrics
+                    ),
                     "training_config": candidate_training,
                     "parameter_count": parameter_count,
                     "inference_latency": inference_latency,
@@ -644,6 +648,9 @@ def run_universe_walk_forward_training(
                 "effective_entropy_objective": run[
                     "training_config"
                 ].entropy_objective,
+                "critic_balance_diagnostic": run[
+                    "critic_balance_evidence"
+                ],
                 "parameter_count": run["parameter_count"],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
@@ -714,6 +721,9 @@ def run_universe_walk_forward_training(
                             "start_sampling_evidence"
                         ],
                         "entropy": replicate["entropy_evidence"],
+                        "critic_balance_diagnostic": replicate[
+                            "critic_balance_evidence"
+                        ],
                     }
                     for replicate in group["replicates"]
                 ],

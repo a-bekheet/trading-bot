@@ -129,6 +129,16 @@ score dispersion or blend mean performance toward the worst ticker. The
 current executable command is in-sample integration evidence; a shared
 walk-forward runner must precede any cross-ticker alpha claim.
 
+Shared training now records ticker-level critic-scale diagnostics without an
+extra backward pass. Reward and return-target scales, value residuals, and exact
+pre-clip gradients of the disjoint actor and critic output heads are aggregated
+with their correct transition or optimizer-update weights. The shared recurrent
+trunk is deliberately labeled unattributed. A 10x engineering threshold can
+recommend, but never select, a future normalization ablation. In a tiny real
+five-ticker mixture smoke, return-target and critic-head-gradient scale ratios
+were 3.57x and 9.25x, so no method was promoted. This is insufficient-history
+evidence for restraint, not evidence that critic imbalance is absent.
+
 That universe walk-forward runner is now executable. It combines independent
 per-ticker chronological splits with a global wall-clock separation check,
 selects one architecture/checkpoint from robust aggregate validation only, and

@@ -523,6 +523,22 @@ label multi-ticker scopes `in_sample_universe_research_demo` or
 and dispersion penalty. A symbol embedding is not part of the current contract;
 the dimensionless shared policy must remain usable on unseen tickers.
 
+Every training episode must retain critic-balance evidence: reward RMS,
+return-target level/dispersion/RMS/maximum magnitude, pre-update value-residual
+RMS, and the actor-head and critic-head gradient norms measured after backward
+but before global clipping. These norms are coefficient-weighted gradients of
+the disjoint output heads only. Never describe them as shared-trunk gradient
+attribution or a full per-task gradient Gram matrix.
+
+Aggregate scale metrics by transition count and head-gradient metrics by actual
+optimizer updates for each ticker. Preserve zero-return tickers instead of
+dropping them from the evidence. A cross-ticker ratio at or above the declared
+10x engineering threshold, or a mixture of positive and zero return-target
+scales, may recommend a normalization ablation, but the diagnostic must remain
+selection-inert. It cannot change a checkpoint, candidate, seed, or held-out
+result. PopArt, critic LayerNorm, or gradient balancing must enter as separate
+predeclared validation candidates and only after the diagnostic motivates them.
+
 `run_universe_walk_forward_training` is the shared-policy research boundary.
 Apply identical ordinal split indices to each ticker, but additionally require
 global wall-clock separation: maximum train arrival below minimum validation

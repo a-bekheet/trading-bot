@@ -24,6 +24,7 @@ from trading_bot.training.sequence import AUXILIARY_TARGET_FEATURES, observation
 from trading_bot.training.trainer import (
     BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION,
     CHECKPOINT_SCHEMA_VERSION,
+    CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION,
     RECURRENT_POLICY_STATE_SCHEMA_VERSION,
     BatchedRecurrentPolicyState,
     BatchedStreamingRecurrentPolicy,
@@ -44,6 +45,7 @@ from trading_bot.training.trainer import (
     batched_recurrent_policy,
     benchmark_batched_recurrent_inference,
     benchmark_recurrent_inference,
+    critic_balance_diagnostics,
     evaluate_recurrent_policy,
     load_checkpoint,
     recurrent_policy,
@@ -733,6 +735,25 @@ class TrainerTests(TestCase):
             and item["entropy_objective"] == "feasible_normalized"
             for item in metrics
         ))
+        self.assertTrue(all(
+            item["reward_rms"] >= 0
+            and item["return_target_rms"] >= 0
+            and item["return_target_max_abs"] >= 0
+            and item["value_residual_rms"] >= 0
+            and item["actor_head_gradient_norm"] >= 0
+            and item["critic_head_gradient_norm"] >= 0
+            and all(math.isfinite(item[name]) for name in (
+                "reward_rms",
+                "return_target_mean",
+                "return_target_std",
+                "return_target_rms",
+                "return_target_max_abs",
+                "value_residual_rms",
+                "actor_head_gradient_norm",
+                "critic_head_gradient_norm",
+            ))
+            for item in metrics
+        ))
         self.assertEqual(sum(item["selected_checkpoint"] for item in metrics), 1)
         self.assertTrue(all(torch.isfinite(parameter).all() for parameter in model.parameters()))
         self.assertFalse(torch.equal(
@@ -766,6 +787,13 @@ class TrainerTests(TestCase):
                 "mean_per_decision_over_explorable_factors_normalized_by_log_feasible_actions"
             ),
         })
+        self.assertEqual(
+            sidecar["critic_balance_diagnostic"]["schema_version"],
+            CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION,
+        )
+        self.assertFalse(
+            sidecar["critic_balance_diagnostic"]["cross_symbol"]["available"]
+        )
         self.assertEqual(
             sidecar["temporal_training"],
             {
@@ -1377,6 +1405,78 @@ class TrainerTests(TestCase):
         with self.assertRaisesRegex(ValueError, "finite"):
             aggregate_selection_scores((float("nan"),), TrainingConfig())
 
+    def test_critic_balance_diagnostics_weight_ticker_evidence_without_selection(self):
+        def metric(symbol, steps, updates, reward, returns, residual, actor, critic):
+            return {
+                "training_symbol": symbol,
+                "steps": steps,
+                "optimizer_updates": updates,
+                "reward_rms": reward,
+                "return_target_rms": returns,
+                "value_residual_rms": residual,
+                "actor_head_gradient_norm": actor,
+                "critic_head_gradient_norm": critic,
+            }
+
+        evidence = critic_balance_diagnostics((
+            metric("AAA", 2, 1, 1, 2, 3, 4, 8),
+            metric("AAA", 1, 3, 4, 8, 9, 2, 6),
+            metric("BBB", 3, 2, 0, 0, 1, 1, 0),
+        ))
+
+        self.assertEqual(
+            evidence["schema_version"],
+            CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION,
+        )
+        self.assertEqual(evidence["selection_effect"], "diagnostic_only")
+        self.assertEqual(
+            evidence["gradient_scope"],
+            "pre_clip_weighted_disjoint_output_heads",
+        )
+        self.assertEqual(
+            evidence["shared_trunk_gradient_attribution"],
+            "not_measured",
+        )
+        self.assertEqual(evidence["per_symbol"]["AAA"]["episodes"], 2)
+        self.assertEqual(evidence["per_symbol"]["AAA"]["transitions"], 3)
+        self.assertEqual(evidence["per_symbol"]["AAA"]["return_target_rms"], 4)
+        self.assertEqual(
+            evidence["per_symbol"]["AAA"]["actor_head_gradient_norm"],
+            2.5,
+        )
+        self.assertEqual(
+            evidence["per_symbol"]["AAA"]["critic_head_gradient_norm"],
+            6.5,
+        )
+        self.assertEqual(
+            evidence["per_symbol"]["AAA"][
+                "critic_to_actor_head_gradient_ratio"
+            ],
+            2.6,
+        )
+        self.assertEqual(
+            evidence["cross_symbol"]["zero_return_scale_symbols"],
+            ["BBB"],
+        )
+        self.assertTrue(evidence["cross_symbol"]["imbalance_detected"])
+        self.assertTrue(
+            evidence["cross_symbol"]["normalization_ablation_recommended"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "above one"):
+            critic_balance_diagnostics(
+                (metric("AAA", 1, 1, 1, 1, 1, 1, 1),),
+                imbalance_ratio_threshold=1,
+            )
+        with self.assertRaisesRegex(ValueError, "require training metrics"):
+            critic_balance_diagnostics(())
+        with self.assertRaisesRegex(ValueError, "missing"):
+            critic_balance_diagnostics(({"training_symbol": "AAA"},))
+        with self.assertRaisesRegex(ValueError, "non-negative integers"):
+            critic_balance_diagnostics((
+                metric("AAA", -1, 1, 1, 1, 1, 1, 1),
+            ))
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_shared_policy_balances_isolated_ticker_episodes_and_validation(self):
         base = three_snapshot_dataset()
@@ -1454,6 +1554,10 @@ class TrainerTests(TestCase):
             {"AAA", "BBB"},
         )
         self.assertEqual(len(manifest["training_environments"]), 2)
+        self.assertEqual(
+            set(manifest["critic_balance_diagnostic"]["per_symbol"]),
+            {"AAA", "BBB"},
+        )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_shared_policy_rejects_partial_ticker_coverage(self):
@@ -1476,6 +1580,34 @@ class TrainerTests(TestCase):
                 recurrent,
                 TrainingConfig(episodes=1),
             )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_critic_head_gradient_diagnostic_respects_value_coefficient(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=1)
+        observation, _ = env.reset(seed=131)
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=1,
+            action_slot_count=env.action_shape[0],
+            action_count=env.action_shape[1],
+            hidden_size=4,
+        )
+
+        _, metrics = train_actor_critic(
+            env,
+            recurrent,
+            TrainingConfig(
+                episodes=1,
+                sequence_length=2,
+                ppo_epochs=1,
+                minibatch_size=2,
+                value_coefficient=0.0,
+                seed=131,
+            ),
+        )
+
+        self.assertEqual(metrics[0]["critic_head_gradient_norm"], 0.0)
+        self.assertGreaterEqual(metrics[0]["actor_head_gradient_norm"], 0.0)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_auxiliary_training_rejects_missing_prediction_head(self):

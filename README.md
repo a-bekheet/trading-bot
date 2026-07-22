@@ -622,6 +622,35 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.61 adds training-only critic-balance diagnostics before introducing another
+normalization method. Every PPO and REINFORCE episode now records reward RMS,
+return-target mean/standard deviation/RMS/maximum magnitude, pre-update value
+residual RMS, and pre-clipping actor-head and critic-head gradient norms. The
+head gradients are exact and cheap because the policy and value output modules
+are disjoint; they already include the configured loss coefficients and do not
+attribute gradients inside the shared recurrent/GNN trunk.
+
+`critic_balance_diagnostics(metrics)` aggregates transition-scale measurements
+by transition count and gradient measurements by optimizer-update count for each
+ticker. Checkpoints and every single-ticker or universe walk-forward candidate
+retain the per-symbol evidence, cross-symbol positive-scale ratios, zero-return
+symbols, and a predeclared 10x imbalance flag. The flag is diagnostic only: it
+cannot alter checkpoint, architecture, training-seed, validation, or held-out
+selection. A triggered flag recommends a separately named normalization
+ablation; it never silently changes the learner.
+
+A real five-ticker `MU/GEV/KLAC/AMD/AMAT` flat-mixture, single-leg smoke used two
+four-transition episodes per ticker. Return-target RMS varied 3.57x and
+critic-head gradient norm varied 9.25x, so the 10x trigger remained false. The
+sample contains only 13-15 mostly overnight snapshots per ticker and is too
+small to reject or promote critic normalization. Computing both gradient norms
+on an already-backpropagated 32-hidden-unit mixture took 16.28 microseconds per
+optimizer update in a local 10,000-call benchmark and adds no inference work or
+extra backward pass. These measurements are diagnostics, not evidence of alpha.
+Checkpoint, single-ticker walk-forward, and universe walk-forward schemas advance
+to v44, v48, and v32; feature and environment schemas remain
+`dimensionless.v17` and v22.
+
 v0.60 adds an actor-only batched runtime for synchronized paper agents and
 counterfactual rollouts. Deployment no longer executes the value or auxiliary
 head when only an action is requested, while training retains the full

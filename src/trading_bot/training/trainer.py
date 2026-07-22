@@ -29,7 +29,10 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v43"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v44"
+CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION = (
+    "research-demo.critic-balance-diagnostic.v1"
+)
 RECURRENT_POLICY_STATE_SCHEMA_VERSION = "research-demo.recurrent-policy-state.v1"
 BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION = (
     "research-demo.batched-recurrent-policy-state.v1"
@@ -963,11 +966,198 @@ def aggregate_selection_scores(
     }
 
 
+def critic_balance_diagnostics(
+    metrics: Sequence[dict[str, Any]],
+    *,
+    imbalance_ratio_threshold: float = 10.0,
+) -> dict[str, Any]:
+    """Aggregate training-only critic scale evidence by ticker."""
+    if (
+        not math.isfinite(imbalance_ratio_threshold)
+        or imbalance_ratio_threshold <= 1
+    ):
+        raise ValueError("imbalance_ratio_threshold must be finite and above one")
+    if not metrics:
+        raise ValueError("critic balance diagnostics require training metrics")
+    required = (
+        "training_symbol",
+        "steps",
+        "optimizer_updates",
+        "reward_rms",
+        "return_target_rms",
+        "value_residual_rms",
+        "actor_head_gradient_norm",
+        "critic_head_gradient_norm",
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for metric in metrics:
+        missing = [name for name in required if name not in metric]
+        if missing:
+            raise ValueError(
+                "critic balance metric is missing " + ", ".join(missing)
+            )
+        symbol = metric["training_symbol"]
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError("critic balance metric symbol must be non-empty")
+        if any(
+            not isinstance(metric[name], int)
+            or isinstance(metric[name], bool)
+            or metric[name] < 0
+            for name in ("steps", "optimizer_updates")
+        ):
+            raise ValueError(
+                "critic balance metric weights must be non-negative integers"
+            )
+        numeric = [float(metric[name]) for name in required[3:]]
+        if not all(math.isfinite(value) and value >= 0 for value in numeric):
+            raise ValueError("critic balance metrics must be finite and non-negative")
+        grouped.setdefault(symbol, []).append(metric)
+
+    def weighted_mean(items, name, weight_name):
+        weights = [int(item[weight_name]) for item in items]
+        if any(weight < 0 for weight in weights):
+            raise ValueError("critic balance metric weights must be non-negative")
+        total = sum(weights)
+        return (
+            sum(float(item[name]) * weight for item, weight in zip(
+                items,
+                weights,
+                strict=True,
+            )) / total
+            if total
+            else 0.0
+        )
+
+    by_symbol = {}
+    for symbol in sorted(grouped):
+        items = grouped[symbol]
+        actor_gradient = weighted_mean(
+            items,
+            "actor_head_gradient_norm",
+            "optimizer_updates",
+        )
+        critic_gradient = weighted_mean(
+            items,
+            "critic_head_gradient_norm",
+            "optimizer_updates",
+        )
+        by_symbol[symbol] = {
+            "episodes": len(items),
+            "transitions": sum(int(item["steps"]) for item in items),
+            "optimizer_updates": sum(
+                int(item["optimizer_updates"]) for item in items
+            ),
+            "reward_rms": weighted_mean(items, "reward_rms", "steps"),
+            "return_target_rms": weighted_mean(
+                items,
+                "return_target_rms",
+                "steps",
+            ),
+            "value_residual_rms": weighted_mean(
+                items,
+                "value_residual_rms",
+                "steps",
+            ),
+            "actor_head_gradient_norm": actor_gradient,
+            "critic_head_gradient_norm": critic_gradient,
+            "critic_to_actor_head_gradient_ratio": (
+                critic_gradient / actor_gradient
+                if actor_gradient > 1e-12
+                else None
+            ),
+        }
+
+    def positive_ratio(name):
+        values = [
+            float(item[name]) for item in by_symbol.values() if item[name] > 1e-12
+        ]
+        return max(values) / min(values) if len(values) > 1 else None
+
+    return_scale_ratio = positive_ratio("return_target_rms")
+    critic_gradient_ratio = positive_ratio("critic_head_gradient_norm")
+    positive_returns = [
+        symbol
+        for symbol, item in by_symbol.items()
+        if item["return_target_rms"] > 1e-12
+    ]
+    zero_return_symbols = [
+        symbol
+        for symbol, item in by_symbol.items()
+        if item["return_target_rms"] <= 1e-12
+    ]
+    cross_symbol = len(by_symbol) > 1
+    imbalance_detected = cross_symbol and (
+        (
+            bool(positive_returns)
+            and bool(zero_return_symbols)
+        )
+        or (
+            return_scale_ratio is not None
+            and return_scale_ratio >= imbalance_ratio_threshold
+        )
+        or (
+            critic_gradient_ratio is not None
+            and critic_gradient_ratio >= imbalance_ratio_threshold
+        )
+    )
+    return {
+        "schema_version": CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION,
+        "scope": "training_only_per_ticker_actor_critic_heads",
+        "imbalance_ratio_threshold": imbalance_ratio_threshold,
+        "selection_effect": "diagnostic_only",
+        "gradient_scope": "pre_clip_weighted_disjoint_output_heads",
+        "shared_trunk_gradient_attribution": "not_measured",
+        "per_symbol": by_symbol,
+        "cross_symbol": {
+            "available": cross_symbol,
+            "return_target_rms_max_to_min_positive": return_scale_ratio,
+            "critic_head_gradient_max_to_min_positive": critic_gradient_ratio,
+            "zero_return_scale_symbols": zero_return_symbols,
+            "imbalance_detected": imbalance_detected,
+            "normalization_ablation_recommended": imbalance_detected,
+        },
+    }
+
+
 def _episode_report_dict(report) -> dict[str, Any]:
     return (
         report.to_dict()
         if hasattr(report, "to_dict")
         else dict(vars(report))
+    )
+
+
+def _actor_head_parameters(model) -> tuple[Any, ...]:
+    modules = (
+        (model.policy,)
+        if model.policy is not None
+        else tuple(
+            module
+            for module in (
+                model.contract_policy,
+                model.underlying_policy,
+                model.joint_hold,
+            )
+            if module is not None
+        )
+    )
+    return tuple(
+        parameter
+        for module in modules
+        for parameter in module.parameters()
+    )
+
+
+def _parameter_gradient_norm(parameters, torch) -> float:
+    squared = [
+        parameter.grad.detach().square().sum()
+        for parameter in parameters
+        if parameter.grad is not None
+    ]
+    return (
+        float(torch.stack(squared).sum().sqrt())
+        if squared
+        else 0.0
     )
 
 
@@ -1327,6 +1517,8 @@ def train_actor_critic(
     # and updates. Eval mode disables optional recurrent dropout but keeps grads.
     model.eval()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+    actor_head_parameters = _actor_head_parameters(model)
+    critic_head_parameters = tuple(model.value.parameters())
     metrics: list[dict[str, Any]] = []
     best_score = float("-inf")
     best_episode = 0
@@ -1671,6 +1863,14 @@ def train_actor_critic(
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
+                actor_head_gradient_norm = _parameter_gradient_norm(
+                    actor_head_parameters,
+                    torch,
+                )
+                critic_head_gradient_norm = _parameter_gradient_norm(
+                    critic_head_parameters,
+                    torch,
+                )
                 gradient_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), config.gradient_clip
                 )
@@ -1706,6 +1906,8 @@ def train_actor_critic(
                                 "explorable_factor_fraction"
                             ].detach()
                         ),
+                        actor_head_gradient_norm,
+                        critic_head_gradient_norm,
                     )
                 )
                 if config.algorithm == "ppo" and approx_kl > config.target_kl:
@@ -1863,6 +2065,13 @@ def train_actor_critic(
                 "entropy": float(means[3]),
                 "entropy_bonus": float(config.entropy_coefficient * means[3]),
                 "gradient_norm": float(means[4]),
+                "actor_head_gradient_norm": float(means[12]),
+                "critic_head_gradient_norm": float(means[13]),
+                "critic_to_actor_head_gradient_ratio": (
+                    float(means[13] / means[12])
+                    if means[12] > 1e-12
+                    else None
+                ),
                 "approx_kl": float(means[5]),
                 "clip_fraction": float(means[6]),
                 "auxiliary_loss": float(means[7]),
@@ -1873,6 +2082,18 @@ def train_actor_critic(
                 "raw_action_entropy": float(means[9]),
                 "feasible_normalized_action_entropy": float(means[10]),
                 "explorable_action_factor_fraction": float(means[11]),
+                "reward_rms": float(rewards_tensor.square().mean().sqrt()),
+                "return_target_mean": float(returns_tensor.mean()),
+                "return_target_std": float(
+                    returns_tensor.std(unbiased=False)
+                ),
+                "return_target_rms": float(
+                    returns_tensor.square().mean().sqrt()
+                ),
+                "return_target_max_abs": float(returns_tensor.abs().max()),
+                "value_residual_rms": float(
+                    (returns_tensor - old_values_tensor).square().mean().sqrt()
+                ),
                 "entropy_objective": config.entropy_objective,
                 "auxiliary_target_coverage": (
                     {
@@ -2048,6 +2269,7 @@ def checkpoint_manifest(
                 else "raw_mean_per_decoder_factor"
             ),
         },
+        "critic_balance_diagnostic": critic_balance_diagnostics(metrics),
         "temporal_training": {
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
