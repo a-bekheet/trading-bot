@@ -183,7 +183,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v7`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v8`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
 is expressed in years, and heavy-tailed fields are compressed and clipped. Raw
@@ -207,6 +207,13 @@ features, not contract features; never duplicate global state across every
 slot. Realized volatility uses only timestamped prices at or before the current
 snapshot, annualizes by actual elapsed time, and carries a coverage fraction so
 zero history cannot masquerade as zero volatility.
+
+`snapshotGapSeconds` is the positive elapsed wall time from the immediately
+prior snapshot and is log-compressed at the policy boundary. Pair it with
+`snapshotGapCoverage`; the first snapshot, missing/malformed timestamps, and
+non-increasing timestamps must remain neutral and uncovered. Keep the pair once
+in the market vector and route it through the named `time_context` ablation.
+Auxiliary horizons remain snapshot counts rather than elapsed-time horizons.
 
 Front 25-delta risk reversal is call IV minus put IV; butterfly is mean wing IV
 minus executable ATM IV. Both are computed cross-sectionally from the current

@@ -15,6 +15,10 @@ FEATURE_ABLATION_GROUPS = {
     "slot_identity": (
         "slotContinuity",
     ),
+    "time_context": (
+        "snapshotGapSeconds",
+        "snapshotGapCoverage",
+    ),
     "surface_wings": (
         "front25DeltaRiskReversal",
         "front25DeltaButterfly",
@@ -156,6 +160,8 @@ def _dimensionless_components(
             np.sign(market[return_index])
             * np.log1p(abs(market[return_index]) * 100.0)
         )
+        gap_index = market_indices["snapshotGapSeconds"]
+        market[gap_index] = np.log1p(max(market[gap_index], 0.0)) / 10.0
         for window in REALIZED_VOL_WINDOWS:
             volatility_index = market_indices[f"realizedVol{window}"]
             market[volatility_index] = np.log1p(

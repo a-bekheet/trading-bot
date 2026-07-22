@@ -14,6 +14,8 @@ FRONT_ATM_LOG_MONEYNESS_TOLERANCE = 0.10
 FRONT_WING_DELTA_TOLERANCE = 0.15
 MARKET_ENGINEERED_FEATURES = (
     "underlyingReturn",
+    "snapshotGapSeconds",
+    "snapshotGapCoverage",
     "realizedVol4",
     "realizedVol4Coverage",
     "realizedVol16",
@@ -90,6 +92,30 @@ def realized_volatility_features(
                 np.sqrt(np.square(returns).sum() / years)
             )
     return result
+
+
+def snapshot_gap_features(
+    current: pd.DataFrame,
+    previous: pd.DataFrame | None,
+) -> dict[str, float]:
+    """Return elapsed wall time from the immediately prior snapshot."""
+    neutral = {"snapshotGapSeconds": 0.0, "snapshotGapCoverage": 0.0}
+    if previous is None or previous.empty or current.empty:
+        return neutral
+
+    def first_timestamp(frame: pd.DataFrame) -> pd.Timestamp:
+        if "collectedAt" not in frame:
+            return pd.NaT
+        return pd.to_datetime(frame["collectedAt"].iloc[0], errors="coerce", utc=True)
+
+    current_timestamp = first_timestamp(current)
+    previous_timestamp = first_timestamp(previous)
+    if pd.isna(current_timestamp) or pd.isna(previous_timestamp):
+        return neutral
+    elapsed = float((current_timestamp - previous_timestamp).total_seconds())
+    if not math.isfinite(elapsed) or elapsed <= 0:
+        return neutral
+    return {"snapshotGapSeconds": elapsed, "snapshotGapCoverage": 1.0}
 
 
 def _surface_features(result: pd.DataFrame) -> None:
@@ -492,6 +518,8 @@ def engineer_snapshot(
             pd.to_numeric(result["impliedVolatility"], errors="coerce")
             - pd.to_numeric(result["contractSymbol"].map(prior_iv), errors="coerce")
         ).fillna(0.0)
+    for name, value in snapshot_gap_features(result, previous).items():
+        result[name] = value
     for name, value in realized_volatility_features(spot_history).items():
         result[name] = value
     _surface_features(result)

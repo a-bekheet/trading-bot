@@ -138,9 +138,11 @@ env = OptionsEnv.from_directory(
 Snapshot loading adds causal engineered features such as relative spread,
 forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs, IV
 change/skew, ATM term slope, put-call IV spread, and put-call parity residual.
-Underlying return and annualized realized volatility over 4- and 16-snapshot
-windows live once in the market vector rather than being repeated for every
-contract. Front-expiry ATM IV and its difference from both realized-volatility
+Underlying return, elapsed seconds from the causal prior snapshot, and
+annualized realized volatility over 4- and 16-snapshot windows live once in the
+market vector rather than being repeated for every contract. Explicit gap
+coverage distinguishes a missing or invalid timestamp from a genuine interval.
+Front-expiry ATM IV and its difference from both realized-volatility
 horizons provide a compact volatility-risk-premium regime signal. The same
 snapshot-level vector carries executable front-expiry 25-delta risk reversal
 and butterfly factors, exposing smirk and wing convexity without repeating them
@@ -168,10 +170,12 @@ a different option after a cross-sectional rank reversal. Use
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v7` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v8` transform. Prices and strikes are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 the underlying position is scaled by its NAV weight, portfolio values become
-ratios, DTE is in years, and heavy-tailed age/liquidity fields are compressed.
+ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields are
+log-compressed. The `time_context` walk-forward ablation can mask both gap
+fields without changing model shape.
 Raw volume and
 open interest are omitted because their causal log features contain the useful
 ordering at a much better numerical scale. The transform is fitted on no data,
@@ -255,6 +259,19 @@ hidden-size-eight AAPL smoke, horizons 1+4 added only 45 parameters over the
 one-step head; policy-only medians overlapped at roughly 108-118 microseconds.
 All validation scores were zero and the one-step candidate won only through the
 smaller-parameter tie-break.
+
+Collection intervals are not assumed to be regular. The market vector includes
+the positive elapsed seconds from the immediately prior snapshot and a separate
+coverage bit; `dimensionless.v8` log-compresses the interval before it reaches
+the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
+intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
+median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters
+when the two inputs were added. Its local 1,000-iteration streaming benchmark
+measured 184.83 microseconds median and 188.83 microseconds p95, within ordinary
+run-to-run variation of the earlier layout. A one-episode matched
+`time_context` walk-forward smoke produced zero validation reward for both
+variants and selected the masked candidate through the active-input tie-break;
+that verifies the comparison path but provides no evidence of alpha.
 
 Train one ticker-invariant shared policy across the collected top-50 universe:
 

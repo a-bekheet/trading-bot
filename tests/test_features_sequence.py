@@ -10,6 +10,7 @@ from trading_bot.training.features import (
     ENGINEERED_FEATURES,
     MARKET_ENGINEERED_FEATURES,
     engineer_snapshot,
+    snapshot_gap_features,
 )
 from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES, OptionsEnv
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION, Observation
@@ -182,18 +183,22 @@ class FeatureSequenceTests(TestCase):
         term_indices = feature_ablation_indices(("term_structure",), 2)
         dynamics_indices = feature_ablation_indices(("surface_dynamics",), 2)
         identity_indices = feature_ablation_indices(("slot_identity",), 2)
+        time_indices = feature_ablation_indices(("time_context",), 2)
 
         self.assertEqual(len(wing_indices), 3)
         self.assertEqual(len(quality_indices), 2)
         self.assertEqual(len(term_indices), 4)
         self.assertEqual(len(dynamics_indices), 7)
         self.assertEqual(len(identity_indices), 2)
+        self.assertEqual(len(time_indices), 2)
         self.assertEqual(
             len(contract_indices),
             2 * len(FEATURE_ABLATION_GROUPS["derived_contract_surface"]),
         )
         self.assertFalse(set(wing_indices) & set(quality_indices))
         self.assertFalse(set(term_indices) & set(dynamics_indices))
+        self.assertFalse(set(time_indices) & set(dynamics_indices))
+        self.assertTrue(all(index < len(MARKET_FEATURES) for index in time_indices))
         self.assertTrue(all(index < len(MARKET_FEATURES) for index in wing_indices))
         self.assertTrue(all(index >= len(MARKET_FEATURES) for index in contract_indices))
         self.assertTrue(all(index >= len(MARKET_FEATURES) for index in identity_indices))
@@ -218,7 +223,34 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(set(ENGINEERED_FEATURES) - set(engineered.columns), set())
         self.assertAlmostEqual(engineered.iloc[0]["underlyingReturn"], .01)
         self.assertAlmostEqual(engineered.iloc[0]["ivChange"], .05)
+        self.assertEqual(engineered.iloc[0]["snapshotGapSeconds"], 60)
+        self.assertEqual(engineered.iloc[0]["snapshotGapCoverage"], 1)
         self.assertTrue(np.isfinite(engineered[list(ENGINEERED_FEATURES)].to_numpy()).all())
+
+    def test_snapshot_gap_requires_a_valid_positive_causal_interval(self):
+        current = pd.DataFrame({"collectedAt": ["2026-07-21T14:15:00Z"]})
+        previous = pd.DataFrame({"collectedAt": ["2026-07-21T14:00:00Z"]})
+
+        self.assertEqual(
+            snapshot_gap_features(current, previous),
+            {"snapshotGapSeconds": 900.0, "snapshotGapCoverage": 1.0},
+        )
+        for invalid_previous in (
+            None,
+            pd.DataFrame(),
+            pd.DataFrame({"collectedAt": ["not-a-time"]}),
+            pd.DataFrame({"other": [1]}),
+            current,
+            pd.DataFrame({"collectedAt": ["2026-07-21T14:30:00Z"]}),
+        ):
+            self.assertEqual(
+                snapshot_gap_features(current, invalid_previous),
+                {"snapshotGapSeconds": 0.0, "snapshotGapCoverage": 0.0},
+            )
+        self.assertEqual(
+            snapshot_gap_features(pd.DataFrame({"other": [1]}), previous),
+            {"snapshotGapSeconds": 0.0, "snapshotGapCoverage": 0.0},
+        )
 
     def test_sequence_windows_are_chronological_and_fixed_shape(self):
         observations = [
@@ -377,7 +409,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v7")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v8")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
@@ -386,6 +418,8 @@ class FeatureSequenceTests(TestCase):
         market = np.zeros(len(MARKET_FEATURES), dtype=float)
         market[MARKET_FEATURES.index("underlyingPrice")] = 100
         market[MARKET_FEATURES.index("riskFreeRate")] = 0.04
+        market[MARKET_FEATURES.index("snapshotGapSeconds")] = 900
+        market[MARKET_FEATURES.index("snapshotGapCoverage")] = 1
         market[MARKET_FEATURES.index("realizedVol4")] = 0.2
         market[MARKET_FEATURES.index("frontAtmIv")] = 0.25
         market[MARKET_FEATURES.index("frontAtmIvCoverage")] = 1
@@ -413,6 +447,15 @@ class FeatureSequenceTests(TestCase):
         )
 
         vector = observation_vector(observation)
+
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("snapshotGapSeconds")],
+            np.log1p(900) / 10,
+        )
+        self.assertEqual(
+            vector[MARKET_FEATURES.index("snapshotGapCoverage")],
+            1,
+        )
 
         self.assertAlmostEqual(
             vector[MARKET_FEATURES.index("frontAtmIv")],
@@ -572,5 +615,7 @@ class FeatureSequenceTests(TestCase):
         self.assertIn("atmIvMinusRealizedVol16", MARKET_FEATURES)
         self.assertIn("front25DeltaRiskReversal", MARKET_FEATURES)
         self.assertIn("front25DeltaButterfly", MARKET_FEATURES)
+        self.assertIn("snapshotGapSeconds", MARKET_FEATURES)
+        self.assertIn("snapshotGapCoverage", MARKET_FEATURES)
         self.assertIn("executableQuoteCoverage", MARKET_FEATURES)
         self.assertTrue(np.isfinite(observation_vector(observation)).all())
