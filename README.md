@@ -622,6 +622,40 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.59 replaces the opaque recurrent evaluation closure with an explicit
+`StreamingRecurrentPolicy` runtime for GRU, LSTM, concatenated-hybrid, and
+gated-mixture agents. It remains callable by the existing environment and adds
+episode `reset()`, independent `fork()`, and device-portable `snapshot()` /
+`restore()` operations:
+
+```python
+from trading_bot.training import load_checkpoint, recurrent_policy
+
+model, manifest = load_checkpoint("artifacts/policy.pt")
+policy = recurrent_policy(model, manifest["training"]["sequence_length"])
+action = policy(observation)
+
+branch_state = policy.snapshot()  # cloned CPU tensors; no shared storage
+branch = policy.fork()             # same read-only model, independent cursor
+policy.reset()                     # required before a new episode or ticker
+policy.restore(branch_state)       # resume the original causal branch
+```
+
+The runtime requires `model.eval()` so dropout cannot silently make decisions
+nondeterministic. Strict chronology is on by default and rejects duplicate or
+backward observations before mutating hidden state. Snapshots carry a v1 schema,
+step/timestamp consistency, finite tensor checks, exact recurrent tensor shapes,
+and a SHA-256 contract over the full `RecurrentConfig`. A snapshot must still be
+restored only into the same checkpoint weights; the configuration hash is not a
+weight identity. The inference benchmark explicitly disables chronology because
+it intentionally reuses one observation to measure model latency.
+
+On a local one-thread CPU benchmark over seven matched 3,000-call runs, guarded
+streaming measured 95.85 microseconds per call versus 94.51 without chronology,
+a 1.33-microsecond median overhead. Resetting an existing cursor took 0.057
+microseconds versus 2.211 to construct a wrapper, about 38.7x cheaper. These are
+machine-specific engineering measurements, not evidence of alpha.
+
 v0.58 makes entropy regularization invariant to padded and hold-only action
 rows. For every masked categorical factor with `K > 1` feasible choices, the
 trainer computes exact entropy divided by `log(K)` and averages only those

@@ -31,11 +31,15 @@ from trading_bot.training.sequence import (
 )
 from trading_bot.training.splits import WalkForwardSplit, walk_forward_splits
 from trading_bot.training.trainer import (
+    RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+    RecurrentPolicyState,
+    StreamingRecurrentPolicy,
     TrainingConfig,
     aggregate_selection_scores,
     benchmark_recurrent_inference,
     evaluate_recurrent_policy,
     load_checkpoint,
+    recurrent_policy,
     selection_score,
     train_actor_critic,
 )
@@ -54,7 +58,9 @@ __all__ = [
     "Action", "BootstrapComparison", "CostScenario", "EpisodeReport",
     "EpisodeTrace", "EnvManifest", "FEATURE_ABLATION_GROUPS",
     "LongVolatilityConfig", "ShortVolatilityConfig", "Observation",
-    "ModelSpec", "OptionsEnv", "TrainingConfig", "Transition",
+    "ModelSpec", "OptionsEnv", "RecurrentPolicyState",
+    "RECURRENT_POLICY_STATE_SCHEMA_VERSION", "StreamingRecurrentPolicy",
+    "TrainingConfig", "Transition",
     "WalkForwardConfig", "WalkForwardSplit",
     "UNIVERSE_WALK_FORWARD_SCHEMA_VERSION",
     "benchmark_recurrent_inference",
@@ -65,7 +71,8 @@ __all__ = [
     "evaluate_recurrent_policy", "load_checkpoint",
     "feature_ablation_indices", "first_feasible",
     "long_volatility_delta_hedge", "no_op",
-    "paired_moving_block_bootstrap", "run_episode", "run_episode_trace",
+    "paired_moving_block_bootstrap", "recurrent_policy", "run_episode",
+    "run_episode_trace",
     "resolve_recurrent_config", "run_walk_forward_training", "selection_score",
     "run_universe_walk_forward_training",
     "train_actor_critic",

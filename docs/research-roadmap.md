@@ -485,6 +485,19 @@ their entire requested budget and records completed episodes per architecture.
 This is a compute optimization, not evidence that shorter training improves
 returns; serious comparisons should also report equal-budget results.
 
+The streaming agent boundary now makes recurrent state lifecycle explicit.
+GRU, LSTM, hybrid, and mixture policies can reset at episode boundaries,
+snapshot and restore device-portable hidden state, or fork independent
+counterfactual branches over the same immutable model. Strict timestamp
+monotonicity prevents repeated or backward observations from contaminating an
+agent's memory, while an evaluation-mode guard prevents dropout from changing
+actions. Snapshot restoration validates a versioned state schema, the full
+model-configuration fingerprint, finite tensor values, and exact hidden-state
+layout. Orchestrators must additionally bind snapshots to the same checkpoint
+weights; the configuration fingerprint is not a substitute for model identity.
+This surface is useful for batched paper-agent rollouts and tree search, but it
+does not add a signal or imply alpha.
+
 Named feature-removal candidates now mask surface wings, volatility regime,
 data quality, or derived contract-surface inputs inside the recurrent model.
 Each is paired with its full-feature architecture and records validation reward

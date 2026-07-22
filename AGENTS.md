@@ -239,6 +239,32 @@ windows are chronological and unpadded. GRU/LSTM/hybrid/mixture code is optional
 the environment fingerprint, full model and training configuration, metrics,
 and the `research_demo` label.
 
+The deployed recurrent policy boundary is `StreamingRecurrentPolicy`, returned
+by `recurrent_policy(...)`. Treat its hidden state as part of the causal agent
+state:
+
+- Put the model in evaluation mode before constructing the runtime. The runtime
+  rejects training mode at construction and before every decision so dropout
+  cannot create silent nondeterminism.
+- Use one cursor per episode and ticker. Call `reset()` at every boundary;
+  hidden state must never leak across independent paths, symbols, folds, or
+  portfolio resets.
+- Leave strict chronology enabled for agents. Duplicate or backward timestamps
+  are rejected before inference. `enforce_chronology=False` is reserved for the
+  latency benchmark that deliberately repeats one training observation.
+- Use `fork()` for counterfactual branches. It shares the same read-only model
+  but clones the recurrent cursor, so advancing one branch cannot advance the
+  other.
+- `snapshot()` clones hidden tensors to CPU. `restore()` clones them onto the
+  model device and validates the state schema, full `RecurrentConfig` hash,
+  recurrent kind/shape, finite values, and step/timestamp consistency.
+- Restore state only with the exact same checkpoint weights. The model-contract
+  hash prevents configuration mismatches but intentionally does not claim to be
+  a checkpoint-weight identity. Never accept an untrusted pickle merely to move
+  a recurrent state.
+- Keep `reset()` allocation-free. Reusing a policy cursor at a valid episode
+  boundary is preferred to rebuilding or reloading the model.
+
 An environment manifest hashes only its selected ticker CSV. Do not broaden the
 fingerprint to unrelated ticker files: doing so adds startup I/O and invalidates
 otherwise reproducible experiments whenever the collector updates another

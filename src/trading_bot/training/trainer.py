@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import time
@@ -29,6 +30,21 @@ from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
 CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v43"
+RECURRENT_POLICY_STATE_SCHEMA_VERSION = "research-demo.recurrent-policy-state.v1"
+
+
+@dataclass(frozen=True)
+class RecurrentPolicyState:
+    """Device-portable snapshot of one streaming policy's causal state."""
+
+    schema_version: str
+    recurrent_kind: str
+    layers: int
+    hidden_size: int
+    model_contract: str
+    steps: int
+    last_timestamp: str | None
+    hidden_state: Any
 
 
 @dataclass(frozen=True)
@@ -269,35 +285,212 @@ def _one_step_tensor(observation, torch):
     return torch.from_numpy(observation_vector(observation)).view(1, 1, -1)
 
 
-def recurrent_policy(model, sequence_length: int):
+def _clone_hidden_state(hidden_state, *, device=None):
+    """Clone a nested recurrent state without sharing mutable tensors."""
+    if hidden_state is None:
+        return None
+    if isinstance(hidden_state, dict):
+        return {
+            name: _clone_hidden_state(value, device=device)
+            for name, value in hidden_state.items()
+        }
+    if isinstance(hidden_state, tuple):
+        return tuple(
+            _clone_hidden_state(value, device=device)
+            for value in hidden_state
+        )
+    cloned = hidden_state.detach().clone()
+    return cloned if device is None else cloned.to(device)
+
+
+def _recurrent_model_contract(config: RecurrentConfig) -> str:
+    canonical = json.dumps(
+        asdict(config),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_hidden_state(hidden_state, config, torch) -> None:
+    """Reject a snapshot whose nested tensor layout cannot fit the model."""
+    expected_shape = (config.layers, 1, config.hidden_size)
+
+    def tensor(value, name):
+        if not torch.is_tensor(value) or tuple(value.shape) != expected_shape:
+            raise ValueError(
+                f"recurrent policy state {name} must have shape {expected_shape}"
+            )
+        if not torch.is_floating_point(value) or not torch.isfinite(value).all():
+            raise ValueError(
+                f"recurrent policy state {name} must be finite floating point"
+            )
+
+    def lstm(value, name):
+        if not isinstance(value, tuple) or len(value) != 2:
+            raise ValueError(
+                f"recurrent policy state {name} must contain hidden and cell tensors"
+            )
+        tensor(value[0], f"{name}.hidden")
+        tensor(value[1], f"{name}.cell")
+
+    if config.kind == "gru":
+        tensor(hidden_state, "gru")
+    elif config.kind == "lstm":
+        lstm(hidden_state, "lstm")
+    else:
+        if not isinstance(hidden_state, dict) or set(hidden_state) != {"gru", "lstm"}:
+            raise ValueError(
+                "hybrid recurrent policy state must contain gru and lstm"
+            )
+        tensor(hidden_state["gru"], "gru")
+        lstm(hidden_state["lstm"], "lstm")
+
+
+class StreamingRecurrentPolicy:
+    """Deterministic callable policy with explicit causal state lifecycle."""
+
+    def __init__(
+        self,
+        model,
+        sequence_length: int,
+        *,
+        enforce_chronology: bool = True,
+    ) -> None:
+        if sequence_length < 1:
+            raise ValueError("sequence_length must be positive")
+        if not isinstance(enforce_chronology, bool):
+            raise ValueError("enforce_chronology must be a boolean")
+        if model.training:
+            raise ValueError(
+                "streaming recurrent policy requires model.eval()"
+            )
+        self.model = model
+        self.sequence_length = sequence_length
+        self.enforce_chronology = enforce_chronology
+        self._torch = _torch()
+        self._device = next(model.parameters()).device
+        self._hidden_state = None
+        self._last_timestamp: str | None = None
+        self._steps = 0
+
+    @property
+    def steps(self) -> int:
+        return self._steps
+
+    @property
+    def last_timestamp(self) -> str | None:
+        return self._last_timestamp
+
+    def reset(self) -> None:
+        """Start a fresh episode without reallocating or reloading the model."""
+        self._hidden_state = None
+        self._last_timestamp = None
+        self._steps = 0
+
+    def snapshot(self) -> RecurrentPolicyState:
+        """Clone causal state to CPU for safe branching or process handoff."""
+        config = self.model.config
+        return RecurrentPolicyState(
+            schema_version=RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+            recurrent_kind=config.kind,
+            layers=config.layers,
+            hidden_size=config.hidden_size,
+            model_contract=_recurrent_model_contract(config),
+            steps=self._steps,
+            last_timestamp=self._last_timestamp,
+            hidden_state=_clone_hidden_state(self._hidden_state, device="cpu"),
+        )
+
+    def restore(self, state: RecurrentPolicyState) -> None:
+        """Restore a compatible snapshot without sharing its tensor storage."""
+        if not isinstance(state, RecurrentPolicyState):
+            raise TypeError("state must be a RecurrentPolicyState")
+        config = self.model.config
+        if state.schema_version != RECURRENT_POLICY_STATE_SCHEMA_VERSION:
+            raise ValueError("recurrent policy state schema is incompatible")
+        if (
+            state.recurrent_kind != config.kind
+            or state.layers != config.layers
+            or state.hidden_size != config.hidden_size
+            or state.model_contract != _recurrent_model_contract(config)
+        ):
+            raise ValueError("recurrent policy state model contract is incompatible")
+        if not isinstance(state.steps, int) or isinstance(state.steps, bool) or state.steps < 0:
+            raise ValueError("recurrent policy state steps must be non-negative")
+        if (state.steps == 0) != (state.last_timestamp is None):
+            raise ValueError(
+                "recurrent policy state timestamp must match its step count"
+            )
+        if state.steps == 0:
+            if state.hidden_state is not None:
+                raise ValueError("an unused recurrent policy state cannot have hidden state")
+        else:
+            if not isinstance(state.last_timestamp, str) or not state.last_timestamp:
+                raise ValueError("recurrent policy state timestamp must be non-empty")
+            _validate_hidden_state(state.hidden_state, config, self._torch)
+        self._hidden_state = _clone_hidden_state(
+            state.hidden_state,
+            device=self._device,
+        )
+        self._last_timestamp = state.last_timestamp
+        self._steps = state.steps
+
+    def fork(self):
+        """Create an independent policy cursor over the same immutable model."""
+        policy = type(self)(
+            self.model,
+            self.sequence_length,
+            enforce_chronology=self.enforce_chronology,
+        )
+        policy.restore(self.snapshot())
+        return policy
+
+    def __call__(self, observation):
+        if self.model.training:
+            raise RuntimeError(
+                "streaming recurrent policy model entered training mode"
+            )
+        if self.enforce_chronology and self._last_timestamp is not None:
+            _elapsed_seconds(self._last_timestamp, observation.timestamp)
+        sequence = _one_step_tensor(observation, self._torch).to(self._device)
+        if sequence.shape[-1] != self.model.config.input_size:
+            raise ValueError("observation feature layout does not match the model")
+        action_mask = (
+            self._torch.from_numpy(observation.action_mask)
+            .unsqueeze(0)
+            .to(self._device)
+        )
+        with self._torch.inference_mode():
+            action, _, hidden_state = self.model.sample_action(
+                sequence,
+                action_mask,
+                deterministic=True,
+                hidden_state=self._hidden_state,
+            )
+        self._hidden_state = _detach_hidden(hidden_state)
+        self._last_timestamp = observation.timestamp
+        self._steps += 1
+        return action.squeeze(0).cpu().numpy()
+
+
+def recurrent_policy(
+    model,
+    sequence_length: int,
+    *,
+    enforce_chronology: bool = True,
+) -> StreamingRecurrentPolicy:
     """Create a deterministic streaming policy for one evaluation episode.
 
     ``sequence_length`` is retained as the checkpoint/training contract and is
     validated here, while inference carries the recurrent state in constant
     memory rather than rebuilding a padded window on every step.
     """
-    if sequence_length < 1:
-        raise ValueError("sequence_length must be positive")
-    torch = _torch()
-    device = next(model.parameters()).device
-    hidden_state = None
-
-    def policy(observation):
-        nonlocal hidden_state
-        sequence = _one_step_tensor(observation, torch).to(device)
-        action_mask = (
-            torch.from_numpy(observation.action_mask).unsqueeze(0).to(device)
-        )
-        with torch.inference_mode():
-            action, _, hidden_state = model.sample_action(
-                sequence,
-                action_mask,
-                deterministic=True,
-                hidden_state=hidden_state,
-            )
-        return action.squeeze(0).cpu().numpy()
-
-    return policy
+    return StreamingRecurrentPolicy(
+        model,
+        sequence_length,
+        enforce_chronology=enforce_chronology,
+    )
 
 
 def benchmark_recurrent_inference(
@@ -317,7 +510,11 @@ def benchmark_recurrent_inference(
     device = next(model.parameters()).device
     was_training = model.training
     model.eval()
-    policy = recurrent_policy(model, sequence_length)
+    policy = recurrent_policy(
+        model,
+        sequence_length,
+        enforce_chronology=False,
+    )
 
     def synchronize() -> None:
         if device.type == "cuda":
@@ -369,12 +566,13 @@ def evaluate_recurrent_policy(
         )
     was_training = model.training
     model.eval()
-    reports = [
-        run_episode(env, recurrent_policy(model, sequence_length), seed)
-        for seed in seeds
-    ]
-    model.train(was_training)
-    return reports
+    try:
+        return [
+            run_episode(env, recurrent_policy(model, sequence_length), seed)
+            for seed in seeds
+        ]
+    finally:
+        model.train(was_training)
 
 
 def selection_score(

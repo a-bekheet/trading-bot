@@ -23,6 +23,9 @@ from trading_bot.training.recurrent import (
 from trading_bot.training.sequence import AUXILIARY_TARGET_FEATURES, observation_vector
 from trading_bot.training.trainer import (
     CHECKPOINT_SCHEMA_VERSION,
+    RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+    RecurrentPolicyState,
+    StreamingRecurrentPolicy,
     TrainingConfig,
     _burn_in_recurrent_context,
     _discounted_returns,
@@ -38,6 +41,7 @@ from trading_bot.training.trainer import (
     benchmark_recurrent_inference,
     evaluate_recurrent_policy,
     load_checkpoint,
+    recurrent_policy,
     save_checkpoint,
     selection_score,
     train_actor_critic,
@@ -234,6 +238,202 @@ class TrainerTests(TestCase):
                 2,
                 measured_iterations=0,
             )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_streaming_policy_can_reset_snapshot_restore_and_fork_every_kind(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        first, _ = env.reset(seed=97)
+        second, _, _, _, _ = env.step(
+            np.zeros(env.action_shape[0], dtype=np.int64)
+        )
+
+        def tensors(value):
+            if isinstance(value, dict):
+                return tuple(
+                    tensor
+                    for key in sorted(value)
+                    for tensor in tensors(value[key])
+                )
+            if isinstance(value, tuple):
+                return tuple(
+                    tensor for item in value for tensor in tensors(item)
+                )
+            return (value,)
+
+        for kind in ("gru", "lstm", "hybrid", "mixture"):
+            with self.subTest(kind=kind):
+                model = build_recurrent_actor_critic(RecurrentConfig(
+                    input_size=observation_vector(first).size,
+                    slot_count=2,
+                    action_count=env.action_shape[1],
+                    action_slot_count=env.action_shape[0],
+                    hidden_size=4,
+                    layers=2,
+                    dropout=0.5,
+                    kind=kind,
+                ))
+                model.eval()
+                policy = recurrent_policy(model, 2)
+                self.assertIsInstance(policy, StreamingRecurrentPolicy)
+                initial = policy.snapshot()
+                self.assertEqual(initial.steps, 0)
+                self.assertIsNone(initial.hidden_state)
+
+                first_action = policy(first)
+                branch_point = policy.snapshot()
+                mutable_copy = policy.snapshot()
+                tensors(mutable_copy.hidden_state)[0].add_(1_000)
+                self.assertFalse(torch.equal(
+                    tensors(mutable_copy.hidden_state)[0],
+                    tensors(policy.snapshot().hidden_state)[0],
+                ))
+                branch = policy.fork()
+                expected_second_action = policy(second)
+                branch_second_action = branch(second)
+
+                np.testing.assert_array_equal(
+                    branch_second_action,
+                    expected_second_action,
+                )
+                self.assertEqual(policy.steps, 2)
+                self.assertEqual(policy.last_timestamp, second.timestamp)
+                self.assertEqual(branch.steps, 2)
+                for expected, actual in zip(
+                    tensors(policy.snapshot().hidden_state),
+                    tensors(branch.snapshot().hidden_state),
+                    strict=True,
+                ):
+                    self.assertEqual(expected.device.type, "cpu")
+                    self.assertFalse(expected.requires_grad)
+                    torch.testing.assert_close(expected, actual)
+
+                policy.restore(branch_point)
+                replayed_second_action = policy(second)
+                np.testing.assert_array_equal(
+                    replayed_second_action,
+                    expected_second_action,
+                )
+                policy.reset()
+                np.testing.assert_array_equal(policy(first), first_action)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_streaming_policy_rejects_state_contamination_and_bad_snapshots(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=1)
+        first, _ = env.reset(seed=101)
+        second, _, _, _, _ = env.step(
+            np.zeros(env.action_shape[0], dtype=np.int64)
+        )
+        config = RecurrentConfig(
+            input_size=observation_vector(first).size,
+            slot_count=1,
+            action_count=env.action_shape[1],
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+        )
+        model = build_recurrent_actor_critic(config)
+        with self.assertRaisesRegex(ValueError, "model.eval"):
+            recurrent_policy(model, 2)
+        model.eval()
+        policy = recurrent_policy(model, 2)
+        policy(first)
+        snapshot = policy.snapshot()
+        self.assertEqual(
+            snapshot.schema_version,
+            RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+        )
+        with self.assertRaisesRegex(ValueError, "increase strictly"):
+            policy(first)
+        policy(second)
+
+        unsafe = recurrent_policy(model, 2, enforce_chronology=False)
+        unsafe(first)
+        unsafe(first)
+        self.assertEqual(unsafe.steps, 2)
+        model.train()
+        with self.assertRaisesRegex(RuntimeError, "training mode"):
+            unsafe(second)
+        model.eval()
+
+        for bad_state, message in (
+            (
+                replace(snapshot, schema_version="future.v9"),
+                "schema",
+            ),
+            (
+                replace(snapshot, hidden_size=5),
+                "model contract",
+            ),
+            (
+                replace(snapshot, model_contract="wrong-model"),
+                "model contract",
+            ),
+            (
+                replace(snapshot, steps=0),
+                "timestamp",
+            ),
+            (
+                replace(
+                    snapshot,
+                    hidden_state=torch.zeros(1, 1, 5),
+                ),
+                "shape",
+            ),
+            (
+                replace(
+                    snapshot,
+                    hidden_state=torch.full((1, 1, 4), float("nan")),
+                ),
+                "finite floating point",
+            ),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError,
+                message,
+            ):
+                policy.restore(bad_state)
+        with self.assertRaisesRegex(TypeError, "RecurrentPolicyState"):
+            policy.restore({})
+        with self.assertRaisesRegex(ValueError, "positive"):
+            StreamingRecurrentPolicy(model, 0)
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            StreamingRecurrentPolicy(model, 2, enforce_chronology=1)
+
+        empty_state = RecurrentPolicyState(
+            schema_version=RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+            recurrent_kind="gru",
+            layers=1,
+            hidden_size=4,
+            model_contract=snapshot.model_contract,
+            steps=0,
+            last_timestamp=None,
+            hidden_state=None,
+        )
+        policy.restore(empty_state)
+        self.assertEqual(policy.steps, 0)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_evaluation_restores_model_mode_after_episode_failure(self):
+        env = OptionsEnv(demo_dataset(), slot_count=1)
+        observation, _ = env.reset(seed=103)
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=1,
+            action_count=env.action_shape[1],
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+        ))
+        self.assertTrue(model.training)
+
+        with (
+            patch(
+                "trading_bot.training.trainer.run_episode",
+                side_effect=RuntimeError("episode failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "episode failed"),
+        ):
+            evaluate_recurrent_policy(env, model, 2)
+
+        self.assertTrue(model.training)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_train_and_save_auditable_checkpoint(self):
