@@ -347,10 +347,12 @@ patience. Each metric row and checkpoint manifest records the stopping state.
 These are machine-specific throughput choices, not alpha results.
 
 Add `--encoder graph` to run masked message passing over the option surface
-before temporal encoding:
+before temporal encoding, or `--encoder graph_set` to use a
+permutation-equivariant set policy:
 
 ```bash
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
+train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
 ```
 
 Training can enforce the same portfolio budgets:
@@ -362,19 +364,29 @@ train-demo --symbol AAPL --max-abs-delta 500 --max-abs-vega 500
 The graph connects each valid contract to neighbors using cross-sectionally
 standardized IV, delta, log-moneyness, and DTE, symmetrizes those relationships,
 adds self edges, and applies two message-passing layers. Invalid/padded slots
-cannot send or receive messages. This dense implementation is deliberate: with
-the default 32 slots it avoids a separate graph-framework dependency and its
-conversion overhead. Use the default `--encoder flat` when inference latency
-matters more than relational capacity.
+cannot send or receive messages. The original `graph` encoder flattens the node
+states into a dense policy head. `graph_set` instead applies masked mean/max
+pooling for the temporal state and scores every option through one shared head,
+with a separate underlying-share head. It therefore preserves option-logit
+equivariance and global-output invariance when contract slots are permuted, and
+shares policy parameters across slots and tickers. This dense implementation
+avoids a separate graph-framework dependency at the default 32 slots. Keep
+`flat` and flattened `graph` as measured baselines rather than assuming more
+relational structure is automatically better.
 
 Recurrent state is carried causally from one snapshot to the next. PPO updates
 shuffle contiguous truncated-backpropagation chunks instead of independently
 shuffling zero-padded windows; `--sequence-length` is the maximum gradient
 chunk length, not a claim that earlier state is erased. Deterministic inference
 feeds one observation at a time and caches the GRU/LSTM hidden state. On the
-current AAPL layout (899 inputs and 33 action slots), a local 500-iteration CPU
-benchmark measured 207.00 microseconds median for the flat hybrid and 446.98
-microseconds for the graph hybrid. Stable steady-state slot assignment measured
+current AAPL layout (899 inputs, 32 option slots, and 33 action rows), a local
+1,000-iteration CPU benchmark with hybrid width 128 and graph width 32 measured
+184.38 microseconds median and 984,691 parameters for `flat`, 390.35
+microseconds and 1,160,935 parameters for flattened `graph`, and 374.33
+microseconds and 215,472 parameters for `graph_set`. At tiny width 8, a real-data
+integration smoke measured `graph_set` around 369-376 microseconds versus about
+331 for flattened `graph`, showing that its fixed pooling/scoring overhead can
+outweigh its smaller parameter count. Stable steady-state slot assignment measured
 1.57 ms median versus 4.95 ms for full reranking; across the 17-transition AAPL
 no-op episode, the median environment loop fell from 144.38 ms to 84.53 ms.
 Treat these as machine-specific engineering measurements, not trading results.
@@ -449,6 +461,7 @@ train-walk-forward \
   --candidate flat:gru:ppo \
   --candidate flat:lstm:reinforce \
   --candidate graph:hybrid:ppo \
+  --candidate graph_set:hybrid:ppo \
   --hidden-size 256 \
   --parameter-budget 20000 \
   --latency-warmup-iterations 10 \
@@ -461,7 +474,8 @@ train-walk-forward \
 Repeat `--candidate ENCODER:KIND[:ALGORITHM]` to run a leak-safe architecture
 and learning-algorithm tournament. The optional algorithm is `ppo` or
 `reinforce` and defaults to `--algorithm` when omitted. Every GRU, LSTM, hybrid,
-flat, or graph candidate receives the same fold and training seed. Each
+flat, flattened-graph, or graph-set candidate receives the same fold and
+training seed. Each
 candidate restores its best validation checkpoint; the
 highest declared validation selection score wins, with fewer trainable
 parameters and then a smaller active input set, fewer optimizer updates, and
@@ -502,8 +516,8 @@ architecture while retaining each full-feature candidate. Available groups are
 `slot_identity`, `surface_wings`, `term_structure`, `surface_dynamics`,
 `volatility_regime`, `data_quality`, and `derived_contract_surface`. Masking happens inside the
 checkpointed model after
-the versioned transform, so training, restored inference, and graph/flat models
-use the same ablation. Artifacts report each ablated candidate's validation
+the versioned transform, so training, restored inference, and all encoders use
+the same ablation. Artifacts report each ablated candidate's validation
 score and raw-reward lift versus its full-feature counterpart plus active and
 masked input counts.
 Only the validation winner reaches test, preventing feature research from

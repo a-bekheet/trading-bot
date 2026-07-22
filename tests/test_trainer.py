@@ -40,6 +40,46 @@ from tests.test_training_env import demo_dataset, three_snapshot_dataset
 
 
 class TrainerTests(TestCase):
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_graph_set_policy_trains_and_round_trips_checkpoint(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset(seed=43)
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_slot_count=env.action_shape[0],
+            action_count=env.action_shape[1],
+            hidden_size=4,
+            encoder="graph_set",
+            contract_feature_count=observation.contracts.shape[1],
+            market_feature_count=observation.market.size,
+            portfolio_feature_count=observation.portfolio.size,
+            graph_hidden_size=4,
+            auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
+        )
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=2,
+            evaluation_interval=1,
+            auxiliary_coefficient=0.05,
+            seed=43,
+        )
+
+        model, metrics = train_actor_critic(env, recurrent, training)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "graph-set.pt"
+            save_checkpoint(path, model, env, recurrent, training, metrics)
+            restored, manifest = load_checkpoint(path)
+
+        self.assertEqual(restored.config.encoder, "graph_set")
+        self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
+        self.assertTrue(all(
+            torch.isfinite(parameter).all()
+            for parameter in restored.parameters()
+        ))
+
     def test_cli_selects_single_or_top50_training_universe(self):
         single = _parser().parse_args(["--symbol", "msft"])
         universe = _parser().parse_args(["--universe", "top50"])

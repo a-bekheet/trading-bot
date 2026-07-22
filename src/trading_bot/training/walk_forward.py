@@ -46,7 +46,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v20"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v21"
 
 
 @dataclass(frozen=True)
@@ -125,8 +125,8 @@ class ModelSpec:
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid"}:
             raise ValueError("model kind must be gru, lstm, or hybrid")
-        if self.encoder not in {"flat", "graph"}:
-            raise ValueError("model encoder must be flat or graph")
+        if self.encoder not in {"flat", "graph", "graph_set"}:
+            raise ValueError("model encoder must be flat, graph, or graph_set")
         if min(
             self.hidden_size,
             self.layers,
@@ -766,7 +766,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--latency-measured-iterations", type=int, default=100)
     parser.add_argument("--max-median-inference-latency-us", type=float)
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
-    parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
+    parser.add_argument(
+        "--encoder",
+        choices=("flat", "graph", "graph_set"),
+        default="flat",
+    )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
     parser.add_argument(
         "--candidate",
@@ -787,6 +791,9 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--hidden-size", type=int, default=128)
+    parser.add_argument("--graph-hidden-size", type=int, default=32)
+    parser.add_argument("--graph-layers", type=int, default=2)
+    parser.add_argument("--graph-neighbors", type=int, default=3)
     parser.add_argument(
         "--parameter-budget",
         type=int,
@@ -873,6 +880,9 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 kind=kind,
                 encoder=encoder,
                 hidden_size=args.hidden_size,
+                graph_hidden_size=args.graph_hidden_size,
+                graph_layers=args.graph_layers,
+                graph_neighbors=args.graph_neighbors,
                 initial_hold_bias=args.initial_hold_bias,
                 algorithm=algorithm,
                 parameter_budget=args.parameter_budget,

@@ -42,8 +42,12 @@ class RecurrentConfig:
             raise ValueError("action_slot_count must be positive")
         if self.market_feature_count < 1 or self.portfolio_feature_count < 1:
             raise ValueError("market and portfolio feature counts must be positive")
-        if self.layers < 1 or self.graph_layers < 1 or self.graph_hidden_size < 1:
-            raise ValueError("layer counts and graph_hidden_size must be positive")
+        if min(
+            self.layers,
+            self.graph_layers,
+            self.graph_hidden_size,
+        ) < 1:
+            raise ValueError("layer and graph hidden sizes must be positive")
         if self.graph_neighbors < 0:
             raise ValueError("graph_neighbors cannot be negative")
         if not math.isfinite(self.initial_hold_bias) or self.initial_hold_bias < 0:
@@ -69,11 +73,12 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
 
     if config.kind not in {"gru", "lstm", "hybrid"}:
         raise ValueError("kind must be 'gru', 'lstm', or 'hybrid'")
-    if config.encoder not in {"flat", "graph"}:
-        raise ValueError("encoder must be 'flat' or 'graph'")
-    if config.encoder == "graph" and config.contract_feature_count is None:
+    graph_encoder = config.encoder in {"graph", "graph_set"}
+    if config.encoder not in {"flat", "graph", "graph_set"}:
+        raise ValueError("encoder must be 'flat', 'graph', or 'graph_set'")
+    if graph_encoder and config.contract_feature_count is None:
         raise ValueError("graph encoder requires contract_feature_count")
-    if config.encoder == "graph" and any(
+    if graph_encoder and any(
         index < 0 or index >= config.contract_feature_count
         for index in config.graph_relation_indices
     ):
@@ -81,7 +86,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
 
     temporal_input_size = config.input_size
     policy_slot_count = config.action_slot_count or config.slot_count
-    if config.encoder == "graph":
+    if graph_encoder:
         expected = (
             config.market_feature_count
             + config.portfolio_feature_count
@@ -91,11 +96,23 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             raise ValueError(
                 "input_size does not match market, contract, portfolio, and mask dimensions"
             )
-        temporal_input_size = (
-            config.market_feature_count
-            + config.portfolio_feature_count
-            + config.slot_count * (config.graph_hidden_size + 1)
-        )
+        if config.encoder == "graph_set":
+            if policy_slot_count != config.slot_count + 1:
+                raise ValueError(
+                    "graph_set requires one action row per contract plus underlying"
+                )
+            temporal_input_size = (
+                config.market_feature_count
+                + config.portfolio_feature_count
+                + 2 * config.graph_hidden_size
+                + 1
+            )
+        else:
+            temporal_input_size = (
+                config.market_feature_count
+                + config.portfolio_feature_count
+                + config.slot_count * (config.graph_hidden_size + 1)
+            )
 
     def make_recurrent(kind: str):
         recurrent = nn.GRU if kind == "gru" else nn.LSTM
@@ -117,7 +134,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 persistent=False,
             )
             self.input_norm = nn.LayerNorm(temporal_input_size)
-            if config.encoder == "graph":
+            if graph_encoder:
                 graph_dimensions = [
                     config.contract_feature_count,
                     *([config.graph_hidden_size] * config.graph_layers),
@@ -140,16 +157,32 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             else:
                 self.recurrent = make_recurrent(config.kind)
                 output_size = config.hidden_size
-            self.policy = nn.Linear(
-                output_size,
-                policy_slot_count * config.action_count,
-            )
-            nn.init.zeros_(self.policy.bias)
-            with torch.no_grad():
-                self.policy.bias.view(
-                    policy_slot_count,
+            if config.encoder == "graph_set":
+                self.policy = None
+                self.contract_policy = nn.Linear(
+                    output_size + config.graph_hidden_size,
                     config.action_count,
-                )[:, 0] = config.initial_hold_bias
+                )
+                self.underlying_policy = nn.Linear(
+                    output_size,
+                    config.action_count,
+                )
+                nn.init.zeros_(self.contract_policy.bias)
+                nn.init.zeros_(self.underlying_policy.bias)
+                with torch.no_grad():
+                    self.contract_policy.bias[0] = config.initial_hold_bias
+                    self.underlying_policy.bias[0] = config.initial_hold_bias
+            else:
+                self.policy = nn.Linear(
+                    output_size,
+                    policy_slot_count * config.action_count,
+                )
+                nn.init.zeros_(self.policy.bias)
+                with torch.no_grad():
+                    self.policy.bias.view(
+                        policy_slot_count,
+                        config.action_count,
+                    )[:, 0] = config.initial_hold_bias
             self.value = nn.Linear(output_size, 1)
             self.auxiliary = (
                 nn.Linear(output_size, config.auxiliary_target_count)
@@ -213,23 +246,57 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 )
                 hidden *= valid.unsqueeze(-1)
 
-            temporal = torch.cat(
-                (
-                    flattened[:, :config.market_feature_count],
-                    hidden.flatten(start_dim=1),
-                    portfolio,
-                    valid.to(hidden.dtype),
+            valid_values = valid.to(hidden.dtype)
+            if config.encoder == "graph_set":
+                valid_count = valid_values.sum(dim=1, keepdim=True).clamp_min(1.0)
+                pooled_mean = hidden.sum(dim=1) / valid_count
+                pooled_max = hidden.masked_fill(
+                    ~valid.unsqueeze(-1),
+                    float("-inf"),
+                ).amax(dim=1)
+                pooled_max = torch.where(
+                    valid.any(dim=1, keepdim=True),
+                    pooled_max,
+                    torch.zeros_like(pooled_max),
+                )
+                valid_fraction = valid_values.mean(dim=1, keepdim=True)
+                temporal = torch.cat(
+                    (
+                        flattened[:, :config.market_feature_count],
+                        pooled_mean,
+                        pooled_max,
+                        portfolio,
+                        valid_fraction,
+                    ),
+                    dim=-1,
+                )
+            else:
+                temporal = torch.cat(
+                    (
+                        flattened[:, :config.market_feature_count],
+                        hidden.flatten(start_dim=1),
+                        portfolio,
+                        valid_values,
+                    ),
+                    dim=-1,
+                )
+            return (
+                temporal.view(batch, steps, temporal_input_size),
+                hidden.view(
+                    batch,
+                    steps,
+                    config.slot_count,
+                    config.graph_hidden_size,
                 ),
-                dim=-1,
             )
-            return temporal.view(batch, steps, temporal_input_size)
 
         def _encode_sequence(self, sequence, hidden_state=None):
             if self._masked_input_indices.numel():
                 sequence = sequence.clone()
                 sequence.index_fill_(-1, self._masked_input_indices, 0.0)
-            if config.encoder == "graph":
-                sequence = self._graph_encode(sequence)
+            node_embeddings = None
+            if graph_encoder:
+                sequence, node_embeddings = self._graph_encode(sequence)
             sequence = self.input_norm(sequence)
             if config.kind == "hybrid":
                 gru_initial = None if hidden_state is None else hidden_state["gru"]
@@ -244,7 +311,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 hidden = {"gru": gru_hidden, "lstm": lstm_hidden}
             else:
                 encoded, hidden = self.recurrent(sequence, hidden_state)
-            return encoded, hidden
+            return encoded, hidden, node_embeddings
 
         @staticmethod
         def _safe_action_mask(action_mask):
@@ -253,13 +320,35 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             safe_mask[..., 0] |= empty_slots
             return safe_mask
 
-        def _actor_critic_outputs(self, encoded, sequence, action_mask):
-            logits = self.policy(encoded).view(
-                sequence.shape[0],
-                sequence.shape[1],
-                policy_slot_count,
-                config.action_count,
-            )
+        def _actor_critic_outputs(
+            self,
+            encoded,
+            sequence,
+            action_mask,
+            node_embeddings,
+        ):
+            if config.encoder == "graph_set":
+                if node_embeddings is None:
+                    raise RuntimeError("graph_set node embeddings are missing")
+                global_context = encoded.unsqueeze(2).expand(
+                    -1,
+                    -1,
+                    config.slot_count,
+                    -1,
+                )
+                option_logits = self.contract_policy(torch.cat(
+                    (global_context, node_embeddings),
+                    dim=-1,
+                ))
+                underlying_logits = self.underlying_policy(encoded).unsqueeze(2)
+                logits = torch.cat((option_logits, underlying_logits), dim=2)
+            else:
+                logits = self.policy(encoded).view(
+                    sequence.shape[0],
+                    sequence.shape[1],
+                    policy_slot_count,
+                    config.action_count,
+                )
             if action_mask is not None:
                 if action_mask.ndim == 3:
                     action_mask = action_mask.unsqueeze(1).expand(
@@ -273,11 +362,15 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
 
         def forward_sequence(self, sequence, action_mask=None, hidden_state=None):
             """Return actor and critic outputs for every causal time step."""
-            encoded, hidden = self._encode_sequence(sequence, hidden_state)
+            encoded, hidden, node_embeddings = self._encode_sequence(
+                sequence,
+                hidden_state,
+            )
             logits, values = self._actor_critic_outputs(
                 encoded,
                 sequence,
                 action_mask,
+                node_embeddings,
             )
             return logits, values, hidden
 
@@ -290,11 +383,15 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             """Return PPO outputs plus train-only next-market predictions."""
             if self.auxiliary is None:
                 raise RuntimeError("model has no auxiliary prediction head")
-            encoded, hidden = self._encode_sequence(sequence, hidden_state)
+            encoded, hidden, node_embeddings = self._encode_sequence(
+                sequence,
+                hidden_state,
+            )
             logits, values = self._actor_critic_outputs(
                 encoded,
                 sequence,
                 action_mask,
+                node_embeddings,
             )
             return (
                 logits,

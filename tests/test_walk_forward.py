@@ -214,6 +214,14 @@ class WalkForwardTrainingTests(TestCase):
                 graph_layers=1,
                 graph_neighbors=1,
             ),
+            ModelSpec(
+                kind="gru",
+                encoder="graph_set",
+                hidden_size=8,
+                graph_hidden_size=4,
+                graph_layers=1,
+                graph_neighbors=1,
+            ),
         )
         with TemporaryDirectory() as directory:
             output_dir = Path(directory)
@@ -255,8 +263,8 @@ class WalkForwardTrainingTests(TestCase):
             _, manifest = load_checkpoint(checkpoint_files[0])
 
         self.assertIsNone(summary["model"])
-        self.assertEqual(len(summary["candidate_models"]), 5)
-        self.assertEqual(len(candidate_results), 5)
+        self.assertEqual(len(summary["candidate_models"]), 6)
+        self.assertEqual(len(candidate_results), 6)
         self.assertEqual(len(checkpoint_files), 1)
         self.assertTrue(
             all(result["episodes_completed"] == 1 for result in candidate_results)
@@ -413,6 +421,8 @@ class WalkForwardTrainingTests(TestCase):
             "flat:gru",
             "--candidate",
             "graph:hybrid:reinforce",
+            "--candidate",
+            "graph_set:gru",
             "--ablation",
             "surface_wings",
             "--parameter-budget",
@@ -421,10 +431,10 @@ class WalkForwardTrainingTests(TestCase):
 
         specs = _model_specs_from_args(args)
 
-        self.assertEqual(len(specs), 4)
+        self.assertEqual(len(specs), 6)
         self.assertEqual(
             sum(bool(spec.disabled_feature_groups) for spec in specs),
-            2,
+            3,
         )
         self.assertEqual(
             {spec.algorithm for spec in specs},
@@ -451,6 +461,15 @@ class WalkForwardTrainingTests(TestCase):
             ModelSpec(
                 "hybrid",
                 "graph",
+                hidden_size=32,
+                graph_hidden_size=4,
+                graph_layers=1,
+                graph_neighbors=1,
+                parameter_budget=5_000,
+            ),
+            ModelSpec(
+                "gru",
+                "graph_set",
                 hidden_size=32,
                 graph_hidden_size=4,
                 graph_layers=1,

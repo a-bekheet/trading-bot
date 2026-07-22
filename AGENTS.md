@@ -26,7 +26,8 @@ does not place live trades.
   snapshot loader, fixed-slot environment, deterministic baselines, and
   evaluation reports. `features.py` computes causal features and `sequence.py`
   builds chronological windows. `recurrent.py` is an optional PyTorch GRU,
-  LSTM, or hybrid actor-critic with flat or graph contract encoding. `trainer.py`
+  LSTM, or hybrid actor-critic with flat, flattened-graph, or graph-set contract
+  encoding. `trainer.py`
   owns factorized PPO/GAE optimization, deterministic evaluation, safe
   checkpoint restoration, and provenance. `walk_forward.py` owns validation-only
   model selection, held-out test evaluation, fold artifacts, and its CLI. These
@@ -292,6 +293,15 @@ and self edges. Padded contracts must neither send nor receive messages. Keep th
 dense implementation while the slot count is small; require profiling evidence
 before adding a graph-framework dependency.
 
+The `graph_set` encoder is the slot-agnostic graph policy. Its temporal input
+uses masked mean/max pooling plus valid-node coverage, every option row uses the
+same contract scorer, and the underlying row uses a separate scorer. Permuting
+valid contract slots must permute their option logits while leaving the value,
+underlying logits, and auxiliary predictions unchanged. Padded node content must
+remain inert. Preserve these invariants with tests whenever graph construction,
+pooling, action layout, or recurrent state changes. Do not assume `graph_set` is
+always faster: enforce a predeclared latency budget when speed affects selection.
+
 Evaluation changes must preserve chronological order. `walk_forward_splits`
 uses half-open train/validation/test ranges with explicit embargoes and may
 return no folds when history is insufficient. Never relax requested sizes to
@@ -379,7 +389,8 @@ collect-options
 streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
-train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph:hybrid
+train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
+train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph:hybrid --candidate graph_set:hybrid
 ```
 
 The collector defaults to three expirations per ticker, one cycle every 900

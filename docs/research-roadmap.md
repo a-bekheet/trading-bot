@@ -59,8 +59,9 @@ uses a real bounded underlying-share action with explicit synthetic costs. It
 remains a research approximation until historical underlying bid/ask, borrow,
 margin, dividend, and funding data are available.
 
-The runner can now compare flat/graph GRU, LSTM, and hybrid candidates within
-each fold. All candidates share the fold and seed, architecture selection uses
+The runner can now compare flat, flattened-graph, and graph-set GRU, LSTM, and
+hybrid candidates within each fold. All candidates share the fold and seed;
+architecture selection uses
 the declared validation selection score with a deterministic simplicity
 tie-break, and only the winner reaches held-out evaluation. A common trainable
 parameter ceiling can now resolve the widest fitting recurrent state per
@@ -186,18 +187,23 @@ a simple underpriced-volatility rule rather than a complete volatility book.
 
 ### 4. Earn relational and surface complexity
 
-The current dense GNN connects valid contracts by IV, delta, log-moneyness, and
-DTE before the GRU/LSTM temporal layer. Its role is cross-contract structure;
-the recurrent layer handles time. Next experiments should compare:
+The dense GNN connects valid contracts by IV, delta, log-moneyness, and DTE
+before the GRU/LSTM temporal layer. Its role is cross-contract structure; the
+recurrent layer handles time. The implemented `graph_set` variant replaces the
+slot-dependent flattened policy with validity-masked mean/max pooling and a
+shared per-contract action scorer. This makes option outputs equivariant to slot
+permutations, makes global outputs invariant, and cuts policy parameters without
+introducing a graph-framework dependency. Next experiments should compare:
 
 - Flat GRU versus GNN-GRU at matched parameter and latency budgets.
 - Hand-built neighbor graphs versus learned attention with validity masks.
-- Per-ticker training versus a shared graph policy with ticker/regime context.
+- Per-ticker training versus the shared graph-set policy with ticker/regime
+  context.
 - Raw normalized surface features versus causal PCA, then a compact VAE or
   neural-process surface latent only after the data volume supports it.
 
-The flat/graph and recurrent-family tournament plumbing, exact parameter-cap
-matching, and a standardized streaming batch-one inference benchmark are
+The flat, flattened-graph, graph-set, and recurrent-family tournament plumbing,
+exact parameter-cap matching, and a standardized streaming batch-one inference benchmark are
 implemented. Each fold reports median, p95, and mean latency with runtime
 context from a training observation. Timing is informational by default; a
 predeclared median ceiling can exclude deployment-ineligible candidates before
@@ -216,7 +222,8 @@ data quality, or derived contract-surface inputs inside the recurrent model.
 Each is paired with its full-feature architecture and records validation reward
 lift; only one validation winner reaches the held-out range.
 
-Do not add a graph framework while 32 dense slots remain faster and simpler.
+Do not add a graph framework while 32 dense slots remain simpler and profiling
+does not show a net benefit.
 Do not train a VAE across a random split of surface days; that would leak future
 surface regimes into its representation.
 

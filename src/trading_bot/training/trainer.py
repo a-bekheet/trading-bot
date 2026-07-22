@@ -25,7 +25,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v18"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v19"
 
 
 @dataclass(frozen=True)
@@ -1164,11 +1164,18 @@ def _parser() -> argparse.ArgumentParser:
         help="train one ticker or one shared policy across the top-50 universe",
     )
     parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
-    parser.add_argument("--encoder", choices=("flat", "graph"), default="flat")
+    parser.add_argument(
+        "--encoder",
+        choices=("flat", "graph", "graph_set"),
+        default="flat",
+    )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=128)
+    parser.add_argument("--graph-hidden-size", type=int, default=32)
+    parser.add_argument("--graph-layers", type=int, default=2)
+    parser.add_argument("--graph-neighbors", type=int, default=3)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument(
         "--slot-assignment",
@@ -1280,6 +1287,9 @@ def main() -> None:
             CONTRACT_FEATURES.index(name)
             for name in ("impliedVolatility", "delta", "logMoneyness", "dteDays")
         ),
+        graph_hidden_size=args.graph_hidden_size,
+        graph_layers=args.graph_layers,
+        graph_neighbors=args.graph_neighbors,
         auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
     )
     training_config = TrainingConfig(

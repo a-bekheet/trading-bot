@@ -9,6 +9,27 @@ from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_acto
 
 
 class RecurrentTests(TestCase):
+    @staticmethod
+    def graph_set_config(*, kind: str = "gru") -> RecurrentConfig:
+        # market(2), three contracts(4 each), portfolio(3), valid mask(3)
+        return RecurrentConfig(
+            20,
+            3,
+            3,
+            action_slot_count=4,
+            hidden_size=8,
+            kind=kind,
+            encoder="graph_set",
+            contract_feature_count=4,
+            market_feature_count=2,
+            portfolio_feature_count=3,
+            graph_hidden_size=6,
+            graph_layers=2,
+            graph_neighbors=2,
+            graph_relation_indices=(0, 1),
+            auxiliary_target_count=5,
+        )
+
     def test_positional_hidden_size_remains_backward_compatible(self):
         config = RecurrentConfig(5, 2, 3, 8)
         self.assertEqual(config.hidden_size, 8)
@@ -214,3 +235,143 @@ class RecurrentTests(TestCase):
         )
         with self.assertRaisesRegex(ValueError, "input_size does not match"):
             build_recurrent_actor_critic(config)
+        with self.assertRaisesRegex(ValueError, "one action row"):
+            build_recurrent_actor_critic(RecurrentConfig(
+                20,
+                3,
+                3,
+                action_slot_count=3,
+                encoder="graph_set",
+                contract_feature_count=4,
+                market_feature_count=2,
+                portfolio_feature_count=3,
+            ))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_graph_set_is_permutation_equivariant_with_invariant_value(self):
+        torch.manual_seed(31)
+        model = build_recurrent_actor_critic(self.graph_set_config())
+        model.eval()
+        sequence = torch.randn(2, 5, 20)
+        sequence[..., -3:] = 1
+        action_mask = torch.ones(2, 5, 4, 3, dtype=torch.bool)
+        permutation = torch.tensor([2, 0, 1])
+        changed = sequence.clone()
+        contracts = sequence[..., 2:14].view(2, 5, 3, 4)
+        changed[..., 2:14] = contracts[:, :, permutation].reshape(2, 5, 12)
+        changed[..., -3:] = sequence[..., -3:][:, :, permutation]
+        changed_mask = torch.cat(
+            (action_mask[:, :, permutation], action_mask[:, :, 3:4]),
+            dim=2,
+        )
+
+        logits, values, auxiliary, _ = model.forward_sequence_with_auxiliary(
+            sequence,
+            action_mask,
+        )
+        changed_logits, changed_values, changed_auxiliary, _ = (
+            model.forward_sequence_with_auxiliary(changed, changed_mask)
+        )
+
+        torch.testing.assert_close(
+            changed_logits[:, :, :3],
+            logits[:, :, permutation],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(
+            changed_logits[:, :, 3],
+            logits[:, :, 3],
+            rtol=1e-5,
+            atol=1e-6,
+        )
+        torch.testing.assert_close(changed_values, values, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(
+            changed_auxiliary,
+            auxiliary,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_graph_set_ignores_padded_nodes_and_backpropagates_shared_head(self):
+        torch.manual_seed(37)
+        model = build_recurrent_actor_critic(self.graph_set_config())
+        sequence = torch.randn(2, 4, 20)
+        sequence[..., -3:] = torch.tensor([1.0, 1.0, 0.0])
+        changed = sequence.clone()
+        changed[..., 10:14] = 1_000_000
+        mask = torch.ones(2, 4, 4, 3, dtype=torch.bool)
+        mask[:, :, 2, 1:] = False
+
+        logits, values, _ = model.forward_sequence(sequence, mask)
+        changed_logits, changed_values, _ = model.forward_sequence(changed, mask)
+
+        torch.testing.assert_close(logits, changed_logits)
+        torch.testing.assert_close(values, changed_values)
+        loss = logits[..., :2, :].square().mean() + values.square().mean()
+        loss.backward()
+        self.assertIsNotNone(model.contract_policy.weight.grad)
+        self.assertIsNotNone(model.recurrent.weight_ih_l0.grad)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_graph_set_streaming_matches_full_sequence_for_every_variant(self):
+        torch.manual_seed(41)
+        for kind in ("gru", "lstm", "hybrid"):
+            model = build_recurrent_actor_critic(
+                self.graph_set_config(kind=kind)
+            )
+            model.eval()
+            sequence = torch.randn(1, 5, 20)
+            sequence[..., -3:] = 1
+            masks = torch.ones(1, 5, 4, 3, dtype=torch.bool)
+            full_logits, full_values, _ = model.forward_sequence(
+                sequence,
+                masks,
+            )
+            hidden = None
+            streamed_logits = []
+            streamed_values = []
+            for step in range(sequence.shape[1]):
+                logits, values, hidden = model(
+                    sequence[:, step:step + 1],
+                    masks[:, step],
+                    hidden_state=hidden,
+                )
+                streamed_logits.append(logits)
+                streamed_values.append(values)
+            torch.testing.assert_close(
+                torch.stack(streamed_logits, dim=1),
+                full_logits,
+            )
+            torch.testing.assert_close(
+                torch.stack(streamed_values, dim=1),
+                full_values,
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_graph_set_uses_fewer_parameters_than_flattened_graph(self):
+        graph_set_config = RecurrentConfig(
+            165,
+            32,
+            7,
+            action_slot_count=33,
+            hidden_size=16,
+            encoder="graph_set",
+            contract_feature_count=4,
+            market_feature_count=2,
+            portfolio_feature_count=3,
+            graph_hidden_size=8,
+        )
+        graph_set = build_recurrent_actor_critic(graph_set_config)
+        flattened = build_recurrent_actor_critic(
+            RecurrentConfig(**{
+                **graph_set_config.__dict__,
+                "encoder": "graph",
+            })
+        )
+
+        self.assertLess(
+            sum(parameter.numel() for parameter in graph_set.parameters()),
+            sum(parameter.numel() for parameter in flattened.parameters()),
+        )
