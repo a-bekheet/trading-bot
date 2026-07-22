@@ -92,6 +92,15 @@ measurement across training seeds, recording the measured seed and each reuse;
 weights do not change the dense execution graph. These changes reduce
 time-to-agent without weakening the three-seed validation or held-out gate.
 
+v0.89 closes the live input-race found during the first strict five-ticker run.
+The arena now loads every ticker dataset into one frozen in-memory boundary
+before training the first policy, and records the freeze window and loaded
+symbols in `agent-arena.json`. The watcher also waits while the collector is
+actively appending CSVs, and the arena rejects the whole freeze if any source
+size or modification timestamp changes while inputs load. A later ticker can
+therefore no longer observe a newer collection cycle merely because earlier
+ticker models took longer to train.
+
 ## Explore data
 
 ```bash
@@ -175,6 +184,9 @@ ready, and records its heartbeat in `data/_arena_watch_status.json`. It will not
 retrain on every collector cycle. The Agent Results tab displays whether it is
 waiting, running, complete, or already current. `arena-watch --once` performs a
 single check; `arena-service uninstall` stops and removes the LaunchAgent.
+The watcher defers both readiness inspection and launch while the collector
+status is `running`; after launch, all five inputs are frozen before model
+training begins.
 
 After a compatible arena finishes, advance the selected policies once:
 

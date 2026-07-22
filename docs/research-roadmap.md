@@ -552,6 +552,16 @@ than once per training seed; every reused record declares its measured seed.
 Neither optimization changes validation scores, held-out access, or the
 activation gate.
 
+v0.89 fixes the cross-ticker input race observed in the first strict live run.
+Sequential training had allowed the final ticker to load one collection cycle
+later than the first four. The watcher now refuses to inspect or launch while a
+collector append cycle is active, and the arena loads every declared ticker
+before training any candidate. It verifies every source file's size and
+modification timestamp across the freeze and aborts all training on a change.
+The arena artifact records this input-freeze window. Per-ticker paths remain
+distinct, but one operational run can no longer
+quietly mix data revisions caused by its own training duration.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

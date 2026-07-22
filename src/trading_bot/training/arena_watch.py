@@ -24,7 +24,7 @@ from trading_bot.training.dataset import SnapshotDataset
 
 
 ARENA_WATCH_STATUS_SCHEMA_VERSION = "research-demo.arena-watch.status.v2"
-ARENA_WATCH_RUN_CONTRACT_VERSION = "research-demo.arena-watch.run.v3"
+ARENA_WATCH_RUN_CONTRACT_VERSION = "research-demo.arena-watch.run.v4"
 ARENA_WATCH_STATUS_FILENAME = "_arena_watch_status.json"
 ARENA_WATCH_LOCK_FILENAME = ".arena-watch.lock"
 NEW_YORK = ZoneInfo("America/New_York")
@@ -67,6 +67,17 @@ def _write_status(data_dir: Path, payload: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _collector_running(data_dir: Path) -> bool:
+    path = data_dir / "_collector_status.json"
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return payload.get("status") == "running"
 
 
 def _base_status(
@@ -214,6 +225,18 @@ def run_watch_cycle(
         poll_seconds=poll_seconds,
         previous=previous,
     )
+    if _collector_running(data_dir):
+        status["status"] = "waiting"
+        status["message"] = "waiting for the collector cycle to finish"
+        status["readiness"] = (previous or {}).get("readiness", [])
+        status["ready_count"] = sum(
+            bool(item.get("ready")) for item in status["readiness"]
+        )
+        status["target_session_date"] = (previous or {}).get(
+            "target_session_date"
+        )
+        _write_status(data_dir, status)
+        return status
     readiness, session_date = inspect_arena_readiness(data_dir, normalized)
     status["readiness"] = readiness
     status["ready_count"] = sum(bool(item.get("ready")) for item in readiness)

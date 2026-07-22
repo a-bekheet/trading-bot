@@ -355,6 +355,95 @@ class AgentArenaTests(TestCase):
         self.assertEqual(loader.call_count, 2)
         runner.assert_called_once()
 
+    def test_freezes_every_ticker_input_before_training_any_ticker(self):
+        events = []
+        summary = {
+            "folds": [
+                {
+                    "model_selection": {"selected_model_id": "winner"},
+                    "test": [{"total_return": 0.0}],
+                }
+            ]
+        }
+
+        def load(_data_dir, symbol):
+            events.append(f"load:{symbol}")
+            return object()
+
+        def train(*_args, **_kwargs):
+            events.append("train")
+            return summary
+
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "trading_bot.training.arena.SnapshotDataset.from_directory",
+                side_effect=load,
+            ),
+            patch(
+                "trading_bot.training.arena.run_walk_forward_training",
+                side_effect=train,
+            ),
+        ):
+            result = run_agent_arena(
+                data_dir=Path(directory),
+                output_dir=Path(directory) / "arena",
+                symbols=("AAPL", "NVDA"),
+                walk_forward_config=WalkForwardConfig(3, 2, 2),
+                model_specs=recurrent_arena_models(hidden_size=4),
+                training_config=TrainingConfig(episodes=1),
+                env_kwargs={"slot_count": 2},
+            )
+
+        self.assertEqual(events, ["load:AAPL", "load:NVDA", "train", "train"])
+        self.assertEqual(
+            result["input_snapshot"]["mode"],
+            "all_tickers_loaded_before_training",
+        )
+        self.assertEqual(
+            result["input_snapshot"]["loaded_symbols"],
+            ["AAPL", "NVDA"],
+        )
+
+    def test_source_change_aborts_the_entire_frozen_cohort(self):
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "trading_bot.training.arena._source_file_state",
+                side_effect=(
+                    {"path": "AAPL.csv", "size": 10, "modified_ns": 1},
+                    {"path": "AAPL.csv", "size": 20, "modified_ns": 2},
+                ),
+            ),
+            patch(
+                "trading_bot.training.arena.SnapshotDataset.from_directory",
+                return_value=object(),
+            ),
+            patch(
+                "trading_bot.training.arena.run_walk_forward_training",
+            ) as runner,
+        ):
+            output_dir = Path(directory) / "arena"
+            with self.assertRaisesRegex(RuntimeError, "no completed"):
+                run_agent_arena(
+                    data_dir=Path(directory),
+                    output_dir=output_dir,
+                    symbols=("AAPL",),
+                    walk_forward_config=WalkForwardConfig(3, 2, 2),
+                    model_specs=recurrent_arena_models(hidden_size=4),
+                    training_config=TrainingConfig(episodes=1),
+                    env_kwargs={"slot_count": 2},
+                )
+            written = json.loads((output_dir / "agent-arena.json").read_text())
+
+        runner.assert_not_called()
+        self.assertFalse(written["input_snapshot"]["stable"])
+        self.assertEqual(written["input_snapshot"]["changed_symbols"], ["AAPL"])
+        self.assertEqual(
+            written["failures"][-1]["error_type"],
+            "InputChangedDuringFreeze",
+        )
+
     def test_requires_a_completed_ticker_but_keeps_failure_artifact(self):
         with (
             TemporaryDirectory() as directory,

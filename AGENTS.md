@@ -457,6 +457,16 @@ measure latency once per exact recurrent configuration and fold, record the
 measured training seed, and explicitly mark reuse for other seeds. Do not reuse
 measurements across folds, sequence lengths, or recurrent configurations.
 
+Freeze the multi-ticker arena input boundary before any model training. The
+watcher must defer readiness and launch while `_collector_status.json` reports
+`running`; the arena must then load every declared ticker before training the
+first one, verify no source file changed across the load, and persist the freeze
+window. Any detected change must abort all ticker training rather than retain a
+partial cohort. Never load the next ticker only after
+the previous ticker's candidates finish, because a concurrent collector cycle
+would give later policies a newer test cutoff and invalidate cross-ticker run
+comparability.
+
 The fast default arena must use `latest_fold_only=True`. Build its single split
 backward from the newest available test tail, preserve both embargoes, and assign
 all earlier eligible history to expanding training. Do not recreate this with a

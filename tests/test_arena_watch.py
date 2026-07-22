@@ -34,6 +34,29 @@ def ready_items(*symbols: str):
 class ArenaWatchTests(TestCase):
     @patch("trading_bot.training.arena_watch.run_locked_arena")
     @patch("trading_bot.training.arena_watch.inspect_arena_readiness")
+    @patch(
+        "trading_bot.training.arena_watch._collector_running",
+        return_value=True,
+    )
+    def test_running_collector_defers_readiness_and_training(
+        self,
+        _collector,
+        inspect,
+        run_arena,
+    ):
+        with TemporaryDirectory() as directory:
+            result = run_watch_cycle(Path(directory), ("AAPL",))
+
+        self.assertEqual(result["status"], "waiting")
+        self.assertEqual(
+            result["message"],
+            "waiting for the collector cycle to finish",
+        )
+        inspect.assert_not_called()
+        run_arena.assert_not_called()
+
+    @patch("trading_bot.training.arena_watch.run_locked_arena")
+    @patch("trading_bot.training.arena_watch.inspect_arena_readiness")
     def test_waiting_status_does_not_start_training(self, inspect, run_arena):
         inspect.return_value = (
             [{"symbol": "AAPL", "ready": False, "reason": "waiting"}],

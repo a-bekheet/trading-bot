@@ -25,7 +25,7 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v12"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v13"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 DEFAULT_ARENA_TRAINING_SEED_OFFSETS = (0, 1, 2)
 DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE = 1e-4
@@ -38,6 +38,19 @@ DEFAULT_ARENA_VALIDATION_SIZE = 3
 DEFAULT_ARENA_TEST_SIZE = 4
 DEFAULT_ARENA_EMBARGO = 0
 DEFAULT_ARENA_STEP_SIZE = 100
+
+
+def _source_file_state(data_dir: Path, symbol: str) -> dict[str, Any] | None:
+    path = data_dir / f"{symbol}.csv"
+    try:
+        state = path.stat()
+    except FileNotFoundError:
+        return None
+    return {
+        "path": str(path),
+        "size": state.st_size,
+        "modified_ns": state.st_mtime_ns,
+    }
 
 
 def arena_walk_forward_config(
@@ -351,17 +364,59 @@ def run_agent_arena(
     completed = []
     failures = []
     preflight = []
+    input_snapshot_started_at = datetime.now(timezone.utc)
+    input_state_before = {
+        symbol: _source_file_state(data_dir, symbol)
+        for symbol in normalized_symbols
+    }
+    frozen_inputs: dict[str, SnapshotDataset] = {}
+    for symbol in normalized_symbols:
+        try:
+            frozen_inputs[symbol] = (
+                SnapshotDataset.material_from_directory(data_dir, symbol)
+                if walk_forward_config.latest_fold_only
+                else SnapshotDataset.from_directory(data_dir, symbol)
+            )
+        except Exception as error:
+            failures.append(
+                {
+                    "symbol": symbol,
+                    "error_type": type(error).__name__,
+                    "message": str(error),
+                }
+            )
+    input_state_after = {
+        symbol: _source_file_state(data_dir, symbol)
+        for symbol in normalized_symbols
+    }
+    changed_during_freeze = [
+        symbol
+        for symbol in normalized_symbols
+        if input_state_before[symbol] != input_state_after[symbol]
+    ]
+    if changed_during_freeze:
+        for symbol in normalized_symbols:
+            failures.append(
+                {
+                    "symbol": symbol,
+                    "error_type": "InputChangedDuringFreeze",
+                    "message": (
+                        "arena source files changed while freezing all ticker inputs"
+                    ),
+                }
+            )
+        frozen_inputs.clear()
+    input_snapshot_completed_at = datetime.now(timezone.utc)
     max_quote_age_seconds = env_kwargs.get(
         "max_underlying_quote_age_seconds",
         DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
     )
     for symbol in normalized_symbols:
+        if symbol not in frozen_inputs:
+            continue
         try:
             if walk_forward_config.latest_fold_only:
-                material_dataset = SnapshotDataset.material_from_directory(
-                    data_dir,
-                    symbol,
-                )
+                material_dataset = frozen_inputs[symbol]
                 eligible_dataset, readiness = eligible_arena_dataset(
                     material_dataset,
                     walk_forward_config,
@@ -386,7 +441,7 @@ def run_agent_arena(
             elif require_ready_tail:
                 raise ValueError("require_ready_tail requires latest_fold_only")
             else:
-                dataset = SnapshotDataset.from_directory(data_dir, symbol)
+                dataset = frozen_inputs[symbol]
             summary = run_walk_forward_training(
                 dataset,
                 walk_forward_config,
@@ -432,6 +487,16 @@ def run_agent_arena(
         "candidate_models": [asdict(spec) for spec in model_specs],
         "training": asdict(training_config),
         "environment": dict(env_kwargs),
+        "input_snapshot": {
+            "mode": "all_tickers_loaded_before_training",
+            "started_at": input_snapshot_started_at.isoformat(),
+            "completed_at": input_snapshot_completed_at.isoformat(),
+            "loaded_symbols": list(frozen_inputs),
+            "source_state_before": input_state_before,
+            "source_state_after": input_state_after,
+            "changed_symbols": changed_during_freeze,
+            "stable": not changed_during_freeze,
+        },
         "require_ready_tail": require_ready_tail,
         "preflight": preflight,
         "completed": completed,
