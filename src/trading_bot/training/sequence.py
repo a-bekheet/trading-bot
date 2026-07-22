@@ -76,12 +76,22 @@ FEATURE_ABLATION_GROUPS = {
 }
 
 
-AUXILIARY_TARGET_FEATURES = (
+MARKET_AUXILIARY_TARGET_FEATURES = (
     "underlyingReturn",
     "frontAtmIvChange",
     "front25DeltaRiskReversalChange",
     "front25DeltaButterflyChange",
     "atmTermStructureSlopeChange",
+)
+CONTRACT_AUXILIARY_TARGET_FEATURES = (
+    "medianContractMidPriceLogReturn",
+    "medianContractSpreadPctChange",
+    "medianContractIvChange",
+)
+CONTRACT_AUXILIARY_MIN_COVERAGE = 0.5
+AUXILIARY_TARGET_FEATURES = (
+    *MARKET_AUXILIARY_TARGET_FEATURES,
+    *CONTRACT_AUXILIARY_TARGET_FEATURES,
 )
 
 _AUXILIARY_LEVEL_FEATURES = (
@@ -293,6 +303,125 @@ def observation_vector(observation: Observation) -> np.ndarray:
     return result
 
 
+def cross_sectional_contract_change_targets(
+    current: Observation,
+    future: Observation,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return robust matched-contract changes independent of slot ordering."""
+    values = np.zeros(len(CONTRACT_AUXILIARY_TARGET_FEATURES), dtype=np.float64)
+    available = np.zeros(
+        len(CONTRACT_AUXILIARY_TARGET_FEATURES),
+        dtype=np.float32,
+    )
+    current_contracts = np.asarray(current.contracts, dtype=np.float64)
+    future_contracts = np.asarray(future.contracts, dtype=np.float64)
+    if (
+        current_contracts.ndim != 2
+        or future_contracts.ndim != 2
+        or current_contracts.shape[1] != len(CONTRACT_FEATURES)
+        or future_contracts.shape[1] != len(CONTRACT_FEATURES)
+        or len(current.contract_ids) != len(current_contracts)
+        or len(future.contract_ids) != len(future_contracts)
+        or len(current.valid_mask) != len(current_contracts)
+        or len(future.valid_mask) != len(future_contracts)
+    ):
+        return values.astype(np.float32), available
+
+    future_by_id: dict[str, int] = {}
+    for index, contract_id in enumerate(future.contract_ids):
+        if contract_id is not None and bool(future.valid_mask[index]):
+            future_by_id.setdefault(contract_id, index)
+    current_valid_ids = {
+        contract_id
+        for index, contract_id in enumerate(current.contract_ids)
+        if contract_id is not None and bool(current.valid_mask[index])
+    }
+    current_indices = []
+    future_indices = []
+    matched_ids: set[str] = set()
+    for index, contract_id in enumerate(current.contract_ids):
+        if (
+            contract_id is None
+            or contract_id in matched_ids
+            or not bool(current.valid_mask[index])
+            or contract_id not in future_by_id
+        ):
+            continue
+        matched_ids.add(contract_id)
+        current_indices.append(index)
+        future_indices.append(future_by_id[contract_id])
+    current_valid_count = len(current_valid_ids)
+    if (
+        not current_indices
+        or len(current_indices) / current_valid_count
+        < CONTRACT_AUXILIARY_MIN_COVERAGE
+    ):
+        return values.astype(np.float32), available
+
+    current_rows = current_contracts[np.asarray(current_indices)]
+    future_rows = future_contracts[np.asarray(future_indices)]
+    bid_index = _CONTRACT_FEATURE_INDEX["bid"]
+    ask_index = _CONTRACT_FEATURE_INDEX["ask"]
+    iv_index = _CONTRACT_FEATURE_INDEX["impliedVolatility"]
+    current_bid = current_rows[:, bid_index]
+    current_ask = current_rows[:, ask_index]
+    future_bid = future_rows[:, bid_index]
+    future_ask = future_rows[:, ask_index]
+    quote_available = (
+        np.isfinite(current_bid)
+        & np.isfinite(current_ask)
+        & np.isfinite(future_bid)
+        & np.isfinite(future_ask)
+        & (current_bid > 0)
+        & (current_ask > 0)
+        & (future_bid > 0)
+        & (future_ask > 0)
+        & (current_bid <= current_ask)
+        & (future_bid <= future_ask)
+    )
+    quote_coverage = float(quote_available.sum()) / current_valid_count
+    if quote_coverage >= CONTRACT_AUXILIARY_MIN_COVERAGE:
+        current_mid = (current_bid[quote_available] + current_ask[quote_available]) / 2
+        future_mid = (future_bid[quote_available] + future_ask[quote_available]) / 2
+        mid_returns = np.log(future_mid / current_mid)
+        spread_changes = (
+            (future_ask[quote_available] - future_bid[quote_available]) / future_mid
+            - (current_ask[quote_available] - current_bid[quote_available])
+            / current_mid
+        )
+        median_mid_return = float(np.median(mid_returns))
+        median_spread_change = float(np.median(spread_changes))
+        values[0] = np.sign(median_mid_return) * np.log1p(
+            abs(median_mid_return) * 100.0
+        )
+        values[1] = np.sign(median_spread_change) * np.log1p(
+            abs(median_spread_change) * 10.0
+        )
+        available[:2] = 1.0
+
+    current_iv = current_rows[:, iv_index]
+    future_iv = future_rows[:, iv_index]
+    iv_available = (
+        quote_available
+        & np.isfinite(current_iv)
+        & np.isfinite(future_iv)
+        & (current_iv > 0)
+        & (future_iv > 0)
+    )
+    iv_coverage = float(iv_available.sum()) / current_valid_count
+    if iv_coverage >= CONTRACT_AUXILIARY_MIN_COVERAGE:
+        median_iv_change = float(np.median(
+            future_iv[iv_available] - current_iv[iv_available]
+        ))
+        values[2] = np.sign(median_iv_change) * np.log1p(
+            abs(median_iv_change) * 10.0
+        )
+        available[2] = 1.0
+
+    values = np.nan_to_num(values, nan=0.0, posinf=10.0, neginf=-10.0)
+    return np.clip(values, -10.0, 10.0).astype(np.float32), available
+
+
 def auxiliary_market_change_targets(
     current: Observation,
     future: Observation,
@@ -352,6 +481,14 @@ def auxiliary_market_change_targets(
             change = future_level - current_level
             values[target_index] = np.sign(change) * np.log1p(abs(change))
             available[target_index] = 1.0
+
+    contract_values, contract_available = cross_sectional_contract_change_targets(
+        current,
+        future,
+    )
+    contract_start = len(MARKET_AUXILIARY_TARGET_FEATURES)
+    values[contract_start:] = contract_values
+    available[contract_start:] = contract_available
 
     values = np.nan_to_num(values, nan=0.0, posinf=10.0, neginf=-10.0)
     return np.clip(values, -10.0, 10.0).astype(np.float32), available

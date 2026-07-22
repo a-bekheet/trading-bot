@@ -18,9 +18,11 @@ from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES, Options
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION, Observation
 from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
+    CONTRACT_AUXILIARY_TARGET_FEATURES,
     FEATURE_ABLATION_GROUPS,
     auxiliary_market_change_targets,
     build_windows,
+    cross_sectional_contract_change_targets,
     feature_ablation_indices,
     multi_horizon_auxiliary_targets,
     observation_vector,
@@ -183,10 +185,100 @@ class FeatureSequenceTests(TestCase):
         values, available = auxiliary_market_change_targets(current, future)
 
         self.assertEqual(len(values), len(AUXILIARY_TARGET_FEATURES))
-        np.testing.assert_allclose(available, (1, 1, 0, 0, 1))
+        np.testing.assert_allclose(available, (1, 1, 0, 0, 1, 0, 0, 0))
         self.assertAlmostEqual(values[0], np.log1p(1.0))
         self.assertAlmostEqual(values[1], np.log1p(0.03))
-        self.assertAlmostEqual(values[-1], -np.log1p(0.1))
+        self.assertAlmostEqual(values[4], -np.log1p(0.1))
+
+    def test_contract_auxiliary_targets_match_ids_not_slot_order(self):
+        def observation(
+            ids: tuple[str, ...],
+            quotes: dict[str, tuple[float, float, float]],
+        ) -> Observation:
+            contracts = np.zeros(
+                (len(ids), len(CONTRACT_FEATURES)),
+                dtype=float,
+            )
+            for row, contract_id in enumerate(ids):
+                bid, ask, volatility = quotes[contract_id]
+                contracts[row, CONTRACT_FEATURES.index("bid")] = bid
+                contracts[row, CONTRACT_FEATURES.index("ask")] = ask
+                contracts[
+                    row,
+                    CONTRACT_FEATURES.index("impliedVolatility"),
+                ] = volatility
+            market = np.zeros(len(MARKET_FEATURES), dtype=float)
+            market[MARKET_FEATURES.index("underlyingPrice")] = 100
+            return Observation(
+                "now",
+                market,
+                contracts,
+                np.zeros(8),
+                np.ones(len(ids), dtype=bool),
+                np.ones((len(ids) + 1, 3), dtype=bool),
+                ids,
+            )
+
+        current_quotes = {
+            "A": (1.0, 1.2, 0.20),
+            "B": (2.0, 2.4, 0.30),
+        }
+        future_quotes = {
+            "A": (1.2, 1.4, 0.25),
+            "B": (2.2, 2.6, 0.33),
+        }
+        current = observation(("A", "B"), current_quotes)
+        future = observation(("B", "A"), future_quotes)
+
+        values, available = cross_sectional_contract_change_targets(
+            current,
+            future,
+        )
+
+        mid_returns = np.array((np.log(1.3 / 1.1), np.log(2.4 / 2.2)))
+        spread_changes = np.array((
+            0.2 / 1.3 - 0.2 / 1.1,
+            0.4 / 2.4 - 0.4 / 2.2,
+        ))
+        expected = np.array((
+            np.log1p(np.median(mid_returns) * 100),
+            -np.log1p(abs(np.median(spread_changes)) * 10),
+            np.log1p(0.04 * 10),
+        ))
+        np.testing.assert_allclose(values, expected, rtol=1e-6)
+        np.testing.assert_allclose(available, np.ones(3))
+        self.assertEqual(len(values), len(CONTRACT_AUXILIARY_TARGET_FEATURES))
+
+        unmatched = observation(("C",), {"C": (1.0, 1.2, 0.20)})
+        values, available = cross_sectional_contract_change_targets(
+            current,
+            unmatched,
+        )
+        np.testing.assert_allclose(values, 0)
+        np.testing.assert_allclose(available, 0)
+
+        partial_current = observation(
+            ("A", "B", "C"),
+            {
+                "A": (1.0, 1.2, 0.20),
+                "B": (2.0, 2.4, 0.30),
+                "C": (3.0, 3.4, 0.40),
+            },
+        )
+        values, available = cross_sectional_contract_change_targets(
+            partial_current,
+            observation(("A",), {"A": (1.2, 1.4, 0.25)}),
+        )
+        np.testing.assert_allclose(values, 0)
+        np.testing.assert_allclose(available, 0)
+
+        invalid = observation(("A",), {"A": (0.0, 1.2, 0.20)})
+        values, available = cross_sectional_contract_change_targets(
+            invalid,
+            observation(("A",), {"A": (1.2, 1.4, 0.25)}),
+        )
+        np.testing.assert_allclose(values, 0)
+        np.testing.assert_allclose(available, 0)
 
     def test_multi_horizon_auxiliary_targets_are_cumulative_and_tail_masked(self):
         observations = [
@@ -212,16 +304,26 @@ class FeatureSequenceTests(TestCase):
         )
 
         self.assertEqual(values.shape, (4, 2 * len(AUXILIARY_TARGET_FEATURES)))
-        np.testing.assert_allclose(values[0, 5:], direct)
-        np.testing.assert_allclose(available[0, 5:], direct_mask)
-        np.testing.assert_allclose(available[1:, 5:], 0.0)
+        second_horizon_start = len(AUXILIARY_TARGET_FEATURES)
+        np.testing.assert_allclose(
+            values[0, second_horizon_start:],
+            direct,
+        )
+        np.testing.assert_allclose(
+            available[0, second_horizon_start:],
+            direct_mask,
+        )
+        np.testing.assert_allclose(
+            available[1:, second_horizon_start:],
+            0.0,
+        )
         self.assertAlmostEqual(
-            values[0, 5],
+            values[0, second_horizon_start],
             np.log1p(abs(108 / 100 - 1) * 100),
         )
         # Both endpoints have full wing coverage for horizon four, while the
         # one-step target ending at the sparse middle snapshot is unavailable.
-        self.assertEqual(available[0, 7], 1.0)
+        self.assertEqual(available[0, second_horizon_start + 2], 1.0)
         self.assertEqual(available[1, 2], 0.0)
 
         for invalid in ((), (0,), (2, 1), (1, 1)):

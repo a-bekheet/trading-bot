@@ -292,7 +292,7 @@ parsing plus both factor vectors. Treat that as machine-specific engineering
 evidence, not a portable guarantee.
 
 Sparse portfolio reward does not have to be the recurrent encoder's only
-learning signal. Enable train-only multi-horizon market prediction:
+learning signal. Enable train-only multi-horizon dynamics prediction:
 
 ```bash
 train-demo \
@@ -305,22 +305,38 @@ train-demo \
 
 For every policy state, the shared GRU/LSTM representation predicts bounded
 cumulative spot, front-ATM-IV, 25-delta risk-reversal/butterfly, and ATM
-term-slope changes at each declared snapshot horizon. Both endpoints require
-point-in-time coverage; incomplete tail horizons are explicitly masked. Targets
-are constructed only from observations already collected inside that training
-rollout and partition, so neither validation nor test values enter the loss or
-policy input. Horizons count snapshots rather than fixed wall-clock time, which
-must be considered when collection cadence varies.
+term-slope changes at each declared snapshot horizon. It also predicts the
+cross-sectional median matched-contract mid-quote return, relative-spread
+change, and IV change. Contract targets match identifiers at both endpoints,
+require executable bid/ask quotes, cover at least half of the current valid
+cross-section, and are independent of slot order. Both
+endpoints require point-in-time coverage; incomplete tail horizons are
+explicitly masked. Targets are constructed only from observations already
+collected inside that training rollout and partition, so neither validation nor
+test values enter the loss or policy input. Horizons count snapshots rather
+than fixed wall-clock time, which must be considered when collection cadence
+varies.
 
 The linear head is excluded from action inference and therefore adds parameters
 and training work but no policy-path matrix multiply. Episode metrics retain
 Smooth-L1 loss, masked MAE, weighted loss, and nested per-horizon/per-target
 coverage. The coefficient defaults to zero because this is a
 representation-learning hypothesis, not established alpha. In the current
-hidden-size-eight AAPL smoke, horizons 1+4 added only 45 parameters over the
+hidden-size-eight layout, horizons 1+4 add 72 parameters over the
 one-step head; policy-only medians overlapped at roughly 108-118 microseconds.
 All validation scores were zero and the one-step candidate won only through the
 smaller-parameter tie-break.
+
+The v0.41 target extension adds 771 parameters to a width-128 hybrid head and
+387 to a width-128 mixture head relative to the prior five-target head. It adds
+no operation to `forward` or action inference. Generating both one- and
+four-snapshot targets for all nine transitions in the current AAPL sample took
+1.45 ms total. The three contract targets were available on every one-step
+transition and six of nine four-step rows; the mask, rather than a fabricated
+zero, covers the remaining tails. A two-fold, width-eight enabled/disabled
+smoke tied at zero validation score and selected the zero-coefficient candidate
+through the declared tie rule. This verifies training, masking, checkpoint, and
+ablation plumbing but is not evidence of alpha.
 
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate

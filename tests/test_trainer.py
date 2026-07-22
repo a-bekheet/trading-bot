@@ -253,6 +253,9 @@ class TrainerTests(TestCase):
             "horizons": [1],
             "target_semantics": "cumulative_change_from_policy_state",
             "availability": "endpoint_point_in_time_coverage_mask",
+            "contract_matching": "contract_id_at_both_endpoints",
+            "contract_aggregation": "cross_sectional_median",
+            "contract_minimum_coverage": 0.5,
             "inference_path": "excluded_from_policy_inference",
         })
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
@@ -845,7 +848,10 @@ class TrainerTests(TestCase):
                             training,
                         )
 
-                        self.assertEqual(model.auxiliary.out_features, 10)
+                        self.assertEqual(
+                            model.auxiliary.out_features,
+                            2 * len(AUXILIARY_TARGET_FEATURES),
+                        )
                         self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
                         self.assertEqual(metrics[0]["action_decoder"], action_decoder)
                         self.assertEqual(
@@ -862,6 +868,18 @@ class TrainerTests(TestCase):
                         self.assertEqual(
                             metrics[0]["auxiliary_target_coverage"]["t+2"][
                                 "underlyingReturn"
+                            ],
+                            0.5,
+                        )
+                        self.assertEqual(
+                            metrics[0]["auxiliary_target_coverage"]["t+1"][
+                                "medianContractMidPriceLogReturn"
+                            ],
+                            1.0,
+                        )
+                        self.assertEqual(
+                            metrics[0]["auxiliary_target_coverage"]["t+2"][
+                                "medianContractIvChange"
                             ],
                             0.5,
                         )

@@ -20,13 +20,14 @@ from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_acto
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
+    CONTRACT_AUXILIARY_MIN_COVERAGE,
     multi_horizon_auxiliary_targets,
     observation_vector,
 )
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v28"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v29"
 
 
 @dataclass(frozen=True)
@@ -1237,6 +1238,9 @@ def checkpoint_manifest(
             "horizons": list(training_config.auxiliary_horizons),
             "target_semantics": "cumulative_change_from_policy_state",
             "availability": "endpoint_point_in_time_coverage_mask",
+            "contract_matching": "contract_id_at_both_endpoints",
+            "contract_aggregation": "cross_sectional_median",
+            "contract_minimum_coverage": CONTRACT_AUXILIARY_MIN_COVERAGE,
             "inference_path": "excluded_from_policy_inference",
         },
         "feature_vector_schema": FEATURE_VECTOR_SCHEMA_VERSION,

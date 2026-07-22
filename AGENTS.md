@@ -327,13 +327,18 @@ must use only that validation environment and be labeled
 `validation_research_demo`. Checkpoints must load with PyTorch
 `weights_only=True`; never weaken this to unrestricted pickle loading.
 
-Auxiliary market prediction is optional representation supervision, not reward
-shaping. At step t the recurrent state may predict cumulative dimensionless
-market changes at configured positive, increasing snapshot horizons only when
-both endpoints were observed inside the same training rollout and partition.
-Mask incomplete rollout tails and require point-in-time coverage at both
-endpoints for sparse IV-surface targets; never teach a missing wing or
-expiration as zero. Keep the prediction head out of
+Auxiliary dynamics prediction is optional representation supervision, not
+reward shaping. At step t the recurrent state may predict cumulative
+dimensionless market changes at configured positive, increasing snapshot
+horizons only when both endpoints were observed inside the same training
+rollout and partition. Contract targets must match identifiers at both
+endpoints, require positive non-crossed bid/ask quotes, use a permutation-
+invariant cross-sectional median, require at least 50% current-cross-section
+coverage, and mask unavailable IV separately. Never
+derive them from last trade or slot position. Mask incomplete rollout tails and
+require point-in-time coverage at both endpoints for sparse IV-surface targets;
+never teach a missing wing, expiration, or contract match as zero. Keep the
+prediction head out of
 `forward`, `sample_action`, streaming evaluation, and latency benchmarks so it
 cannot alter PPO likelihoods or deployment latency. Persist its targets,
 snapshot horizons, coefficient, masked loss/MAE, and nested horizon/target
