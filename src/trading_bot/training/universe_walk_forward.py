@@ -59,7 +59,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v36"
+    "research-demo.universe-walk-forward.v37"
 )
 
 
@@ -409,6 +409,9 @@ def run_universe_walk_forward_training(
                 fold_training,
                 algorithm=candidate.algorithm,
                 auxiliary_horizons=candidate.auxiliary_horizons,
+                auxiliary_target_exclusions=(
+                    candidate.auxiliary_target_exclusions
+                ),
                 auxiliary_coefficient=(
                     fold_training.auxiliary_coefficient
                     if candidate.auxiliary_coefficient is None
@@ -539,6 +542,10 @@ def run_universe_walk_forward_training(
                         candidate,
                         auxiliary_horizons=fold_training.auxiliary_horizons,
                     ).identifier,
+                    "auxiliary_target_reference_model_id": replace(
+                        candidate,
+                        auxiliary_target_exclusions=(),
+                    ).identifier,
                     "discount_reference_model_id": replace(
                         candidate,
                         time_aware_discounting=None,
@@ -629,6 +636,9 @@ def run_universe_walk_forward_training(
                 ].auxiliary_coefficient,
                 "effective_auxiliary_horizons": list(
                     run["training_config"].auxiliary_horizons
+                ),
+                "effective_auxiliary_target_exclusions": list(
+                    run["training_config"].auxiliary_target_exclusions
                 ),
                 "effective_time_aware_discounting": run[
                     "training_config"
@@ -733,6 +743,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_auxiliary_enabled": None,
                 "validation_score_lift_vs_configured_horizons": None,
                 "validation_reward_lift_vs_configured_horizons": None,
+                "validation_score_lift_vs_full_auxiliary_targets": None,
+                "validation_reward_lift_vs_full_auxiliary_targets": None,
                 "validation_score_lift_vs_time_aware_discounting": None,
                 "validation_reward_lift_vs_time_aware_discounting": None,
                 "validation_score_lift_vs_burn_in": None,
@@ -818,6 +830,24 @@ def run_universe_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["auxiliary_horizon_reference_model_id"]
+                    ]
+                )
+            auxiliary_target_reference = validation_scores.get(
+                run["auxiliary_target_reference_model_id"]
+            )
+            if (
+                run["model_spec"].auxiliary_target_exclusions
+                and auxiliary_target_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_full_auxiliary_targets"
+                ] = aggregate_score - auxiliary_target_reference
+                result[
+                    "validation_reward_lift_vs_full_auxiliary_targets"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["auxiliary_target_reference_model_id"]
                     ]
                 )
             discount_reference = validation_scores.get(

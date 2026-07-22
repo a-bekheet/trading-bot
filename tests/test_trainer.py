@@ -333,12 +333,73 @@ class TrainerTests(TestCase):
             for parameter in restored.parameters()
         ))
 
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_delta_hedged_auxiliary_target_trains_on_regular_fresh_endpoints(self):
+        source = three_snapshot_dataset()
+        snapshots = []
+        for index, snapshot in enumerate(source.snapshots):
+            frame = snapshot.frame.copy()
+            frame["underlyingPrice"] = 330.0 + index
+            frame["regularMarketPrice"] = 330.0 + index
+            frame["marketState"] = "REGULAR"
+            frame["regularMarketSession"] = 1.0
+            frame["marketStateCoverage"] = 1.0
+            frame["underlyingQuoteTime"] = frame["collectedAt"]
+            frame["underlyingQuoteTimeSource"] = "regularMarketTime"
+            frame["underlyingQuoteAgeSeconds"] = 0.0
+            frame["underlyingQuoteAgeCoverage"] = 1.0
+            snapshots.append(Snapshot(snapshot.timestamp, frame))
+        env = OptionsEnv(
+            SnapshotDataset(tuple(snapshots), source.symbol),
+            slot_count=2,
+        )
+        recurrent = ModelSpec(
+            kind="gru",
+            encoder="flat",
+            hidden_size=4,
+        ).build(env)
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=2,
+            evaluation_interval=1,
+            random_start=False,
+            auxiliary_coefficient=0.05,
+            seed=66,
+        )
+        target_index = AUXILIARY_TARGET_FEATURES.index(
+            "medianContractDeltaHedgedSpotReturn"
+        )
+        torch.manual_seed(training.seed)
+        initial = build_recurrent_actor_critic(recurrent)
+        initial_target_weight = (
+            initial.auxiliary.weight[target_index].detach().clone()
+        )
+
+        model, metrics = train_actor_critic(env, recurrent, training)
+
+        self.assertEqual(
+            metrics[0]["auxiliary_target_coverage"]["t+1"][
+                "medianContractDeltaHedgedSpotReturn"
+            ],
+            1.0,
+        )
+        self.assertFalse(torch.equal(
+            initial_target_weight,
+            model.auxiliary.weight[target_index].detach(),
+        ))
+
     def test_cli_selects_single_or_top50_training_universe(self):
         single = _parser().parse_args(["--symbol", "msft"])
         universe = _parser().parse_args(["--universe", "top50"])
         sparse = _parser().parse_args(["--action-decoder", "single_leg"])
         attention = _parser().parse_args([
             "--encoder", "attention_set", "--attention-heads", "2",
+        ])
+        auxiliary = _parser().parse_args([
+            "--auxiliary-target-exclusion",
+            "medianContractDeltaHedgedSpotReturn",
         ])
 
         self.assertEqual(_symbols_from_args(single), ("MSFT",))
@@ -351,6 +412,10 @@ class TrainerTests(TestCase):
         self.assertEqual(single.portfolio_valuation, "liquidation")
         self.assertEqual(attention.encoder, "attention_set")
         self.assertEqual(attention.attention_heads, 2)
+        self.assertEqual(
+            auxiliary.auxiliary_target_exclusion,
+            ["medianContractDeltaHedgedSpotReturn"],
+        )
         self.assertEqual(
             _environment_kwargs_from_args(single)[
                 "reward_drawdown_penalty"
@@ -871,6 +936,9 @@ class TrainerTests(TestCase):
             evaluation_interval=1,
             seed=11,
             auxiliary_coefficient=0.05,
+            auxiliary_target_exclusions=(
+                "medianContractDeltaHedgedSpotReturn",
+            ),
         )
 
         torch.manual_seed(training.seed)
@@ -902,6 +970,14 @@ class TrainerTests(TestCase):
         self.assertTrue(all(item["auxiliary_loss"] >= 0 for item in metrics))
         self.assertTrue(all(
             item["auxiliary_target_coverage"]["t+1"]["underlyingReturn"] == 1
+            for item in metrics
+        ))
+        self.assertTrue(all(
+            item["auxiliary_target_coverage"]["t+1"][
+                "medianContractDeltaHedgedSpotReturn"
+            ] == 0
+            and item["auxiliary_target_exclusions"]
+            == ["medianContractDeltaHedgedSpotReturn"]
             for item in metrics
         ))
         self.assertTrue(all(math.isfinite(item["evaluation_total_reward"]) for item in metrics))
@@ -949,6 +1025,13 @@ class TrainerTests(TestCase):
             initial_auxiliary_weight,
             model.auxiliary.weight.detach(),
         ))
+        excluded_index = AUXILIARY_TARGET_FEATURES.index(
+            "medianContractDeltaHedgedSpotReturn"
+        )
+        torch.testing.assert_close(
+            initial_auxiliary_weight[excluded_index],
+            model.auxiliary.weight.detach()[excluded_index],
+        )
         with TemporaryDirectory() as directory:
             path = Path(directory) / "model.pt"
             save_checkpoint(path, model, env, recurrent, training, metrics)
@@ -1027,11 +1110,24 @@ class TrainerTests(TestCase):
             "enabled": True,
             "coefficient": 0.05,
             "targets": list(AUXILIARY_TARGET_FEATURES),
+            "excluded_targets": [
+                "medianContractDeltaHedgedSpotReturn",
+            ],
             "horizons": [1],
             "target_semantics": "cumulative_change_from_policy_state",
             "availability": "endpoint_point_in_time_coverage_mask",
             "contract_matching": "contract_id_at_both_endpoints",
             "contract_aggregation": "cross_sectional_median",
+            "delta_hedged_target": {
+                "hedge_delta": "current_endpoint",
+                "underlying_move": "future_minus_current",
+                "normalization": "current_underlying_spot",
+                "rehedging": "none_between_endpoints",
+                "financing_and_dividends": "excluded",
+                "session_requirement": "explicit_regular_at_both_endpoints",
+                "underlying_quote_age_coverage": "required_at_both_endpoints",
+                "max_underlying_quote_age_seconds": 1_200.0,
+            },
             "contract_minimum_coverage": 0.5,
             "inference_path": "excluded_from_policy_inference",
         })
@@ -1433,6 +1529,21 @@ class TrainerTests(TestCase):
                 "auxiliary_horizons",
             ):
                 TrainingConfig(auxiliary_horizons=invalid)
+        with self.assertRaisesRegex(ValueError, "exclusions must be unique"):
+            TrainingConfig(auxiliary_target_exclusions=(
+                "underlyingReturn",
+                "underlyingReturn",
+            ))
+        with self.assertRaisesRegex(ValueError, "unknown auxiliary"):
+            TrainingConfig(auxiliary_target_exclusions=("futureLeak",))
+        with self.assertRaisesRegex(ValueError, "remove every target"):
+            TrainingConfig(
+                auxiliary_target_exclusions=AUXILIARY_TARGET_FEATURES
+            )
+        with self.assertRaisesRegex(ValueError, "require auxiliary_coefficient"):
+            TrainingConfig(auxiliary_target_exclusions=(
+                "medianContractDeltaHedgedSpotReturn",
+            ))
         with self.assertRaisesRegex(ValueError, "max_steps"):
             TrainingConfig(
                 max_steps=3,
@@ -2006,6 +2117,9 @@ class TrainerTests(TestCase):
                             evaluation_interval=1,
                             auxiliary_coefficient=0.05,
                             auxiliary_horizons=(1, 2),
+                            auxiliary_target_exclusions=(
+                                "medianContractDeltaHedgedSpotReturn",
+                            ),
                             algorithm=algorithm,
                             seed=71,
                         )
@@ -2021,6 +2135,12 @@ class TrainerTests(TestCase):
                             2 * len(AUXILIARY_TARGET_FEATURES),
                         )
                         self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
+                        self.assertTrue(all(
+                            metrics[0]["auxiliary_target_coverage"][
+                                f"t+{horizon}"
+                            ]["medianContractDeltaHedgedSpotReturn"] == 0
+                            for horizon in (1, 2)
+                        ))
                         self.assertEqual(metrics[0]["action_decoder"], action_decoder)
                         self.assertEqual(
                             metrics[0]["action_likelihood_factors"],

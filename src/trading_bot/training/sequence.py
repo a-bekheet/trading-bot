@@ -6,6 +6,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from trading_bot.market_data.freshness import (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+)
 from trading_bot.training.env import (
     ACTION_FEASIBILITY_CONTRACT_FEATURES,
     CONTRACT_FEATURES,
@@ -117,12 +120,50 @@ CONTRACT_AUXILIARY_TARGET_FEATURES = (
     "medianContractMidPriceLogReturn",
     "medianContractSpreadPctChange",
     "medianContractIvChange",
+    "medianContractDeltaHedgedSpotReturn",
 )
 CONTRACT_AUXILIARY_MIN_COVERAGE = 0.5
+DELTA_HEDGED_AUXILIARY_MAX_UNDERLYING_QUOTE_AGE_SECONDS = (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS
+)
 AUXILIARY_TARGET_FEATURES = (
     *MARKET_AUXILIARY_TARGET_FEATURES,
     *CONTRACT_AUXILIARY_TARGET_FEATURES,
 )
+
+
+def normalize_auxiliary_target_exclusions(
+    exclusions: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Validate a stable train-only auxiliary target-removal contract."""
+    normalized = tuple(exclusions)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("auxiliary target exclusions must be unique")
+    unknown = set(normalized) - set(AUXILIARY_TARGET_FEATURES)
+    if unknown:
+        raise ValueError(
+            f"unknown auxiliary target exclusions: {sorted(unknown)}"
+        )
+    if len(normalized) == len(AUXILIARY_TARGET_FEATURES):
+        raise ValueError("auxiliary target exclusions cannot remove every target")
+    return normalized
+
+
+def auxiliary_target_exclusion_indices(
+    exclusions: tuple[str, ...],
+    horizons: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Return flattened multi-horizon indices disabled only in the loss mask."""
+    normalized = normalize_auxiliary_target_exclusions(exclusions)
+    target_indices = tuple(
+        AUXILIARY_TARGET_FEATURES.index(name) for name in normalized
+    )
+    width = len(AUXILIARY_TARGET_FEATURES)
+    return tuple(
+        horizon_index * width + target_index
+        for horizon_index in range(len(horizons))
+        for target_index in target_indices
+    )
 
 _AUXILIARY_LEVEL_FEATURES = (
     "underlyingPrice",
@@ -145,6 +186,37 @@ _CONTRACT_FEATURE_INDEX = {
 _MARKET_FEATURE_INDEX = {
     name: index for index, name in enumerate(MARKET_FEATURES)
 }
+
+
+def _delta_hedged_endpoint_is_observable(market: np.ndarray) -> bool:
+    """Require explicit regular-session and fresh-underlying provenance."""
+    required = {
+        "regularMarketSession",
+        "marketStateCoverage",
+        "underlyingQuoteAgeSeconds",
+        "underlyingQuoteAgeCoverage",
+    }
+    if len(market) != len(MARKET_FEATURES) or not required.issubset(
+        _MARKET_FEATURE_INDEX
+    ):
+        return False
+    regular = market[_MARKET_FEATURE_INDEX["regularMarketSession"]]
+    state_coverage = market[_MARKET_FEATURE_INDEX["marketStateCoverage"]]
+    quote_age = market[_MARKET_FEATURE_INDEX["underlyingQuoteAgeSeconds"]]
+    quote_age_coverage = market[
+        _MARKET_FEATURE_INDEX["underlyingQuoteAgeCoverage"]
+    ]
+    return bool(
+        np.isfinite(regular)
+        and regular >= 0.5
+        and np.isfinite(state_coverage)
+        and state_coverage >= 0.5
+        and np.isfinite(quote_age)
+        and 0 <= quote_age
+        <= DELTA_HEDGED_AUXILIARY_MAX_UNDERLYING_QUOTE_AGE_SECONDS
+        and np.isfinite(quote_age_coverage)
+        and quote_age_coverage >= 0.5
+    )
 _SPOT_SCALED_CONTRACT_INDICES = np.asarray([
     _CONTRACT_FEATURE_INDEX[name]
     for name in (
@@ -417,6 +489,7 @@ def cross_sectional_contract_change_targets(
     bid_index = _CONTRACT_FEATURE_INDEX["bid"]
     ask_index = _CONTRACT_FEATURE_INDEX["ask"]
     iv_index = _CONTRACT_FEATURE_INDEX["impliedVolatility"]
+    delta_index = _CONTRACT_FEATURE_INDEX["delta"]
     current_bid = current_rows[:, bid_index]
     current_ask = current_rows[:, ask_index]
     future_bid = future_rows[:, bid_index]
@@ -471,6 +544,46 @@ def cross_sectional_contract_change_targets(
             abs(median_iv_change) * 10.0
         )
         available[2] = 1.0
+
+    current_market = np.asarray(current.market, dtype=np.float64)
+    future_market = np.asarray(future.market, dtype=np.float64)
+    if (
+        len(current_market) == len(MARKET_FEATURES)
+        and len(future_market) == len(MARKET_FEATURES)
+    ):
+        spot_index = _MARKET_FEATURE_INDEX["underlyingPrice"]
+        current_spot = current_market[spot_index]
+        future_spot = future_market[spot_index]
+        current_delta = current_rows[:, delta_index]
+        hedge_available = quote_available & np.isfinite(current_delta)
+        hedge_coverage = float(hedge_available.sum()) / current_valid_count
+        if (
+            hedge_coverage >= CONTRACT_AUXILIARY_MIN_COVERAGE
+            and _delta_hedged_endpoint_is_observable(current_market)
+            and _delta_hedged_endpoint_is_observable(future_market)
+            and np.isfinite(current_spot)
+            and current_spot > 0
+            and np.isfinite(future_spot)
+            and future_spot > 0
+        ):
+            current_mid = (
+                current_bid[hedge_available] + current_ask[hedge_available]
+            ) / 2
+            future_mid = (
+                future_bid[hedge_available] + future_ask[hedge_available]
+            ) / 2
+            delta_hedged_spot_returns = (
+                future_mid
+                - current_mid
+                - current_delta[hedge_available] * (future_spot - current_spot)
+            ) / current_spot
+            median_delta_hedged_return = float(np.median(
+                delta_hedged_spot_returns
+            ))
+            values[3] = np.sign(median_delta_hedged_return) * np.log1p(
+                abs(median_delta_hedged_return) * 100.0
+            )
+            available[3] = 1.0
 
     values = np.nan_to_num(values, nan=0.0, posinf=10.0, neginf=-10.0)
     return np.clip(values, -10.0, 10.0).astype(np.float32), available

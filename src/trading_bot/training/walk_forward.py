@@ -45,6 +45,7 @@ from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
     FEATURE_ABLATION_GROUPS,
     feature_ablation_indices,
+    normalize_auxiliary_target_exclusions,
     observation_vector,
 )
 from trading_bot.training.splits import walk_forward_splits
@@ -59,7 +60,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v52"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v53"
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,7 @@ class ModelSpec:
     parameter_budget: int | None = None
     auxiliary_coefficient: float | None = None
     auxiliary_horizons: tuple[int, ...] = (1,)
+    auxiliary_target_exclusions: tuple[str, ...] = ()
     time_aware_discounting: bool | None = None
     burn_in_steps: int | None = None
     start_sampling: str | None = None
@@ -304,6 +306,13 @@ class ModelSpec:
                 "model auxiliary_horizons must be unique positive increasing integers"
             )
         object.__setattr__(self, "auxiliary_horizons", normalized_horizons)
+        object.__setattr__(
+            self,
+            "auxiliary_target_exclusions",
+            normalize_auxiliary_target_exclusions(
+                self.auxiliary_target_exclusions
+            ),
+        )
         feature_ablation_indices(self.disabled_feature_groups, 1)
 
     @property
@@ -563,6 +572,11 @@ def _select_seed_robust_group(
                 group["representative"]["model_spec"].entropy_objective
                 == "raw_mean"
             ),
+            int(bool(
+                group["representative"][
+                    "model_spec"
+                ].auxiliary_target_exclusions
+            )),
             max(
                 run["inference_latency"]["median_microseconds"]
                 for run in group["replicates"]
@@ -657,6 +671,9 @@ def run_walk_forward_training(
                 fold_training,
                 algorithm=candidate.algorithm,
                 auxiliary_horizons=candidate.auxiliary_horizons,
+                auxiliary_target_exclusions=(
+                    candidate.auxiliary_target_exclusions
+                ),
                 auxiliary_coefficient=(
                     fold_training.auxiliary_coefficient
                     if candidate.auxiliary_coefficient is None
@@ -806,6 +823,10 @@ def run_walk_forward_training(
                         candidate,
                         auxiliary_horizons=fold_training.auxiliary_horizons,
                     ).identifier,
+                    "auxiliary_target_reference_model_id": replace(
+                        candidate,
+                        auxiliary_target_exclusions=(),
+                    ).identifier,
                     "discount_reference_model_id": replace(
                         candidate,
                         time_aware_discounting=None,
@@ -874,6 +895,9 @@ def run_walk_forward_training(
                 ].auxiliary_coefficient,
                 "effective_auxiliary_horizons": list(
                     run["training_config"].auxiliary_horizons
+                ),
+                "effective_auxiliary_target_exclusions": list(
+                    run["training_config"].auxiliary_target_exclusions
                 ),
                 "effective_time_aware_discounting": run[
                     "training_config"
@@ -978,6 +1002,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_auxiliary_enabled": None,
                 "validation_reward_lift_vs_configured_horizons": None,
                 "validation_score_lift_vs_configured_horizons": None,
+                "validation_reward_lift_vs_full_auxiliary_targets": None,
+                "validation_score_lift_vs_full_auxiliary_targets": None,
                 "validation_reward_lift_vs_time_aware_discounting": None,
                 "validation_score_lift_vs_time_aware_discounting": None,
                 "validation_reward_lift_vs_burn_in": None,
@@ -1072,6 +1098,24 @@ def run_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["auxiliary_horizon_reference_model_id"]
+                    ]
+                )
+            auxiliary_target_reference = validation_scores.get(
+                run["auxiliary_target_reference_model_id"]
+            )
+            if (
+                run["model_spec"].auxiliary_target_exclusions
+                and auxiliary_target_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_full_auxiliary_targets"
+                ] = aggregate_score - auxiliary_target_reference
+                result[
+                    "validation_reward_lift_vs_full_auxiliary_targets"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["auxiliary_target_reference_model_id"]
                     ]
                 )
             discount_reference = validation_scores.get(
@@ -1666,6 +1710,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--auxiliary-target-ablation",
+        action="append",
+        choices=AUXILIARY_TARGET_FEATURES,
+        help=(
+            "repeat to add a matched validation candidate excluding one "
+            "named train-only prediction target"
+        ),
+    )
+    parser.add_argument(
         "--fixed-step-discount-ablation",
         action="store_true",
         help="add matched candidates that ignore elapsed transition duration",
@@ -1852,6 +1905,24 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             )
         specs.extend(
             replace(spec, auxiliary_coefficient=0.0)
+            for spec in full_specs
+        )
+    auxiliary_target_ablations = tuple(
+        args.auxiliary_target_ablation or ()
+    )
+    if len(set(auxiliary_target_ablations)) != len(
+        auxiliary_target_ablations
+    ):
+        raise ValueError("auxiliary target ablations must be unique")
+    if auxiliary_target_ablations:
+        if args.auxiliary_coefficient <= 0:
+            raise ValueError(
+                "--auxiliary-target-ablation requires "
+                "--auxiliary-coefficient > 0"
+            )
+        specs.extend(
+            replace(spec, auxiliary_target_exclusions=(target,))
+            for target in auxiliary_target_ablations
             for spec in full_specs
         )
     if args.fixed_step_discount_ablation:

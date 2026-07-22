@@ -27,12 +27,15 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
     CONTRACT_AUXILIARY_MIN_COVERAGE,
+    DELTA_HEDGED_AUXILIARY_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+    auxiliary_target_exclusion_indices,
     multi_horizon_auxiliary_targets,
+    normalize_auxiliary_target_exclusions,
     observation_vector,
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v48"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v49"
 CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION = (
     "research-demo.critic-balance-diagnostic.v1"
 )
@@ -108,6 +111,7 @@ class TrainingConfig:
     selection_worst_ticker_weight: float = 0.0
     auxiliary_coefficient: float = 0.0
     auxiliary_horizons: tuple[int, ...] = (1,)
+    auxiliary_target_exclusions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
@@ -163,6 +167,17 @@ class TrainingConfig:
                 "auxiliary_horizons must be unique positive increasing integers"
             )
         object.__setattr__(self, "auxiliary_horizons", normalized_horizons)
+        object.__setattr__(
+            self,
+            "auxiliary_target_exclusions",
+            normalize_auxiliary_target_exclusions(
+                self.auxiliary_target_exclusions
+            ),
+        )
+        if self.auxiliary_target_exclusions and self.auxiliary_coefficient <= 0:
+            raise ValueError(
+                "auxiliary target exclusions require auxiliary_coefficient > 0"
+            )
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError("max_steps must be positive when provided")
         if (
@@ -1741,6 +1756,12 @@ def train_actor_critic(
                     config.auxiliary_horizons,
                 )
             )
+            excluded_target_indices = auxiliary_target_exclusion_indices(
+                config.auxiliary_target_exclusions,
+                config.auxiliary_horizons,
+            )
+            if excluded_target_indices:
+                auxiliary_available[:, excluded_target_indices] = 0.0
             auxiliary_targets_tensor = torch.from_numpy(auxiliary_values)
             auxiliary_masks_tensor = torch.from_numpy(auxiliary_available)
         else:
@@ -2202,6 +2223,9 @@ def train_actor_critic(
                     (returns_tensor - old_values_tensor).square().mean().sqrt()
                 ),
                 "entropy_objective": config.entropy_objective,
+                "auxiliary_target_exclusions": list(
+                    config.auxiliary_target_exclusions
+                ),
                 "auxiliary_target_coverage": (
                     {
                         f"t+{horizon}": {
@@ -2430,11 +2454,26 @@ def checkpoint_manifest(
             "enabled": training_config.auxiliary_coefficient > 0,
             "coefficient": training_config.auxiliary_coefficient,
             "targets": list(AUXILIARY_TARGET_FEATURES),
+            "excluded_targets": list(
+                training_config.auxiliary_target_exclusions
+            ),
             "horizons": list(training_config.auxiliary_horizons),
             "target_semantics": "cumulative_change_from_policy_state",
             "availability": "endpoint_point_in_time_coverage_mask",
             "contract_matching": "contract_id_at_both_endpoints",
             "contract_aggregation": "cross_sectional_median",
+            "delta_hedged_target": {
+                "hedge_delta": "current_endpoint",
+                "underlying_move": "future_minus_current",
+                "normalization": "current_underlying_spot",
+                "rehedging": "none_between_endpoints",
+                "financing_and_dividends": "excluded",
+                "session_requirement": "explicit_regular_at_both_endpoints",
+                "underlying_quote_age_coverage": "required_at_both_endpoints",
+                "max_underlying_quote_age_seconds": (
+                    DELTA_HEDGED_AUXILIARY_MAX_UNDERLYING_QUOTE_AGE_SECONDS
+                ),
+            },
             "contract_minimum_coverage": CONTRACT_AUXILIARY_MIN_COVERAGE,
             "inference_path": "excluded_from_policy_inference",
         },
@@ -2700,6 +2739,15 @@ def _parser() -> argparse.ArgumentParser:
             "to one step"
         ),
     )
+    parser.add_argument(
+        "--auxiliary-target-exclusion",
+        action="append",
+        choices=AUXILIARY_TARGET_FEATURES,
+        help=(
+            "repeat to remove a named train-only prediction target from "
+            "the auxiliary loss mask"
+        ),
+    )
     parser.add_argument("--evaluation-interval", type=int, default=5)
     parser.add_argument(
         "--selection-patience",
@@ -2848,6 +2896,9 @@ def main() -> None:
         factorized_ppo_objective=args.factorized_ppo_objective,
         auxiliary_coefficient=args.auxiliary_coefficient,
         auxiliary_horizons=auxiliary_horizons,
+        auxiliary_target_exclusions=tuple(
+            args.auxiliary_target_exclusion or ()
+        ),
         evaluation_interval=args.evaluation_interval,
         selection_patience=(
             None if args.selection_patience == 0 else args.selection_patience

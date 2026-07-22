@@ -116,6 +116,15 @@ class UniverseWalkForwardTests(TestCase):
                 "gru",
                 "flat",
                 hidden_size=4,
+                auxiliary_horizons=(1, 2),
+                auxiliary_target_exclusions=(
+                    "medianContractDeltaHedgedSpotReturn",
+                ),
+            ),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
                 factorized_ppo_objective="dimensionwise",
             ),
             ModelSpec(
@@ -287,6 +296,17 @@ class UniverseWalkForwardTests(TestCase):
         self.assertIsNotNone(
             horizon_ablation[
                 "validation_score_lift_vs_configured_horizons"
+            ]
+        )
+        target_ablation = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["effective_auxiliary_target_exclusions"]
+            == ["medianContractDeltaHedgedSpotReturn"]
+        )
+        self.assertIsNotNone(
+            target_ablation[
+                "validation_score_lift_vs_full_auxiliary_targets"
             ]
         )
         burn_in_ablation = next(

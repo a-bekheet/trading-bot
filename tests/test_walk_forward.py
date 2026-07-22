@@ -15,7 +15,10 @@ except ImportError:
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.recurrent import build_recurrent_actor_critic
-from trading_bot.training.sequence import feature_ablation_indices
+from trading_bot.training.sequence import (
+    AUXILIARY_TARGET_FEATURES,
+    feature_ablation_indices,
+)
 from trading_bot.training.trainer import (
     TrainingConfig,
     _environment_kwargs_from_args,
@@ -150,10 +153,11 @@ class WalkForwardTrainingTests(TestCase):
             *,
             latency=100.0,
             parameter_count=100,
+            model_spec=spec,
         ):
             representative = {
                 "model_id": model_id,
-                "model_spec": spec,
+                "model_spec": model_spec,
                 "parameter_count": parameter_count,
                 "active_input_count": 10,
                 "optimizer_updates": 2,
@@ -193,6 +197,23 @@ class WalkForwardTrainingTests(TestCase):
         self.assertIs(
             _select_seed_robust_group((smaller_slow, larger_fast)),
             larger_fast,
+        )
+
+        target_ablated = group(
+            "a-target-ablated",
+            1.0,
+            1.0,
+            model_spec=replace(
+                spec,
+                auxiliary_target_exclusions=(
+                    "medianContractDeltaHedgedSpotReturn",
+                ),
+            ),
+        )
+        full_targets = group("z-full-targets", 1.0, 1.0)
+        self.assertIs(
+            _select_seed_robust_group((target_ablated, full_targets)),
+            full_targets,
         )
 
     def test_deterministic_heldout_rejects_seed_pseudoreplication(self):
@@ -500,6 +521,42 @@ class WalkForwardTrainingTests(TestCase):
             ]))
         with self.assertRaisesRegex(ValueError, "auxiliary_horizons"):
             ModelSpec(auxiliary_horizons=(2, 1))
+
+    def test_cli_builds_named_auxiliary_target_ablation(self):
+        target = "medianContractDeltaHedgedSpotReturn"
+        args = _parser().parse_args([
+            "--auxiliary-coefficient",
+            "0.05",
+            "--auxiliary-target-ablation",
+            target,
+        ])
+
+        full, ablated = _model_specs_from_args(args)
+
+        self.assertEqual(full.auxiliary_target_exclusions, ())
+        self.assertEqual(ablated.auxiliary_target_exclusions, (target,))
+        self.assertNotEqual(full.identifier, ablated.identifier)
+        env = OptionsEnv(walk_forward_dataset(), slot_count=1)
+        self.assertEqual(full.build(env), ablated.build(env))
+
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--auxiliary-target-ablation",
+                target,
+            ]))
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            _model_specs_from_args(_parser().parse_args([
+                "--auxiliary-coefficient",
+                "0.05",
+                "--auxiliary-target-ablation",
+                target,
+                "--auxiliary-target-ablation",
+                target,
+            ]))
+        with self.assertRaisesRegex(ValueError, "unknown auxiliary"):
+            ModelSpec(auxiliary_target_exclusions=("futureLeak",))
+        with self.assertRaisesRegex(ValueError, "remove every target"):
+            ModelSpec(auxiliary_target_exclusions=AUXILIARY_TARGET_FEATURES)
 
     def test_cli_builds_factorized_and_single_leg_candidates(self):
         args = _parser().parse_args([
@@ -932,6 +989,15 @@ class WalkForwardTrainingTests(TestCase):
                 auxiliary_coefficient=0.0,
                 auxiliary_horizons=(1, 2),
             ),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                auxiliary_horizons=(1, 2),
+                auxiliary_target_exclusions=(
+                    "medianContractDeltaHedgedSpotReturn",
+                ),
+            ),
         )
         with TemporaryDirectory() as directory:
             summary = run_walk_forward_training(
@@ -960,11 +1026,15 @@ class WalkForwardTrainingTests(TestCase):
             )
 
         results = summary["folds"][0]["model_selection"]["candidates"]
-        enabled, one_step, disabled = results
+        enabled, one_step, disabled, target_ablated = results
         self.assertEqual(enabled["effective_auxiliary_coefficient"], 0.05)
         self.assertEqual(enabled["effective_auxiliary_horizons"], [1, 2])
         self.assertEqual(one_step["effective_auxiliary_horizons"], [1])
         self.assertEqual(disabled["effective_auxiliary_coefficient"], 0.0)
+        self.assertEqual(
+            target_ablated["effective_auxiliary_target_exclusions"],
+            ["medianContractDeltaHedgedSpotReturn"],
+        )
         self.assertIsNone(
             enabled["validation_score_lift_vs_auxiliary_enabled"]
         )
@@ -986,6 +1056,20 @@ class WalkForwardTrainingTests(TestCase):
         self.assertAlmostEqual(
             one_step["validation_reward_lift_vs_configured_horizons"],
             one_step["selection"]["validation_total_reward"]
+            - enabled["selection"]["validation_total_reward"],
+        )
+        self.assertAlmostEqual(
+            target_ablated[
+                "validation_score_lift_vs_full_auxiliary_targets"
+            ],
+            target_ablated["selection"]["validation_selection_score"]
+            - enabled["selection"]["validation_selection_score"],
+        )
+        self.assertAlmostEqual(
+            target_ablated[
+                "validation_reward_lift_vs_full_auxiliary_targets"
+            ],
+            target_ablated["selection"]["validation_total_reward"]
             - enabled["selection"]["validation_total_reward"],
         )
 

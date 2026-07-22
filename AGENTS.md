@@ -532,7 +532,14 @@ horizons only when both endpoints were observed inside the same training
 rollout and partition. Contract targets must match identifiers at both
 endpoints, require positive non-crossed bid/ask quotes, use a permutation-
 invariant cross-sectional median, require at least 50% current-cross-section
-coverage, and mask unavailable IV separately. Never
+coverage, and mask unavailable IV separately. The delta-hedged target must use
+the current endpoint's Delta against the later spot move, normalize by current
+positive spot, and never use future Delta or intermediate rehedging. Require
+explicit regular-session state, state coverage, underlying-age coverage, and an
+underlying age no greater than the versioned 1,200-second target ceiling at both
+endpoints. Mask pre/post-market, stale, and unknown provenance. Treat it as
+a bounded representation target only: it excludes financing, dividends,
+intermediate hedge costs, and execution attribution. Never
 derive them from last trade or slot position. Mask incomplete rollout tails and
 require point-in-time coverage at both endpoints for sparse IV-surface targets;
 never teach a missing wing, expiration, or contract match as zero. Keep the
@@ -543,7 +550,13 @@ snapshot horizons, coefficient, masked loss/MAE, and nested horizon/target
 coverage in checkpoints. Any claimed benefit requires both the matched
 one-step `--auxiliary-horizon-ablation` and zero-coefficient
 `--auxiliary-ablation` comparisons on validation before the single selected
-policy reaches test. Snapshot horizons are not elapsed-time horizons.
+policy reaches test. Any claim specific to one target additionally requires a
+matched `--auxiliary-target-ablation TARGET`; exclusions alter only the loss
+mask, must be unique, cannot remove every target, and must remain in model IDs,
+training metrics, and checkpoint manifests. When validation scores tie exactly,
+prefer the full target set before latency-noise tie-breaks because deployment
+operations and parameters are identical. Snapshot horizons are not
+elapsed-time horizons.
 
 Shared-policy training accepts unique-symbol environment pools with identical
 feature and action layouts. Schedule seeded shuffled ticker cycles and require
@@ -766,6 +779,7 @@ train-demo --symbol AAPL --encoder surface_graph_set --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder attention_set --attention-heads 4 --kind hybrid --episodes 25
 train-demo --symbol AAPL --allow-collateralized-option-shorts --episodes 25
 train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:0 --candidate surface_graph_set:hybrid:ppo:3 --candidate attention_set:hybrid:ppo
+train-walk-forward --symbol AAPL --auxiliary-coefficient 0.05 --auxiliary-target-ablation medianContractDeltaHedgedSpotReturn --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8
 train-walk-forward --symbol AAPL --allow-collateralized-option-shorts --short-volatility-min-edge 0.02 --min-train-size 500 --validation-size 100 --test-size 100
 ```
 

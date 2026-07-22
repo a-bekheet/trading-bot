@@ -339,7 +339,9 @@ For every policy state, the shared GRU/LSTM representation predicts bounded
 cumulative spot, front-ATM-IV, 25-delta risk-reversal/butterfly, and ATM
 term-slope changes at each declared snapshot horizon. It also predicts the
 cross-sectional median matched-contract mid-quote return, relative-spread
-change, and IV change. Contract targets match identifiers at both endpoints,
+change, IV change, and current-Delta-hedged option P&L normalized by current
+spot. The last target additionally requires explicit regular-session and fresh
+underlying provenance at both endpoints. Contract targets match identifiers at both endpoints,
 require executable bid/ask quotes, cover at least half of the current valid
 cross-section, and are independent of slot order. Both
 endpoints require point-in-time coverage; incomplete tail horizons are
@@ -622,6 +624,44 @@ streaming inference medians were 124.81 and 120.27 microseconds, and the selecte
 held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
+
+v0.66 adds a train-only delta-hedged option-return target to the recurrent
+auxiliary objective. For matched executable contracts it computes the
+cross-sectional median of
+`((future_mid - current_mid) - current_delta * spot_move) / current_spot`,
+then applies the existing bounded signed-log transform. The hedge uses only the
+Delta available at the policy-state endpoint and is not rebalanced using future
+information. Both endpoints require explicit regular-session state and covered
+provider underlying ages no greater than 1,200 seconds; pre/post-market and
+unknown/stale provenance are masked. It is a volatility-specific representation target, not reward,
+execution P&L, or evidence of alpha; financing, dividends, interim hedging, and
+precise option-quote timestamp alignment remain outside this approximation.
+
+The target follows evidence that volatility-surface representations can contain
+information about future delta-hedged option returns
+([Höfler, revised 2025](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4869272))
+while respecting newer warnings that hedge timing and microstructure can create
+spurious premiums
+([Eberbach et al., revised 2025](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5192589)).
+Use `--auxiliary-target-ablation medianContractDeltaHedgedSpotReturn` in a
+walk-forward run to add a matched candidate that removes only this loss target;
+both single-ticker and shared-universe artifacts report its validation lift
+against the full target set.
+
+The added output contributes 129 train-only parameters at recurrent width 128.
+Actor weights and operations are identical. A seven-repeat, batch-one CPU
+benchmark measured 369.35 microseconds median-of-medians with nine targets and
+364.90 with the previous eight-target head, a 1.2% difference within run noise
+despite no auxiliary-head call. Checkpoint, single-ticker walk-forward, and
+universe walk-forward schemas advance to v49, v53, and v37; environment and
+feature schemas remain v24 and `dimensionless.v19`.
+
+In the current 16-snapshot AAPL sample, a quote-and-spot-only calculation would
+have labeled 9 of 15 transitions available. All were pre-market or lacked the
+required regular/fresh endpoint contract, so the final provenance mask correctly
+excludes all 15 from this target. Synthetic regular-session integration evidence
+confirms the target becomes available and updates its head row when those
+requirements are met.
 
 v0.65 adds `surface_graph_set`, an opt-in, permutation-equivariant graph policy
 whose topology follows the option surface rather than quote values. It builds
@@ -1426,6 +1466,22 @@ For multi-horizon experiments, add `--auxiliary-horizon-ablation` to include a
 matched one-step candidate in the same validation tournament. Artifacts retain
 effective horizons and the one-step candidate's lift relative to the configured
 multi-horizon model.
+Repeat `--auxiliary-target-ablation TARGET` to add a matched candidate that
+removes only one named output from the Smooth-L1 loss mask while preserving the
+same policy, recurrent state, head shape, initialization, and inference path.
+For the volatility-specific target use:
+
+```bash
+train-walk-forward \
+  --symbol AAPL \
+  --auxiliary-coefficient 0.05 \
+  --auxiliary-target-ablation medianContractDeltaHedgedSpotReturn
+```
+
+The excluded target has zero training coverage in its candidate artifact, and
+the candidate reports reward and selection-score lift against the full target
+set. Exact ties retain the full target set because both models have identical
+deployment cost.
 Add `--fixed-step-discount-ablation` to include otherwise matched candidates
 whose gamma and GAE lambda apply once per snapshot rather than per elapsed
 wall-clock interval. The artifact records effective semantics and the fixed-step

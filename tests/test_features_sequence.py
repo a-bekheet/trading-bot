@@ -271,7 +271,10 @@ class FeatureSequenceTests(TestCase):
         values, available = auxiliary_market_change_targets(current, future)
 
         self.assertEqual(len(values), len(AUXILIARY_TARGET_FEATURES))
-        np.testing.assert_allclose(available, (1, 1, 0, 0, 1, 0, 0, 0))
+        np.testing.assert_allclose(
+            available,
+            (1, 1, 0, 0, 1, 0, 0, 0, 0),
+        )
         self.assertAlmostEqual(values[0], np.log1p(1.0))
         self.assertAlmostEqual(values[1], np.log1p(0.03))
         self.assertAlmostEqual(values[4], -np.log1p(0.1))
@@ -279,22 +282,29 @@ class FeatureSequenceTests(TestCase):
     def test_contract_auxiliary_targets_match_ids_not_slot_order(self):
         def observation(
             ids: tuple[str, ...],
-            quotes: dict[str, tuple[float, float, float]],
+            quotes: dict[str, tuple[float, float, float, float]],
+            *,
+            spot: float,
         ) -> Observation:
             contracts = np.zeros(
                 (len(ids), len(CONTRACT_FEATURES)),
                 dtype=float,
             )
             for row, contract_id in enumerate(ids):
-                bid, ask, volatility = quotes[contract_id]
+                bid, ask, volatility, delta = quotes[contract_id]
                 contracts[row, CONTRACT_FEATURES.index("bid")] = bid
                 contracts[row, CONTRACT_FEATURES.index("ask")] = ask
                 contracts[
                     row,
                     CONTRACT_FEATURES.index("impliedVolatility"),
                 ] = volatility
+                contracts[row, CONTRACT_FEATURES.index("delta")] = delta
             market = np.zeros(len(MARKET_FEATURES), dtype=float)
-            market[MARKET_FEATURES.index("underlyingPrice")] = 100
+            market[MARKET_FEATURES.index("underlyingPrice")] = spot
+            market[MARKET_FEATURES.index("regularMarketSession")] = 1.0
+            market[MARKET_FEATURES.index("marketStateCoverage")] = 1.0
+            market[MARKET_FEATURES.index("underlyingQuoteAgeSeconds")] = 0.0
+            market[MARKET_FEATURES.index("underlyingQuoteAgeCoverage")] = 1.0
             return Observation(
                 "now",
                 market,
@@ -306,15 +316,15 @@ class FeatureSequenceTests(TestCase):
             )
 
         current_quotes = {
-            "A": (1.0, 1.2, 0.20),
-            "B": (2.0, 2.4, 0.30),
+            "A": (1.0, 1.2, 0.20, 0.50),
+            "B": (2.0, 2.4, 0.30, -0.50),
         }
         future_quotes = {
-            "A": (1.2, 1.4, 0.25),
-            "B": (2.2, 2.6, 0.33),
+            "A": (1.2, 1.4, 0.25, -9.0),
+            "B": (2.2, 2.6, 0.33, 9.0),
         }
-        current = observation(("A", "B"), current_quotes)
-        future = observation(("B", "A"), future_quotes)
+        current = observation(("A", "B"), current_quotes, spot=100)
+        future = observation(("B", "A"), future_quotes, spot=101)
 
         values, available = cross_sectional_contract_change_targets(
             current,
@@ -330,12 +340,42 @@ class FeatureSequenceTests(TestCase):
             np.log1p(np.median(mid_returns) * 100),
             -np.log1p(abs(np.median(spread_changes)) * 10),
             np.log1p(0.04 * 10),
+            np.log1p(0.002 * 100),
         ))
         np.testing.assert_allclose(values, expected, rtol=1e-6)
-        np.testing.assert_allclose(available, np.ones(3))
+        np.testing.assert_allclose(available, np.ones(4))
         self.assertEqual(len(values), len(CONTRACT_AUXILIARY_TARGET_FEATURES))
 
-        unmatched = observation(("C",), {"C": (1.0, 1.2, 0.20)})
+        stale_future = observation(
+            ("B", "A"),
+            future_quotes,
+            spot=101,
+        )
+        stale_future.market[
+            MARKET_FEATURES.index("regularMarketSession")
+        ] = 0.0
+        _, stale_available = cross_sectional_contract_change_targets(
+            current,
+            stale_future,
+        )
+        np.testing.assert_allclose(stale_available[:3], 1.0)
+        self.assertEqual(stale_available[3], 0.0)
+
+        old_future = observation(("B", "A"), future_quotes, spot=101)
+        old_future.market[
+            MARKET_FEATURES.index("underlyingQuoteAgeSeconds")
+        ] = 1_201.0
+        _, old_available = cross_sectional_contract_change_targets(
+            current,
+            old_future,
+        )
+        self.assertEqual(old_available[3], 0.0)
+
+        unmatched = observation(
+            ("C",),
+            {"C": (1.0, 1.2, 0.20, 0.50)},
+            spot=101,
+        )
         values, available = cross_sectional_contract_change_targets(
             current,
             unmatched,
@@ -346,22 +386,35 @@ class FeatureSequenceTests(TestCase):
         partial_current = observation(
             ("A", "B", "C"),
             {
-                "A": (1.0, 1.2, 0.20),
-                "B": (2.0, 2.4, 0.30),
-                "C": (3.0, 3.4, 0.40),
+                "A": (1.0, 1.2, 0.20, 0.50),
+                "B": (2.0, 2.4, 0.30, -0.50),
+                "C": (3.0, 3.4, 0.40, 0.25),
             },
+            spot=100,
         )
         values, available = cross_sectional_contract_change_targets(
             partial_current,
-            observation(("A",), {"A": (1.2, 1.4, 0.25)}),
+            observation(
+                ("A",),
+                {"A": (1.2, 1.4, 0.25, 0.50)},
+                spot=101,
+            ),
         )
         np.testing.assert_allclose(values, 0)
         np.testing.assert_allclose(available, 0)
 
-        invalid = observation(("A",), {"A": (0.0, 1.2, 0.20)})
+        invalid = observation(
+            ("A",),
+            {"A": (0.0, 1.2, 0.20, 0.50)},
+            spot=100,
+        )
         values, available = cross_sectional_contract_change_targets(
             invalid,
-            observation(("A",), {"A": (1.2, 1.4, 0.25)}),
+            observation(
+                ("A",),
+                {"A": (1.2, 1.4, 0.25, 0.50)},
+                spot=101,
+            ),
         )
         np.testing.assert_allclose(values, 0)
         np.testing.assert_allclose(available, 0)
