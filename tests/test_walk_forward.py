@@ -1237,6 +1237,16 @@ class WalkForwardTrainingTests(TestCase):
 
         self.assertEqual(first.identifier, same.identifier)
         self.assertNotEqual(first.identifier, different.identifier)
+        original_identifier = first.identifier
+        with patch(
+            "trading_bot.training.walk_forward.FEATURE_VECTOR_SCHEMA_VERSION",
+            "dimensionless.future",
+        ):
+            self.assertNotEqual(original_identifier, ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=8,
+            ).identifier)
         with TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "unique"):
                 run_walk_forward_training(

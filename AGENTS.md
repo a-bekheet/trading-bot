@@ -245,7 +245,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v16`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v17`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
@@ -263,6 +263,16 @@ last-trade index, and crossing through zero starts a new position lifecycle.
 Both clocks are zero for unheld contracts, causal, log-compressed, and isolated
 in the named `position_lifecycle` ablation. Preserve these rules when changing
 fills, partial closes, settlement, stable slots, or observation construction.
+
+The recurrent input must expose bounded state-dependent action capacity without
+duplicating the full action mask. Each valid contract reports the fraction of
+buy and sell quantity buckets allowed by the exact current per-row mask; the portfolio
+reports the corresponding underlying fractions. Compute them only after all
+cash, collateral, quote, position, Greek, and underlying-limit checks. The mask
+remains authoritative for sampling and execution. Keep the summaries in the
+named `action_feasibility` ablation, including both contract and portfolio
+indices, never treat them as proof that simultaneous factorized orders are
+jointly feasible, and never let a summary make an invalid action executable.
 
 Static-arbitrage diagnostics must remain current-snapshot, bid/ask-aware data
 quality signals. Compare only positive, non-crossed quotes with the same
@@ -584,10 +594,14 @@ the versioned transform and persist exact flattened indices in
 `RecurrentConfig`; external preprocessing would make restored checkpoints
 ambiguous. CLI ablations retain a matched full-feature candidate, report
 validation score and raw-reward lift versus it, and obey the same one-winner
-test boundary. Flat encoders must gather active columns before LayerNorm and the
+test boundary. Groups may span market, contract, and portfolio sections; their
+flattened indices must remain exact and non-overlapping. Flat encoders must
+gather active columns before LayerNorm and the
 recurrent input matrix so removal changes actual capacity; graph encoders retain
 the full structured layout and zero masked relations before graph construction.
 Persist masked and active counts plus the execution mode in checkpoint evidence.
+Model-spec identifiers must hash the feature-vector schema as well as the model
+specification so schema changes cannot silently reuse checkpoint filenames.
 
 ## Commands
 

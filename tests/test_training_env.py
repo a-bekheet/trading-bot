@@ -5,7 +5,11 @@ import numpy as np
 import pandas as pd
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
-from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
+from trading_bot.training.env import (
+    CONTRACT_FEATURES,
+    PORTFOLIO_FEATURES,
+    OptionsEnv,
+)
 from trading_bot.training.manifest import EnvManifest
 from trading_bot.training.sequence import observation_vector
 
@@ -776,10 +780,11 @@ class OptionsEnvTests(TestCase):
         self.assertTrue(truncated)
         self.assertGreater(reward, 0)
         self.assertAlmostEqual(sum(info["reward_components"].values()), reward)
-        self.assertEqual(next_observation.portfolio.shape, (10,))
+        self.assertEqual(next_observation.portfolio.shape, (12,))
         self.assertAlmostEqual(next_observation.portfolio[3], 50.0)
         self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
-        np.testing.assert_array_equal(next_observation.portfolio[8:], (0, 0))
+        np.testing.assert_array_equal(next_observation.portfolio[8:10], (0, 0))
+        np.testing.assert_array_equal(next_observation.portfolio[10:], (0, 1))
         self.assertEqual(next_observation.contracts[0, quantity_index], 1)
         self.assertAlmostEqual(next_observation.contracts[0, average_index], 1.2)
         self.assertAlmostEqual(
@@ -904,6 +909,45 @@ class OptionsEnvTests(TestCase):
         self.assertEqual(info["invalid_action_count"], 1)
         self.assertEqual(len(info["executions"]), 1)
         self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
+
+    def test_compact_action_feasibility_state_matches_exact_masks(self):
+        env = OptionsEnv(
+            demo_dataset(),
+            slot_count=2,
+            starting_cash=1_000,
+            max_quantity=2,
+            max_abs_delta=60,
+        )
+        observation, _ = env.reset()
+        buy = CONTRACT_FEATURES.index("buyFeasibleFraction")
+        sell = CONTRACT_FEATURES.index("sellFeasibleFraction")
+        underlying_buy = PORTFOLIO_FEATURES.index(
+            "underlyingBuyFeasibleFraction"
+        )
+        underlying_sell = PORTFOLIO_FEATURES.index(
+            "underlyingSellFeasibleFraction"
+        )
+
+        np.testing.assert_allclose(observation.contracts[:, buy], 0.5)
+        np.testing.assert_allclose(observation.contracts[:, sell], 0.0)
+        self.assertEqual(observation.portfolio[underlying_buy], 0.0)
+        self.assertEqual(observation.portfolio[underlying_sell], 1.0)
+        for slot in range(env.slot_count):
+            self.assertEqual(
+                observation.contracts[slot, buy],
+                observation.action_mask[slot, 1:3].mean(),
+            )
+            self.assertEqual(
+                observation.contracts[slot, sell],
+                observation.action_mask[slot, 3:5].mean(),
+            )
+
+        next_observation, _, _, _, _ = env.step(np.array([1, 0]))
+
+        self.assertEqual(next_observation.contracts[0, buy], 0.0)
+        self.assertEqual(next_observation.contracts[0, sell], 0.5)
+        self.assertEqual(next_observation.contracts[1, buy], 0.0)
+        self.assertEqual(next_observation.contracts[1, sell], 0.0)
 
     def test_rejects_nonpositive_greek_limit(self):
         with self.assertRaisesRegex(ValueError, "Greek risk limits"):

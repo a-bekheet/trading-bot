@@ -387,7 +387,7 @@ class TrainerTests(TestCase):
         )
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
         self.assertEqual(sidecar["model"]["encoder"], "graph")
-        self.assertEqual(sidecar["model"]["portfolio_feature_count"], 10)
+        self.assertEqual(sidecar["model"]["portfolio_feature_count"], 12)
         self.assertEqual(sidecar["model"]["action_slot_count"], 3)
         self.assertEqual(sidecar["model"]["initial_hold_bias"], 5.0)
         self.assertEqual(sidecar["model"]["masked_input_indices"], [0])
@@ -400,7 +400,7 @@ class TrainerTests(TestCase):
             },
         )
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v21")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v22")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
@@ -416,7 +416,7 @@ class TrainerTests(TestCase):
             sidecar["environment"]["reward_downside_penalty"],
             1.0,
         )
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v16")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v17")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],

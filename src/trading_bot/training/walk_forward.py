@@ -35,6 +35,7 @@ from trading_bot.training.recurrent import (
     RecurrentConfig,
     build_recurrent_actor_critic,
 )
+from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
     FEATURE_ABLATION_GROUPS,
@@ -52,7 +53,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v42"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v43"
 
 
 @dataclass(frozen=True)
@@ -266,7 +267,10 @@ class ModelSpec:
     def identifier(self) -> str:
         """Return a stable identifier for artifact joins."""
         canonical = json.dumps(
-            asdict(self),
+            {
+                "feature_vector_schema": FEATURE_VECTOR_SCHEMA_VERSION,
+                "model": asdict(self),
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")

@@ -6,7 +6,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES
+from trading_bot.training.env import (
+    ACTION_FEASIBILITY_CONTRACT_FEATURES,
+    CONTRACT_FEATURES,
+    MARKET_FEATURES,
+    PORTFOLIO_FEATURES,
+)
 from trading_bot.training.features import (
     CONTRACT_DYNAMICS_FEATURES,
     REALIZED_VOL_WINDOWS,
@@ -26,6 +31,11 @@ FEATURE_ABLATION_GROUPS = {
     "position_lifecycle": (
         "positionAgeSteps",
         "positionLastTradeAgeSteps",
+    ),
+    "action_feasibility": (
+        *ACTION_FEASIBILITY_CONTRACT_FEATURES,
+        "underlyingBuyFeasibleFraction",
+        "underlyingSellFeasibleFraction",
     ),
     "contract_dynamics": CONTRACT_DYNAMICS_FEATURES,
     "static_arbitrage": (
@@ -178,10 +188,16 @@ def feature_ablation_indices(
 
     indices = set()
     contract_start = len(MARKET_FEATURES)
+    portfolio_start = contract_start + slot_count * len(CONTRACT_FEATURES)
     for group in groups:
         for name in FEATURE_ABLATION_GROUPS[group]:
             if name in MARKET_FEATURES:
                 indices.add(MARKET_FEATURES.index(name))
+                continue
+            if name in PORTFOLIO_FEATURES:
+                indices.add(
+                    portfolio_start + PORTFOLIO_FEATURES.index(name)
+                )
                 continue
             contract_index = _CONTRACT_FEATURE_INDEX[name]
             for slot in range(slot_count):
@@ -264,7 +280,7 @@ def _dimensionless_components(
             spread_index = market_indices[f"atmIvMinusRealizedVol{window}"]
             spread = market[spread_index]
             market[spread_index] = np.sign(spread) * np.log1p(abs(spread))
-    if len(portfolio) in {8, 10}:
+    if len(portfolio) in {8, 10, 12}:
         nav = float(portfolio[2])
         nav_scale = max(abs(nav), 1.0)
         underlying_notional = abs(float(portfolio[7])) * spot_scale
@@ -288,6 +304,13 @@ def _dimensionless_components(
             values.extend((
                 portfolio[8] / nav_scale,
                 portfolio[9] * spot_scale / nav_scale,
+            ))
+        elif len(portfolio) == 12:
+            values.extend((
+                portfolio[8] / nav_scale,
+                portfolio[9] * spot_scale / nav_scale,
+                portfolio[10],
+                portfolio[11],
             ))
         portfolio = np.asarray(values, dtype=np.float64)
 

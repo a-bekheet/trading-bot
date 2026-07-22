@@ -29,16 +29,24 @@ POSITION_CONTRACT_FEATURES = (
     "positionAgeSteps",
     "positionLastTradeAgeSteps",
 )
+ACTION_FEASIBILITY_CONTRACT_FEATURES = (
+    "buyFeasibleFraction",
+    "sellFeasibleFraction",
+)
 CONTRACT_FEATURES = (
     "strike", "lastPrice", "bid", "ask", "impliedVolatility", "delta", "gamma",
     "theta", "vega", *CONTRACT_ENGINEERED_FEATURES,
-    *POSITION_CONTRACT_FEATURES, "slotContinuity",
+    *POSITION_CONTRACT_FEATURES, *ACTION_FEASIBILITY_CONTRACT_FEATURES,
+    "slotContinuity",
 )
+BUY_FEASIBILITY_INDEX = CONTRACT_FEATURES.index("buyFeasibleFraction")
+SELL_FEASIBILITY_INDEX = CONTRACT_FEATURES.index("sellFeasibleFraction")
 MARKET_FEATURES = ("underlyingPrice", "riskFreeRate", *MARKET_ENGINEERED_FEATURES)
 GREEK_NAMES = ("delta", "gamma", "theta", "vega")
 PORTFOLIO_FEATURES = (
     "cash", "investedCost", "netAssetValue", *GREEK_NAMES,
     "underlyingShares", "reservedCashCollateral", "reservedCoveredShares",
+    "underlyingBuyFeasibleFraction", "underlyingSellFeasibleFraction",
 )
 PORTFOLIO_GREEK_SLICE = slice(3, 7)
 OPTION_CONTRACT_MULTIPLIER = 100
@@ -770,6 +778,8 @@ class OptionsEnv:
                 ids[index] or "",
                 Position(0, 0.0),
             ).quantity
+            feasible_buys = 0
+            feasible_sells = 0
             for quantity in range(1, self.max_quantity + 1):
                 fee = quantity * self.commission_per_contract
                 greek_change = (
@@ -793,15 +803,29 @@ class OptionsEnv:
                         + fee
                     )
                     sell_allowed = held >= quantity
-                action_mask[index, quantity] = (
+                buy_feasible = (
                     buy_allowed
                     and self._risk_allowed(exposures, greek_change)
                 )
-                action_mask[index, self.max_quantity + quantity] = (
+                sell_feasible = (
                     bid > 0
                     and sell_allowed
                     and self._risk_allowed(exposures, -greek_change)
                 )
+                action_mask[index, quantity] = buy_feasible
+                action_mask[index, self.max_quantity + quantity] = (
+                    sell_feasible
+                )
+                feasible_buys += int(buy_feasible)
+                feasible_sells += int(sell_feasible)
+            contracts[
+                index,
+                BUY_FEASIBILITY_INDEX,
+            ] = feasible_buys / self.max_quantity
+            contracts[
+                index,
+                SELL_FEASIBILITY_INDEX,
+            ] = feasible_sells / self.max_quantity
         underlying_slot = self.slot_count
         action_mask[underlying_slot, 0] = True
         spot = float(frame_rows.columns["underlyingPrice"][0])
@@ -838,6 +862,20 @@ class OptionsEnv:
                 and fill_allowed
                 and self._risk_allowed(exposures, greek_change)
             )
+        underlying_non_hold = self.underlying_action_quantities[1:]
+        underlying_non_hold_mask = action_mask[underlying_slot, 1:]
+        positive_underlying = underlying_non_hold > 0
+        negative_underlying = underlying_non_hold < 0
+        underlying_buy_feasible = float(
+            underlying_non_hold_mask[positive_underlying].mean()
+            if positive_underlying.any()
+            else 0.0
+        )
+        underlying_sell_feasible = float(
+            underlying_non_hold_mask[negative_underlying].mean()
+            if negative_underlying.any()
+            else 0.0
+        )
         first = frame_rows.at(0)
         market = np.array(
             [float(first.get(name, 0.0) or 0.0) for name in MARKET_FEATURES],
@@ -857,6 +895,8 @@ class OptionsEnv:
                 self._underlying_shares,
                 reserved_cash,
                 reserved_shares,
+                underlying_buy_feasible,
+                underlying_sell_feasible,
             ], dtype=np.float64),
         ))
         observation = Observation(

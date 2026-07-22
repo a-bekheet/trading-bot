@@ -15,7 +15,12 @@ from trading_bot.training.features import (
     realized_volatility_features,
     snapshot_gap_features,
 )
-from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES, OptionsEnv
+from trading_bot.training.env import (
+    CONTRACT_FEATURES,
+    MARKET_FEATURES,
+    PORTFOLIO_FEATURES,
+    OptionsEnv,
+)
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION, Observation
 from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
@@ -346,6 +351,10 @@ class FeatureSequenceTests(TestCase):
             ("position_lifecycle",),
             2,
         )
+        feasibility_indices = feature_ablation_indices(
+            ("action_feasibility",),
+            2,
+        )
         contract_dynamics_indices = feature_ablation_indices(
             ("contract_dynamics",),
             2,
@@ -368,6 +377,7 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(len(dynamics_indices), 7)
         self.assertEqual(len(identity_indices), 2)
         self.assertEqual(len(lifecycle_indices), 4)
+        self.assertEqual(len(feasibility_indices), 6)
         self.assertEqual(len(position_indices), 6)
         self.assertEqual(
             len(contract_dynamics_indices),
@@ -423,6 +433,27 @@ class FeatureSequenceTests(TestCase):
         self.assertFalse(set(trend_indices) & set(term_indices))
         self.assertFalse(set(position_indices) & set(identity_indices))
         self.assertFalse(set(position_indices) & set(lifecycle_indices))
+        self.assertFalse(set(position_indices) & set(feasibility_indices))
+        portfolio_start = len(MARKET_FEATURES) + 2 * len(CONTRACT_FEATURES)
+        self.assertEqual(
+            set(feasibility_indices),
+            {
+                *(
+                    len(MARKET_FEATURES)
+                    + slot * len(CONTRACT_FEATURES)
+                    + CONTRACT_FEATURES.index(feature)
+                    for slot in range(2)
+                    for feature in (
+                        "buyFeasibleFraction",
+                        "sellFeasibleFraction",
+                    )
+                ),
+                portfolio_start
+                + PORTFOLIO_FEATURES.index("underlyingBuyFeasibleFraction"),
+                portfolio_start
+                + PORTFOLIO_FEATURES.index("underlyingSellFeasibleFraction"),
+            },
+        )
         self.assertFalse(set(contract_dynamics_indices) & set(position_indices))
         self.assertFalse(set(contract_dynamics_indices) & set(contract_indices))
         for window in (4, 16):
@@ -827,6 +858,8 @@ class FeatureSequenceTests(TestCase):
                 "positionUnrealizedReturn": 0.25,
                 "positionAgeSteps": 9,
                 "positionLastTradeAgeSteps": 99,
+                "buyFeasibleFraction": 0.25,
+                "sellFeasibleFraction": 0.75,
             }
             for name, value in values.items():
                 contracts[0, CONTRACT_FEATURES.index(name)] = value
@@ -845,6 +878,8 @@ class FeatureSequenceTests(TestCase):
                     10,
                     30_000 * scale,
                     20,
+                    0.5,
+                    0.75,
                 ]),
                 np.ones(1, dtype=bool),
                 np.ones((1, 3), dtype=bool),
@@ -857,8 +892,16 @@ class FeatureSequenceTests(TestCase):
 
         np.testing.assert_allclose(first[:contract_end], second[:contract_end])
         np.testing.assert_allclose(
-            first[contract_end:contract_end + 10],
-            second[contract_end:contract_end + 10],
+            first[contract_end:contract_end + 12],
+            second[contract_end:contract_end + 12],
+        )
+        np.testing.assert_allclose(
+            first[contract_end + 10:contract_end + 12],
+            (0.5, 0.75),
+        )
+        self.assertEqual(
+            first[2 + CONTRACT_FEATURES.index("buyFeasibleFraction")],
+            0.25,
         )
         self.assertAlmostEqual(
             first[2 + CONTRACT_FEATURES.index("positionQuantity")],
@@ -886,7 +929,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v16")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v17")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

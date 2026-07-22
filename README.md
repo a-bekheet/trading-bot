@@ -216,6 +216,16 @@ opened and since its most recent trade. Same-sign adds retain the opening clock,
 every adjustment resets the last-trade clock, and crossing through zero starts a
 new lifecycle. Both are zero for unheld contracts, log-compressed before policy
 inference, and removable through the separate `position_lifecycle` ablation.
+The recurrent state and value head also receive compact action-capacity context:
+each option slot reports the fraction of configured buy and sell quantity
+buckets currently feasible, and the portfolio vector reports the same two
+fractions for underlying-share actions. These values are computed from the
+exact current per-row action mask after cash, collateral, position, quote, and
+Greek checks; the exact mask remains authoritative at sampling and execution,
+and multi-order actions are still revalidated sequentially for aggregate risk.
+Use the
+`action_feasibility` ablation to test whether this compact summary improves
+learning without feeding the full combinatorial mask to the recurrent layer.
 Each visible contract also carries a compact prior-snapshot dynamics group:
 mid-quote log return, relative-spread change, IV change, and separate quote/IV
 coverage bits. Changes are available only when the same contract exists in both
@@ -228,7 +238,7 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v16` transform. Prices, strikes, and average entry price are
+`dimensionless.v17` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
@@ -236,7 +246,7 @@ become ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields and
 position quantity are log-compressed. Unrealized return uses a signed log transform.
 Cumulative log returns use the same signed bounded transform as one-step return.
 Signed contract changes are log-compressed at fixed scales. The `time_context`,
-`price_trend`, `position_state`, `position_lifecycle`, and `contract_dynamics`
+`price_trend`, `position_state`, `position_lifecycle`, `action_feasibility`, and `contract_dynamics`
 walk-forward ablations preserve the external observation/action contract. Flat
 models physically compact masked inputs; graph encoders retain shape and zero
 masked relations before graph construction.
@@ -612,7 +622,28 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
-v0.54 adds explicit position-lifecycle state and makes latency an honest
+v0.55 makes state-dependent trading capacity visible to the recurrent policy
+and value estimator without appending the full action mask. Two bounded values
+per option slot summarize the currently feasible buy and sell quantity buckets;
+two portfolio values do the same for underlying-share actions. The summaries
+are regenerated from the exact causal mask at every snapshot, remain secondary
+to that mask, and are removable through `action_feasibility`.
+
+At 32 slots and hidden size 128, the full flat GRU has 1,391 inputs and 617,806
+parameters; compacting the 66 feasibility inputs leaves 1,325 active inputs and
+592,330 parameters. In the two-seed tiny AAPL smoke, robust validation scores
+tied at zero. Full-model seed medians were 130.42 and 129.73 microseconds versus
+137.21 and 134.02 for the smaller gathered-input ablation, so the latency
+tie-break retained the faster full model. The held-out path again made zero
+trades and zero return. This validates the state, ablation, and selection path,
+not improved sample efficiency or alpha.
+
+The feature, environment, checkpoint, single-ticker walk-forward, and universe
+walk-forward schemas advance to `dimensionless.v17`, v22, v40, v43, and v27.
+Model IDs now include the feature-vector schema in their digest, preventing a
+new layout from reusing an old checkpoint filename in the same output directory.
+
+v0.54 added explicit position-lifecycle state and made latency an honest
 equal-score tournament tie-break. Each visible held contract reports
 `positionAgeSteps` and `positionLastTradeAgeSteps`; same-sign adds preserve the
 first clock, all adjustments reset the second, and a long/short crossing resets
@@ -635,7 +666,7 @@ The external action contract is unchanged.
 
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v16` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v17` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters
@@ -1034,7 +1065,7 @@ has no hard ceiling, while the equal-score latency tie-break remains active.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are
-`slot_identity`, `position_state`, `position_lifecycle`, `contract_dynamics`, `static_arbitrage`,
+`slot_identity`, `position_state`, `position_lifecycle`, `action_feasibility`, `contract_dynamics`, `static_arbitrage`,
 `time_context`, `price_trend`, `surface_wings`, `term_structure`,
 `surface_dynamics`, `volatility_regime`, `volatility_normalization`,
 `data_quality`, and `derived_contract_surface`. Masking happens inside the
