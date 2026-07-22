@@ -27,7 +27,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v36"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v37"
 
 
 @dataclass(frozen=True)
@@ -322,9 +322,14 @@ def evaluate_recurrent_policy(
     env: OptionsEnv,
     model,
     sequence_length: int,
-    seeds: tuple[int, ...] = (101, 102, 103),
+    seeds: tuple[int, ...] = (101,),
 ) -> list[EpisodeReport]:
     """Evaluate deterministic actions on the explicitly supplied environment."""
+    if len(seeds) != 1:
+        raise ValueError(
+            "deterministic policy evaluation requires exactly one seed; "
+            "repeated seeds are not independent paths"
+        )
     was_training = model.training
     model.eval()
     reports = [

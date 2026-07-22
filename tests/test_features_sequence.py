@@ -870,7 +870,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v14")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v15")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
@@ -1063,6 +1063,29 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(first["front25DeltaCoverage"], 1)
         self.assertAlmostEqual(first["executableQuoteCoverage"], 0.8)
         self.assertAlmostEqual(first["greekCoverage"], 0.8)
+
+    def test_executable_quote_coverage_does_not_require_a_last_trade(self):
+        rows = pd.DataFrame([{
+            "collectedAt": "2026-07-21T14:00:00Z",
+            "contractSymbol": "NO-LAST-TRADE",
+            "expiration": "2026-08-21",
+            "optionType": "call",
+            "bid": 1.0,
+            "ask": 1.2,
+            "lastPrice": np.nan,
+            "strike": 100,
+            "underlyingPrice": 100,
+            "impliedVolatility": 0.2,
+            "delta": 0.5,
+            "gamma": 0.01,
+            "theta": -0.1,
+            "vega": 0.2,
+        }])
+
+        engineered = engineer_snapshot(rows)
+
+        self.assertEqual(engineered.iloc[0]["executableQuoteCoverage"], 1)
+        self.assertAlmostEqual(engineered.iloc[0]["midPrice"], 1.1)
 
     def test_sparse_atm_only_surface_does_not_masquerade_as_wings(self):
         rows = []

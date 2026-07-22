@@ -532,18 +532,15 @@ def _market_surface_features(result: pd.DataFrame) -> None:
     for name in neutral:
         result[name] = 0.0
 
-    quote_required = {"bid", "ask", "lastPrice"}
+    quote_required = {"bid", "ask"}
     if quote_required.issubset(result.columns):
         bid = pd.to_numeric(result["bid"], errors="coerce")
         ask = pd.to_numeric(result["ask"], errors="coerce")
-        last = pd.to_numeric(result["lastPrice"], errors="coerce")
         executable = (
             np.isfinite(bid)
             & np.isfinite(ask)
-            & np.isfinite(last)
             & (bid > 0)
             & (ask > 0)
-            & (last > 0)
             & (bid <= ask)
         )
         result["executableQuoteCoverage"] = float(executable.mean())

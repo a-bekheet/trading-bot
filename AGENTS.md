@@ -105,6 +105,11 @@ ATM-IV difference from causal 4/16-snapshot realized volatility. Wing factors
 must exclude zero-bid, crossed, or otherwise unexecutable quotes. Keep global
 regime and quality features out of each contract node.
 
+An executable option quote is defined by finite, positive, non-crossed bid and
+ask prices. `lastPrice` is not part of that predicate and must not gate fills,
+action validity, `executableQuoteCoverage`, or surface-factor coverage. It may
+remain raw display context or a declared fallback when no executable book exists.
+
 Greek conventions:
 
 - Expiration is 4:00 PM `America/New_York`, ACT/365.
@@ -240,7 +245,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v14`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v15`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
@@ -478,8 +483,13 @@ under each scenario; default stress doubles both executable spread and
 commission. Episode reports retain return, drawdown, volatility/downside,
 turnover, costs, execution quality, and final/peak Greek exposure diagnostics.
 Held-out statistical comparisons pair agent and baseline returns by exact
-arrival timestamp and test seed, then use circular moving blocks. Do not pool
-duplicate deterministic seeds as independent observations. The default minimum
+arrival timestamp, then use circular moving blocks. A deterministic policy on
+one deterministic CSV path must accept exactly one held-out seed: changing the
+seed label does not create a new path or an independent observation. Multiple
+training seeds must produce independently trained checkpoints before they can
+measure learned-policy variability; never replace that experiment with repeated
+evaluation of one checkpoint. Persist the actual path count, seed repetitions,
+and bootstrap independence unit in every fold. The default minimum
 is 20 transitions; shorter paths must report `insufficient_history` and null
 intervals. Bootstrap results are post-selection evidence only and may never
 affect features, hyperparameters, early stopping, or checkpoint choice.

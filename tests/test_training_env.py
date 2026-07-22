@@ -787,6 +787,39 @@ class OptionsEnvTests(TestCase):
             1.5 / 1.2 - 1,
         )
 
+    def test_executable_bid_ask_remains_tradeable_without_last_price(self):
+        source = demo_dataset()
+        snapshots = tuple(
+            Snapshot(
+                snapshot.timestamp,
+                snapshot.frame.assign(lastPrice=np.nan),
+            )
+            for snapshot in source.snapshots
+        )
+        env = OptionsEnv(
+            SnapshotDataset(snapshots, source.symbol),
+            slot_count=2,
+            starting_cash=1_000,
+        )
+
+        observation, _ = env.reset()
+        after, reward, _, truncated, info = env.step(np.array([1, 0, 0]))
+
+        self.assertTrue(observation.valid_mask[0])
+        self.assertTrue(observation.action_mask[0, 1])
+        self.assertEqual(info["executions"][0]["price"], 1.2)
+        self.assertTrue(np.isfinite(reward))
+        self.assertTrue(truncated)
+        self.assertTrue(np.isfinite(after.portfolio).all())
+
+        crossed_frame = snapshots[0].frame.assign(bid=2.0, ask=1.0)
+        crossed = OptionsEnv(
+            SnapshotDataset((Snapshot("crossed", crossed_frame),), "AAPL"),
+            slot_count=2,
+        ).reset()[0]
+        self.assertFalse(crossed.valid_mask[0])
+        self.assertFalse(crossed.action_mask[0].any())
+
     def test_mask_rejects_aggregate_cash_violation(self):
         env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=130)
         observation, _ = env.reset()

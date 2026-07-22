@@ -223,7 +223,7 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v14` transform. Prices, strikes, and average entry price are
+`dimensionless.v15` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
@@ -557,9 +557,34 @@ $99,912.50 under midpoint, exposing $16.50 of legacy terminal optimism. The
 one-episode liquidation walk-forward smoke completed with zero trades and zero
 held-out return. These are accounting and latency checks, not evidence of alpha.
 
+v0.52 makes executable-quote eligibility consistent across the action mask,
+fills, contract state, and surface coverage. A finite, positive, non-crossed
+bid/ask book is executable even when `lastPrice` is absent; last trade remains
+available as raw context and as a held-position fallback, but it cannot suppress
+a currently fillable contract. The semantic feature schema advances to
+`dimensionless.v15`; environment, checkpoint, single-ticker walk-forward, and
+universe walk-forward schemas advance to v20, v37, v40, and v24.
+
+Deterministic held-out evaluation now accepts exactly one seed per CSV path.
+Changing a seed label while policy inference and the market path are deterministic
+does not create an independent observation. Every fold records a
+`heldout_evaluation_contract` with its actual path count, seed repetitions, and
+moving-block independence unit; cross-ticker summaries remain descriptive because
+the paths share market conditions. Multiple training seeds remain valuable for
+measuring learned-policy variability, but each must train an independent policy
+and must not be substituted with repeated evaluation of one checkpoint.
+
+Across the current 50 CSVs, 214,499 of 326,608 rows had executable bid/ask books
+and none were newly recovered by removing the stale last-trade gate, so this is a
+correctness and future-data fix rather than measured alpha. On the 84-row AAPL
+snapshot, feature engineering measured 23.55 ms median and 26.51 ms p95, roughly
+1 ms lower at the median than the prior same-machine run but within ordinary run
+variation. The v0.52 one-episode walk-forward smoke completed with zero trades,
+zero held-out return, and one declared deterministic held-out path.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v14` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v15` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters

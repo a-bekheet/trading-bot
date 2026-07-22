@@ -51,7 +51,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v39"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v40"
 
 
 @dataclass(frozen=True)
@@ -87,8 +87,11 @@ class WalkForwardConfig:
     def __post_init__(self) -> None:
         if min(self.min_train_size, self.validation_size, self.test_size) < 2:
             raise ValueError("walk-forward partitions require at least two snapshots")
-        if not self.test_seeds:
-            raise ValueError("at least one held-out test seed is required")
+        if len(self.test_seeds) != 1:
+            raise ValueError(
+                "deterministic held-out evaluation requires exactly one seed; "
+                "repeated seeds are not independent paths"
+            )
         if self.bootstrap_samples < 100:
             raise ValueError("bootstrap_samples must be at least 100")
         if (
@@ -844,6 +847,13 @@ def run_walk_forward_training(
         fold_record = {
             "fold": fold.fold,
             "split": fold.to_dict(),
+            "heldout_evaluation_contract": {
+                "deterministic_policy": True,
+                "path_count": 1,
+                "seed_repetitions": 1,
+                "test_seed": walk_forward_config.test_seeds[0],
+                "bootstrap_independence_unit": "arrival_time_block",
+            },
             "environment_fingerprints": {
                 "train": train_env.manifest.fingerprint,
                 "validation": validation_env.manifest.fingerprint,

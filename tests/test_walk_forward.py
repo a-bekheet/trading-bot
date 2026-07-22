@@ -96,6 +96,15 @@ def short_volatility_walk_forward_dataset() -> SnapshotDataset:
 
 
 class WalkForwardTrainingTests(TestCase):
+    def test_deterministic_heldout_rejects_seed_pseudoreplication(self):
+        with self.assertRaisesRegex(ValueError, "not independent"):
+            WalkForwardConfig(
+                min_train_size=3,
+                validation_size=2,
+                test_size=2,
+                test_seeds=(1, 2),
+            )
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_short_volatility_baseline_trades_and_is_cost_stressed(self):
         with TemporaryDirectory() as directory:
@@ -339,6 +348,13 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(len(summary["folds"]), 1)
         self.assertEqual(fold["selection"]["scope"], "validation_research_demo")
         self.assertEqual(fold["test"][0]["steps"], 1)
+        self.assertEqual(fold["heldout_evaluation_contract"], {
+            "deterministic_policy": True,
+            "path_count": 1,
+            "seed_repetitions": 1,
+            "test_seed": 31,
+            "bootstrap_independence_unit": "arrival_time_block",
+        })
         candidate = fold["model_selection"]["candidates"][0]
         self.assertLessEqual(candidate["parameter_count"], 5_000)
         self.assertEqual(

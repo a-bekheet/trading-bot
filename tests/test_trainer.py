@@ -392,7 +392,7 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["initial_hold_bias"], 5.0)
         self.assertEqual(sidecar["model"]["masked_input_indices"], [0])
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v19")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v20")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
@@ -408,7 +408,7 @@ class TrainerTests(TestCase):
             sidecar["environment"]["reward_downside_penalty"],
             1.0,
         )
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v14")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v15")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
@@ -429,9 +429,16 @@ class TrainerTests(TestCase):
             env,
             restored,
             training.sequence_length,
-            seeds=(21, 21),
+            seeds=(21,),
         )
-        self.assertEqual(reports[0], reports[1])
+        self.assertEqual(len(reports), 1)
+        with self.assertRaisesRegex(ValueError, "not independent"):
+            evaluate_recurrent_policy(
+                env,
+                restored,
+                training.sequence_length,
+                seeds=(21, 22),
+            )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_stateful_ppo_trains_contiguous_recurrent_chunks(self):

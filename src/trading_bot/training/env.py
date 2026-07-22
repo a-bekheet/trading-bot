@@ -1104,15 +1104,8 @@ class OptionsEnv:
 
     @classmethod
     def _quote_valid(cls, contract: _ContractRow) -> bool:
-        try:
-            last_price = float(contract["lastPrice"])
-            return (
-                cls._bid_ask_valid(contract)
-                and math.isfinite(last_price)
-                and last_price > 0
-            )
-        except (TypeError, ValueError):
-            return False
+        """Return whether the saved top of book supports an executable fill."""
+        return cls._bid_ask_valid(contract)
 
     def _fill(self, side: str, contract: _ContractRow, quantity: int, price: float, fee: float) -> None:
         symbol = str(contract["contractSymbol"])

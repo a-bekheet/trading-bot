@@ -43,8 +43,10 @@ Every candidate must eventually pass:
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | The collateralized liability foundation now exists. Add CVaR or learned P&L-distribution objectives only after enough independent paths and lifecycle validation exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Causal realized-volatility horizons, walk-forward evaluation, and explicit per-contract position quantity/cost/P&L state implement this lesson. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, include realistic transaction costs and limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v14`, executable net-liquidation wealth, compact volatility state, stable contract/position identity, Greek budgets, collateral, cost stress, and paired moving-block intervals implement the state/risk lesson. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, include realistic transaction costs and limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v15`, executable net-liquidation wealth, compact volatility state, stable contract/position identity, Greek budgets, collateral, cost stress, and paired moving-block intervals implement the state/risk lesson. |
 | [Deep Hedging of Derivatives Using Reinforcement Learning (2021)](https://arxiv.org/abs/2103.16409) | Accounting P&L and cash-flow objectives differ under transaction costs, so the valuation convention is part of the learning problem. | Default every training, selection, baseline, and held-out report to executable net liquidation value. Persist legacy midpoint mode only for declared reproduction, and never compare runs whose valuation contracts differ. |
+| [How Many Random Seeds? Statistical Power Analysis in Deep Reinforcement Learning Experiments (2018)](https://arxiv.org/abs/1806.08295) | Random seeds quantify stochastic training variability and determine statistical power; a seed label does not make an otherwise identical deterministic trajectory independent. | Require one evaluation seed for each deterministic policy/path pair. Add multiple independently trained policies only as a predeclared training-seed experiment, and retain path-level dependence in inference. |
+| [GT-Score: A Robust Objective Function for Reducing Overfitting in Financial Reinforcement Learning (2026)](https://arxiv.org/abs/2602.00080) | Financial RL evaluation should combine performance, significance, consistency, and downside across multiple walk-forward splits and training seeds to resist data snooping. | Record the exact held-out path count and block-bootstrap unit now. Add predeclared repeated time splits and independently trained seeds before treating a score or confidence interval as alpha evidence. |
 | [Deep Hedging with Options Using the Implied Volatility Surface (revised 2025)](https://arxiv.org/abs/2504.06208) | Joint return/surface dynamics, multiple hedge instruments, variance-risk-premium state, and transaction costs can create useful state-dependent no-trade regions. | Keep whole-surface factors, option-plus-share actions, and sparse action priors. The collateralized short-put carry baseline now prevents attributing a simple IV-versus-realized rule to RL. |
 | [IV-surface feedback for deep option hedging (revised 2026)](https://arxiv.org/abs/2407.21138) | A compact surface factorization includes ATM level, maturity and moneyness slopes, smile attenuation, smirk, and their dynamics; bounded recurrent hybrids outperform standalone networks in its numerical study. | Executable 25-delta risk-reversal/butterfly, ATM term slope/curvature, and one-snapshot factor changes now have explicit coverage once per market snapshot; test them through named tournament ablations. |
 | [Shortfall-aware RL option hedging (2026)](https://arxiv.org/abs/2601.01709) | Better static IV fit need not produce better dynamic hedging; replication-error and shortfall objectives under costs are separate evidence. | Keep realized path diagnostics primary. The liability surface is implemented; defer shortfall/CVaR training until enough independent paths make tail estimates meaningful. |
@@ -254,7 +256,7 @@ inference on both flat and graph-set layouts, so it remains a tournament
 candidate subject to the same latency ceiling rather than replacing GRU or the
 concatenated hybrid.
 
-The `dimensionless.v14` policy transform batches signed contract columns,
+The `dimensionless.v15` policy transform batches signed contract columns,
 uses clipping for infinity handling, replaces NaNs in one pass, and assembles
 the float32 vector directly. This reduced local preprocessing median by 37% and
 cut matched batch-one medians across flat and graph-set hybrid/mixture models
@@ -275,9 +277,11 @@ than live-execution fidelity.
 Walk-forward artifacts now include post-selection, paired circular moving-block
 comparisons of the agent against every baseline. They report cumulative
 log-return lift, confidence bounds, and the fraction of bootstrap estimates
-above zero per held-out seed. Folds below the minimum sample count produce no
-bounds, preventing tiny integration datasets from masquerading as statistical
-evidence.
+above zero per held-out path. Deterministic policy/path evaluation accepts one
+seed and persists its actual path count and bootstrap independence unit; ticker
+aggregates remain descriptive rather than pretending shared market histories are
+independent. Folds below the minimum sample count produce no bounds, preventing
+tiny integration datasets from masquerading as statistical evidence.
 
 A causal long-volatility baseline now converts the IV-minus-realized feature
 into an executable comparator: after sufficient history, it opens feasible
@@ -339,7 +343,7 @@ candidate. This corrects objective semantics; it is not evidence of alpha.
 - Retain the sparse stable-slot and empty-option-portfolio fast paths. Padding
   alone must not trigger repeated ranking, while newly visible contracts and
   every held-option settlement must preserve the full deterministic path.
-- Keep the 37-field contract state under `dimensionless.v14` as the current
+- Keep the 37-field contract state under `dimensionless.v15` as the current
   model: current per-slot quantity, average entry price, and executable
   unrealized return prevent portfolio-state aliasing, while matched bid/ask and
   IV dynamics plus static-arbitrage scores separate observed change and surface

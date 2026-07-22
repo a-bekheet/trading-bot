@@ -54,7 +54,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v23"
+    "research-demo.universe-walk-forward.v24"
 )
 
 
@@ -312,7 +312,7 @@ def _heldout_aggregate(
         dtype=np.float64,
     )
     return {
-        "scope": "descriptive_across_ticker_seed_reports",
+        "scope": "descriptive_across_ticker_paths",
         "report_count": len(reports),
         "symbol_count": len(by_symbol),
         "mean_total_return": float(returns.mean()),
@@ -740,6 +740,16 @@ def run_universe_walk_forward_training(
         fold_record = {
             "fold": fold.fold,
             "split": fold.to_dict(),
+            "heldout_evaluation_contract": {
+                "deterministic_policy": True,
+                "path_count": len(test_envs),
+                "seed_repetitions_per_path": 1,
+                "test_seed": walk_forward_config.test_seeds[0],
+                "within_path_bootstrap_independence_unit": (
+                    "arrival_time_block"
+                ),
+                "cross_ticker_summary": "descriptive_not_independent",
+            },
             "global_chronology": global_chronology,
             "environment_fingerprints": environment_fingerprints,
             "selection": {

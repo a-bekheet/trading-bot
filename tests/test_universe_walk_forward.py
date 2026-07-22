@@ -175,6 +175,18 @@ class UniverseWalkForwardTests(TestCase):
         )
         self.assertEqual(fold["heldout"]["aggregate"]["symbol_count"], 2)
         self.assertEqual(fold["heldout"]["aggregate"]["report_count"], 2)
+        self.assertEqual(
+            fold["heldout"]["aggregate"]["scope"],
+            "descriptive_across_ticker_paths",
+        )
+        self.assertEqual(fold["heldout_evaluation_contract"], {
+            "deterministic_policy": True,
+            "path_count": 2,
+            "seed_repetitions_per_path": 1,
+            "test_seed": 31,
+            "within_path_bootstrap_independence_unit": "arrival_time_block",
+            "cross_ticker_summary": "descriptive_not_independent",
+        })
         self.assertTrue(all(
             candidate["slot_churn_rate"] == 0.0
             for candidate in fold["model_selection"]["candidates"]
