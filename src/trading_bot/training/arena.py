@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from trading_bot.market_data.freshness import (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+    underlying_quote_age,
+)
+from trading_bot.market_data.market_state import market_state_features
 from trading_bot.training.dataset import SnapshotDataset
+from trading_bot.training.splits import walk_forward_splits
 from trading_bot.training.trainer import TrainingConfig
 from trading_bot.training.walk_forward import (
     ModelSpec,
@@ -18,12 +25,13 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v7"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v8"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 DEFAULT_ARENA_TRAINING_SEED_OFFSETS = (0, 1, 2)
 DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE = 1e-4
 DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE = 1e-4
 DEFAULT_ARENA_LATEST_FOLD_ONLY = True
+DEFAULT_ARENA_REQUIRE_READY_TAIL = True
 DEFAULT_ARENA_OUTPUT_ROOT = Path("data/agent_runs/recurrent-arena")
 
 
@@ -34,10 +42,109 @@ def default_arena_output_dir(
     timestamp = created_at or datetime.now(timezone.utc)
     if timestamp.tzinfo is None:
         raise ValueError("arena output timestamp must be timezone-aware")
-    run_id = timestamp.astimezone(timezone.utc).strftime(
-        "%Y%m%dT%H%M%S%fZ"
-    )
+    run_id = timestamp.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     return DEFAULT_ARENA_OUTPUT_ROOT / run_id
+
+
+def _has_executable_option_quote(frame) -> bool:
+    if "bid" not in frame or "ask" not in frame:
+        return False
+    for bid, ask in zip(frame["bid"], frame["ask"], strict=True):
+        try:
+            bid_value = float(bid)
+            ask_value = float(ask)
+        except (TypeError, ValueError):
+            continue
+        if (
+            math.isfinite(bid_value)
+            and math.isfinite(ask_value)
+            and bid_value > 0
+            and ask_value > 0
+            and bid_value <= ask_value
+        ):
+            return True
+    return False
+
+
+def _partition_readiness(
+    dataset: SnapshotDataset,
+    max_quote_age_seconds: float,
+) -> dict[str, Any]:
+    regular_count = 0
+    fresh_quote_count = 0
+    executable_quote_count = 0
+    for snapshot in dataset.snapshots:
+        first = snapshot.frame.iloc[0]
+        regular, coverage = market_state_features(first.get("marketState"))
+        regular_count += int(coverage >= 1.0 and regular >= 1.0)
+        quote_age, quote_coverage = underlying_quote_age(
+            snapshot.timestamp,
+            first.get("underlyingQuoteTime"),
+        )
+        fresh_quote_count += int(
+            quote_coverage >= 1.0 and quote_age <= max_quote_age_seconds
+        )
+        executable_quote_count += int(_has_executable_option_quote(snapshot.frame))
+    count = len(dataset)
+    return {
+        "snapshot_count": count,
+        "regular_snapshot_count": regular_count,
+        "fresh_underlying_quote_count": fresh_quote_count,
+        "executable_option_quote_count": executable_quote_count,
+        "first_timestamp": dataset.snapshots[0].timestamp,
+        "last_timestamp": dataset.snapshots[-1].timestamp,
+        "ready": bool(
+            count
+            and regular_count == count
+            and fresh_quote_count == count
+            and executable_quote_count == count
+        ),
+    }
+
+
+def arena_tail_readiness(
+    dataset: SnapshotDataset,
+    walk_forward_config: WalkForwardConfig,
+    *,
+    max_quote_age_seconds: float = DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+) -> dict[str, Any]:
+    """Check whether the latest validation/test tail can support trading evidence."""
+    if not walk_forward_config.latest_fold_only:
+        raise ValueError("arena readiness requires latest_fold_only")
+    if not math.isfinite(max_quote_age_seconds) or max_quote_age_seconds < 0:
+        raise ValueError("max_quote_age_seconds must be finite and non-negative")
+    folds = walk_forward_splits(
+        len(dataset),
+        min_train_size=walk_forward_config.min_train_size,
+        validation_size=walk_forward_config.validation_size,
+        test_size=walk_forward_config.test_size,
+        embargo=walk_forward_config.embargo,
+        step_size=walk_forward_config.step_size,
+        max_train_size=walk_forward_config.max_train_size,
+        latest_only=True,
+    )
+    if not folds:
+        return {
+            "ready": False,
+            "reason": "dataset_too_short",
+            "split": None,
+            "validation": None,
+            "test": None,
+            "max_quote_age_seconds": max_quote_age_seconds,
+        }
+    split = folds[0]
+    _, validation, test = split.apply(dataset)
+    validation_readiness = _partition_readiness(validation, max_quote_age_seconds)
+    test_readiness = _partition_readiness(test, max_quote_age_seconds)
+    ready = validation_readiness["ready"] and test_readiness["ready"]
+    return {
+        "ready": ready,
+        "reason": "ready" if ready else "regular_fresh_executable_tail_required",
+        "split": split.to_dict(),
+        "validation": validation_readiness,
+        "test": test_readiness,
+        "max_quote_age_seconds": max_quote_age_seconds,
+    }
 
 
 def recurrent_arena_models(
@@ -116,6 +223,7 @@ def run_agent_arena(
     model_specs: Sequence[ModelSpec],
     training_config: TrainingConfig,
     env_kwargs: dict[str, Any],
+    require_ready_tail: bool = False,
 ) -> dict[str, Any]:
     """Run independent ticker tournaments and retain explicit failures."""
     normalized_symbols = tuple(
@@ -129,9 +237,38 @@ def run_agent_arena(
     output_dir.mkdir(parents=True, exist_ok=True)
     completed = []
     failures = []
+    preflight = []
+    max_quote_age_seconds = env_kwargs.get(
+        "max_underlying_quote_age_seconds",
+        DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+    )
     for symbol in normalized_symbols:
         try:
-            dataset = SnapshotDataset.from_directory(data_dir, symbol)
+            if walk_forward_config.latest_fold_only:
+                material_dataset = SnapshotDataset.material_from_directory(
+                    data_dir,
+                    symbol,
+                )
+                readiness = arena_tail_readiness(
+                    material_dataset,
+                    walk_forward_config,
+                    max_quote_age_seconds=max_quote_age_seconds,
+                )
+                preflight.append({"symbol": symbol, **readiness})
+                if require_ready_tail and not readiness["ready"]:
+                    failures.append(
+                        {
+                            "symbol": symbol,
+                            "error_type": "InsufficientRegularTail",
+                            "message": readiness["reason"],
+                        }
+                    )
+                    continue
+                dataset = material_dataset.engineered()
+            elif require_ready_tail:
+                raise ValueError("require_ready_tail requires latest_fold_only")
+            else:
+                dataset = SnapshotDataset.from_directory(data_dir, symbol)
             summary = run_walk_forward_training(
                 dataset,
                 walk_forward_config,
@@ -177,6 +314,8 @@ def run_agent_arena(
         "candidate_models": [asdict(spec) for spec in model_specs],
         "training": asdict(training_config),
         "environment": dict(env_kwargs),
+        "require_ready_tail": require_ready_tail,
+        "preflight": preflight,
         "completed": completed,
         "failures": failures,
     }
@@ -184,7 +323,10 @@ def run_agent_arena(
         json.dumps(artifact, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    if not completed:
+    readiness_only = bool(failures) and all(
+        failure["error_type"] == "InsufficientRegularTail" for failure in failures
+    )
+    if not completed and not readiness_only:
         raise RuntimeError("agent arena produced no completed ticker runs")
     return artifact
 
@@ -224,9 +366,7 @@ def _parser() -> argparse.ArgumentParser:
         "--training-seed-offset",
         action="append",
         type=int,
-        help=(
-            "repeat to declare training-seed offsets; defaults to 0, 1, and 2"
-        ),
+        help=("repeat to declare training-seed offsets; defaults to 0, 1, and 2"),
     )
     parser.add_argument(
         "--selection-score-tolerance",
@@ -250,6 +390,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-min-observations", type=int, default=2)
     parser.add_argument("--latency-warmup-iterations", type=int, default=3)
     parser.add_argument("--latency-measured-iterations", type=int, default=20)
+    parser.add_argument(
+        "--allow-unready-tail",
+        action="store_true",
+        help=(
+            "run plumbing experiments even when validation/test are not all "
+            "provider-confirmed regular, fresh, and executable"
+        ),
+    )
     return parser
 
 
@@ -269,13 +417,10 @@ def main() -> None:
                 step_size=args.step_size,
                 latest_fold_only=DEFAULT_ARENA_LATEST_FOLD_ONLY,
                 training_seed_offsets=tuple(
-                    args.training_seed_offset
-                    or DEFAULT_ARENA_TRAINING_SEED_OFFSETS
+                    args.training_seed_offset or DEFAULT_ARENA_TRAINING_SEED_OFFSETS
                 ),
                 selection_score_tolerance=args.selection_score_tolerance,
-                activation_min_score_advantage=(
-                    args.activation_min_score_advantage
-                ),
+                activation_min_score_advantage=(args.activation_min_score_advantage),
                 bootstrap_samples=args.bootstrap_samples,
                 bootstrap_min_observations=args.bootstrap_min_observations,
                 latency_warmup_iterations=args.latency_warmup_iterations,
@@ -300,6 +445,9 @@ def main() -> None:
                 "slot_count": args.slot_count,
                 "max_quantity": args.max_quantity,
             },
+            require_ready_tail=(
+                DEFAULT_ARENA_REQUIRE_READY_TAIL and not args.allow_unready_tail
+            ),
         )
     except (ValueError, RuntimeError) as error:
         raise SystemExit(str(error)) from error

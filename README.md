@@ -74,13 +74,17 @@ streamlit run src/trading_bot/interface/app.py
 ```
 
 The first tab is an agent-results workspace. It discovers saved walk-forward
-runs under `data/agent_runs/`, ranks flat and surface-GNN GRU/LSTM/mixture
-candidates on validation, and shows only the validation-selected winner on the
-held-out slice. The view includes the selected encoder, stored equity path,
-risk and turnover, actor-only latency, actual simulated fills, and artifact
-provenance. A conservative promotion gate requires positive held-out and
-doubled-cost returns, improvement over no-op with statistical support, adequate
-history, regular-session provenance, and no invalid actions.
+runs under `data/agent_runs/` and presents the newest selected policy for every
+ticker as a persisted agent with a stable ID, checkpoint, recurrent core,
+flat/GNN topology, activation state, latency, held-out return, and latest action.
+Its decision tape retains HOLD decisions as well as fills and shows the learned
+research action beside the action actually permitted by the sandbox guard. The
+complete flat and surface-GNN GRU/LSTM/mixture challenger fleet remains
+inspectable below the roster. Candidates are ranked on validation, and only the
+fixed winner is opened on the held-out slice. A conservative promotion gate
+requires positive held-out and doubled-cost returns, improvement over no-op with
+statistical support, adequate history, regular-session provenance, and no
+invalid actions.
 
 The remaining tabs let you choose a ticker, inspect its latest call or put
 snapshot, and submit fake option orders. Paper buys fill at the saved ask and
@@ -111,7 +115,11 @@ leader, with a one-basis-point materiality floor, then prefers the existing
 ablation, actor-latency, and complexity ordering. A separate validation-only
 gate requires the winner to beat no-op by one basis point before the sandbox
 will invoke it; otherwise the research result stays visible while the active
-policy abstains.
+policy abstains. Before any model is trained, the default arena also requires
+every validation and test state to be provider-confirmed regular, have a fresh
+underlying timestamp, and contain an executable option quote. An unready run
+writes a readiness manifest and exits successfully without training; use
+`--allow-unready-tail` only for an explicit plumbing experiment.
 
 For a one-ticker drill-down with explicit settings:
 
@@ -860,6 +868,34 @@ now write collision-resistant timestamped run directories, while the interface
 shows each held-out time range and preserves prior runs for drill-down.
 Walk-forward, universe, and arena schemas advance to v63, v46, and v7; package
 version is 0.80.0.
+
+v0.81 adds a pre-training economic-evidence gate to the default arena. The
+latest-fold correction exposed that a fully pre-market validation/test tail can
+only produce masked no-op decisions, making 225 training replicates incapable
+of generating useful agent evidence. The arena now checks every validation and
+test state for provider-confirmed regular session, a covered underlying quote no
+older than the environment threshold, and at least one positive non-crossed
+option quote. Unready tickers record exact counts and timestamps in
+`agent-arena.json`; if every ticker is waiting, the command completes without
+calling the trainer. Streamlit shows ready ticker count plus regular, fresh, and
+executable validation/test counts while retaining the last successful agents.
+The Agent Lab makes those retained policies tangible: one card per ticker, a
+registry with checkpoint and model identity, the full recurrent/GNN candidate
+fleet, and a per-step decision tape that distinguishes research HOLD, unfilled
+or blocked intent, and sandbox-enforced HOLD.
+
+The first live preflight found 0/5 tickers ready: all underlying timestamps were
+fresh, but every tail state was pre-market, and AAPL/NVDA also had no executable
+option quote in those partitions. The first gate avoided training in 7.04
+seconds. Loading only raw materially deduplicated snapshots before the gate then
+reduced the same run to 1.48 seconds, 79% faster than the initial gate and about
+97% faster than the roughly 47-second full arena. Full causal feature engineering
+is deferred until a ticker passes. This is compute and evidence hygiene, not
+alpha. The current persisted arena exposes five guarded agents, 75 candidate
+configurations (30 surface-GNN), 225 independently trained seed replicates, and
+15 explicit held-out HOLD decisions; the guard, not missing model artifacts,
+accounts for the zero operational fills. Arena schema advances to v8; package
+version is 0.81.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The

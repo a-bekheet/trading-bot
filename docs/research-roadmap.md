@@ -427,6 +427,28 @@ fills. This supersedes the old negative legacy-fallback paths as the current
 operational view but supplies no feature or return evidence; wait for a locked
 regular-session range before the next economic comparison.
 
+The v0.81 pre-training gate now refuses to spend an arena budget when that
+latest tail cannot possibly contain an executable decision. It requires every
+validation/test state to be provider-confirmed regular, have a fresh timestamped
+underlying quote, and contain a positive non-crossed option quote. Raw material
+snapshot loading lets an unready five-ticker job stop in 1.48 seconds instead of
+roughly 47 seconds of model training, while its timestamped manifest exposes the
+missing evidence in Streamlit. This gate does not make data sufficient or a
+policy profitable; it prevents masked pre-market paths from masquerading as an
+agent comparison and preserves compute for the first locked regular-session
+experiment.
+
+The v0.81 Agent Lab projects the last successful artifacts as operating objects
+rather than experiment rows. Each ticker has a stable selected-agent identity,
+checkpoint, recurrent core, flat or surface-GNN topology, activation state,
+latency, held-out outcome, and explicit decision tape. Research actions and
+sandbox actions remain separate so a validation guard cannot make a saved model
+appear to have vanished. On the current five-ticker artifact this exposes 75
+candidate configurations, including 30 surface-GNN challengers and 225 training-
+seed replicates, while honestly showing five guarded flat-GRU winners and 15
+held-out HOLD decisions. The next economic result still requires a locked
+regular-session tail; UI visibility is not evidence of alpha.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

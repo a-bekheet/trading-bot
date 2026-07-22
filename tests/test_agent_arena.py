@@ -5,18 +5,37 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 
+from trading_bot.training.dataset import Snapshot, SnapshotDataset
 from trading_bot.training.arena import (
     AGENT_ARENA_SCHEMA_VERSION,
     DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE,
     DEFAULT_ARENA_LATEST_FOLD_ONLY,
+    DEFAULT_ARENA_REQUIRE_READY_TAIL,
     DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE,
     DEFAULT_ARENA_TRAINING_SEED_OFFSETS,
+    _parser,
+    arena_tail_readiness,
     default_arena_output_dir,
     recurrent_arena_models,
     run_agent_arena,
 )
 from trading_bot.training.trainer import TrainingConfig
 from trading_bot.training.walk_forward import WalkForwardConfig
+from tests.test_walk_forward import walk_forward_dataset
+
+
+def readiness_dataset(*, last_state: str = "REGULAR") -> SnapshotDataset:
+    snapshots = []
+    source = walk_forward_dataset()
+    for index, snapshot in enumerate(source.snapshots):
+        frame = snapshot.frame.copy()
+        timestamp = str(frame["collectedAt"].iloc[0])
+        frame["marketState"] = (
+            last_state if index == len(source.snapshots) - 1 else "REGULAR"
+        )
+        frame["underlyingQuoteTime"] = timestamp
+        snapshots.append(Snapshot(timestamp, frame))
+    return SnapshotDataset(tuple(snapshots), "TEST")
 
 
 class AgentArenaTests(TestCase):
@@ -25,10 +44,7 @@ class AgentArenaTests(TestCase):
             default_arena_output_dir(
                 datetime(2026, 7, 22, 13, 40, 5, 123456, tzinfo=timezone.utc)
             ),
-            Path(
-                "data/agent_runs/recurrent-arena/"
-                "20260722T134005123456Z"
-            ),
+            Path("data/agent_runs/recurrent-arena/20260722T134005123456Z"),
         )
         with self.assertRaisesRegex(ValueError, "timezone-aware"):
             default_arena_output_dir(datetime(2026, 7, 22))
@@ -36,10 +52,65 @@ class AgentArenaTests(TestCase):
     def test_default_arena_uses_three_training_seeds(self):
         self.assertEqual(DEFAULT_ARENA_TRAINING_SEED_OFFSETS, (0, 1, 2))
         self.assertEqual(DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE, 1e-4)
-        self.assertEqual(
-            DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE, 1e-4
-        )
+        self.assertEqual(DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE, 1e-4)
         self.assertTrue(DEFAULT_ARENA_LATEST_FOLD_ONLY)
+        self.assertTrue(DEFAULT_ARENA_REQUIRE_READY_TAIL)
+        self.assertFalse(_parser().parse_args([]).allow_unready_tail)
+        self.assertTrue(
+            _parser().parse_args(["--allow-unready-tail"]).allow_unready_tail
+        )
+
+    def test_tail_readiness_requires_regular_fresh_executable_partitions(self):
+        config = WalkForwardConfig(3, 2, 2, latest_fold_only=True)
+
+        ready = arena_tail_readiness(readiness_dataset(), config)
+        waiting = arena_tail_readiness(
+            readiness_dataset(last_state="PRE"),
+            config,
+        )
+
+        self.assertTrue(ready["ready"])
+        self.assertEqual(ready["validation"]["regular_snapshot_count"], 2)
+        self.assertEqual(ready["test"]["fresh_underlying_quote_count"], 2)
+        self.assertEqual(ready["test"]["executable_option_quote_count"], 2)
+        self.assertFalse(waiting["ready"])
+        self.assertEqual(waiting["test"]["regular_snapshot_count"], 1)
+
+    def test_unready_tail_skips_training_and_persists_preflight(self):
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "trading_bot.training.arena.SnapshotDataset.material_from_directory",
+                return_value=readiness_dataset(last_state="PRE"),
+            ),
+            patch(
+                "trading_bot.training.arena.run_walk_forward_training",
+            ) as runner,
+        ):
+            output_dir = Path(directory) / "arena"
+            result = run_agent_arena(
+                data_dir=Path(directory),
+                output_dir=output_dir,
+                symbols=("TEST",),
+                walk_forward_config=WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    latest_fold_only=True,
+                ),
+                model_specs=recurrent_arena_models(hidden_size=4),
+                training_config=TrainingConfig(episodes=1),
+                env_kwargs={"slot_count": 2},
+                require_ready_tail=True,
+            )
+
+        self.assertEqual(result["completed"], [])
+        self.assertEqual(
+            result["failures"][0]["error_type"],
+            "InsufficientRegularTail",
+        )
+        self.assertFalse(result["preflight"][0]["ready"])
+        runner.assert_not_called()
 
     def test_fixed_arena_adds_surface_gnns_and_matched_signal_ablations(self):
         models = recurrent_arena_models(hidden_size=12)
@@ -114,8 +185,7 @@ class AgentArenaTests(TestCase):
         )
         self.assertTrue(
             all(
-                model.disabled_feature_groups
-                == ("contract_smile_residual",)
+                model.disabled_feature_groups == ("contract_smile_residual",)
                 for model in models[9:]
             )
         )

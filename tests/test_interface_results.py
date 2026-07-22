@@ -5,8 +5,12 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from trading_bot.interface.results import (
+    agent_decision_tape,
     agent_leaderboard,
+    agent_roster,
+    arena_readiness_overview,
     arena_overview,
+    discover_agent_arena_manifests,
     discover_agent_runs,
     equity_curve,
     evidence_summary,
@@ -114,6 +118,84 @@ def result_summary():
 
 
 class InterfaceResultTests(TestCase):
+    def test_projects_tangible_agent_roster_and_guarded_decision_tape(self):
+        summary = result_summary()
+        summary["_run_name"] = "latest-arena"
+        fold = summary["folds"][0]
+        fold["checkpoint"] = "TEST-fold-000-gru.pt"
+        fold["test_data_quality"] = {
+            "first_timestamp": "2026-01-01T15:00:00Z",
+            "last_timestamp": "2026-01-01T15:01:00Z",
+        }
+        fold["model_selection"]["activation_gate"] = {
+            "activated": False,
+            "score_advantage": -0.0002,
+        }
+
+        tape = agent_decision_tape(summary, 0)
+        roster = agent_roster([summary])
+
+        self.assertEqual(len(tape), 1)
+        self.assertEqual(tape.iloc[0]["Research action"], "BUY · 1 fill")
+        self.assertEqual(tape.iloc[0]["Sandbox action"], "HOLD (guard)")
+        self.assertEqual(tape.iloc[0]["Requested legs"], 1)
+        self.assertEqual(tape.iloc[0]["Activation"], "Guarded")
+        self.assertEqual(len(roster), 1)
+        self.assertEqual(roster.iloc[0]["Agent ID"], "TEST-gru")
+        self.assertEqual(roster.iloc[0]["State"], "Guarded / no-op")
+        self.assertEqual(roster.iloc[0]["Topology"], "Flat vector")
+        self.assertEqual(roster.iloc[0]["Last research action"], "BUY · 1 fill")
+        self.assertEqual(roster.iloc[0]["Last sandbox action"], "HOLD (guard)")
+        self.assertEqual(roster.iloc[0]["Checkpoint"], "TEST-fold-000-gru.pt")
+        self.assertAlmostEqual(
+            roster.iloc[0]["Validation edge vs no-op (bp)"],
+            -2.0,
+        )
+
+    def test_discovers_and_projects_readiness_only_arena_manifest(self):
+        manifest = {
+            "schema_version": "research-demo.agent-arena.v8",
+            "preflight": [
+                {
+                    "symbol": "AAPL",
+                    "ready": False,
+                    "reason": "regular_fresh_executable_tail_required",
+                    "validation": {
+                        "snapshot_count": 3,
+                        "regular_snapshot_count": 0,
+                        "fresh_underlying_quote_count": 3,
+                        "executable_option_quote_count": 3,
+                    },
+                    "test": {
+                        "snapshot_count": 4,
+                        "regular_snapshot_count": 1,
+                        "fresh_underlying_quote_count": 4,
+                        "executable_option_quote_count": 4,
+                        "first_timestamp": "2026-07-22T13:00:00Z",
+                        "last_timestamp": "2026-07-22T13:45:00Z",
+                    },
+                }
+            ],
+        }
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            run_dir = data_dir / "agent_runs" / "arena" / "run-id"
+            run_dir.mkdir(parents=True)
+            (run_dir / "agent-arena.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+
+            manifests = discover_agent_arena_manifests(data_dir)
+            readiness = arena_readiness_overview(manifests[0])
+
+        self.assertEqual(len(manifests), 1)
+        self.assertEqual(manifests[0]["_run_name"], "run-id")
+        self.assertEqual(readiness.iloc[0]["Ready"], "Waiting")
+        self.assertEqual(readiness.iloc[0]["Validation regular"], 0)
+        self.assertEqual(readiness.iloc[0]["Test regular"], 1)
+        self.assertEqual(readiness.iloc[0]["Test end"], "2026-07-22T13:45:00Z")
+
     def test_discovers_only_walk_forward_artifacts(self):
         with TemporaryDirectory() as directory:
             data_dir = Path(directory)

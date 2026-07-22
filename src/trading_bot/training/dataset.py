@@ -18,8 +18,17 @@ from trading_bot.training.features import (
 
 
 REQUIRED_COLUMNS = {
-    "collectedAt", "contractSymbol", "symbol", "expiration", "optionType",
-    "strike", "bid", "ask", "lastPrice", "impliedVolatility", "underlyingPrice",
+    "collectedAt",
+    "contractSymbol",
+    "symbol",
+    "expiration",
+    "optionType",
+    "strike",
+    "bid",
+    "ask",
+    "lastPrice",
+    "impliedVolatility",
+    "underlyingPrice",
 }
 
 
@@ -40,7 +49,12 @@ class SnapshotDataset:
         self._fingerprint: str | None = None
 
     @classmethod
-    def from_directory(cls, data_dir: Path, symbol: str) -> "SnapshotDataset":
+    def material_from_directory(
+        cls,
+        data_dir: Path,
+        symbol: str,
+    ) -> "SnapshotDataset":
+        """Load and deduplicate raw material snapshots without engineering."""
         path = data_dir / f"{symbol.upper()}.csv"
         if not path.exists():
             raise FileNotFoundError(path)
@@ -53,18 +67,35 @@ class SnapshotDataset:
             frame = frame[frame["greekModel"].eq("black-scholes-merton")]
         frame = frame.copy()
         frame["collectedAt"] = pd.to_datetime(frame["collectedAt"], utc=True)
-        frame = frame.sort_values(["collectedAt", "optionType", "expiration", "strike", "contractSymbol"])
+        frame = frame.sort_values(
+            ["collectedAt", "optionType", "expiration", "strike", "contractSymbol"]
+        )
         snapshots_list = []
-        previous = None
         previous_material_fingerprint = None
-        spot_history: list[tuple[pd.Timestamp, float]] = []
-        benchmark_history: list[tuple[pd.Timestamp, float]] = []
-        benchmark_history_symbol: str | None = None
-        volatility_history: list[tuple[float | None, float | None]] = []
         for timestamp, group in frame.groupby("collectedAt", sort=True):
             material_fingerprint = material_snapshot_fingerprint(group)
             if material_fingerprint == previous_material_fingerprint:
                 continue
+            snapshots_list.append(
+                Snapshot(
+                    timestamp=timestamp.isoformat(),
+                    frame=group.reset_index(drop=True),
+                )
+            )
+            previous_material_fingerprint = material_fingerprint
+        return cls(tuple(snapshots_list), symbol.upper())
+
+    def engineered(self) -> "SnapshotDataset":
+        """Engineer one already deduplicated raw dataset causally."""
+        snapshots_list = []
+        previous = None
+        spot_history: list[tuple[pd.Timestamp, float]] = []
+        benchmark_history: list[tuple[pd.Timestamp, float]] = []
+        benchmark_history_symbol: str | None = None
+        volatility_history: list[tuple[float | None, float | None]] = []
+        for snapshot in self.snapshots:
+            timestamp = pd.Timestamp(snapshot.timestamp)
+            group = snapshot.frame
             spot = pd.to_numeric(group["underlyingPrice"], errors="coerce").iloc[0]
             spot_history.append((timestamp, float(spot)))
             benchmark_point = benchmark_history_point(group)
@@ -75,12 +106,8 @@ class SnapshotDataset:
                 and current_benchmark_symbol != benchmark_history_symbol
             ):
                 benchmark_history = []
-            if (
-                benchmark_point is not None
-                and (
-                    not benchmark_history
-                    or benchmark_point[0] > benchmark_history[-1][0]
-                )
+            if benchmark_point is not None and (
+                not benchmark_history or benchmark_point[0] > benchmark_history[-1][0]
             ):
                 benchmark_history.append(benchmark_point)
                 benchmark_history_symbol = current_benchmark_symbol
@@ -91,14 +118,17 @@ class SnapshotDataset:
                 benchmark_history=benchmark_history,
                 volatility_history=volatility_history,
             )
-            snapshots_list.append(Snapshot(timestamp=timestamp.isoformat(), frame=engineered))
-            volatility_history.append(
-                volatility_regime_observation(engineered)
+            snapshots_list.append(
+                Snapshot(timestamp=timestamp.isoformat(), frame=engineered)
             )
+            volatility_history.append(volatility_regime_observation(engineered))
             previous = engineered
-            previous_material_fingerprint = material_fingerprint
-        snapshots = tuple(snapshots_list)
-        return cls(snapshots, symbol.upper())
+        return SnapshotDataset(tuple(snapshots_list), self.symbol)
+
+    @classmethod
+    def from_directory(cls, data_dir: Path, symbol: str) -> "SnapshotDataset":
+        """Load, materially deduplicate, and causally engineer snapshots."""
+        return cls.material_from_directory(data_dir, symbol).engineered()
 
     def __len__(self) -> int:
         return len(self.snapshots)
@@ -122,7 +152,9 @@ class SnapshotDataset:
                     pd.util.hash_pandas_object(
                         snapshot.frame,
                         index=True,
-                    ).to_numpy().tobytes()
+                    )
+                    .to_numpy()
+                    .tobytes()
                 )
             self._fingerprint = digest.hexdigest()
         return self._fingerprint

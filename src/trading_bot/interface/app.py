@@ -16,8 +16,12 @@ from trading_bot.interface.data import (
     market_session_status,
 )
 from trading_bot.interface.results import (
+    agent_decision_tape,
     agent_leaderboard,
+    agent_roster,
+    arena_readiness_overview,
     arena_overview,
+    discover_agent_arena_manifests,
     discover_agent_runs,
     equity_curve,
     evidence_summary,
@@ -98,6 +102,41 @@ agent_tab, market_tab, portfolio_tab, history_tab = st.tabs(
 
 with agent_tab:
     runs = discover_agent_runs(DATA_DIR)
+    arena_manifests = discover_agent_arena_manifests(DATA_DIR)
+    readiness = (
+        arena_readiness_overview(arena_manifests[0])
+        if arena_manifests
+        else pd.DataFrame()
+    )
+    if not readiness.empty:
+        ready_count = int((readiness["Ready"] == "Yes").sum())
+        readiness_columns = st.columns(3)
+        readiness_columns[0].metric(
+            "Arena tails ready",
+            f"{ready_count}/{len(readiness)}",
+        )
+        readiness_columns[1].metric(
+            "Regular validation states",
+            int(readiness["Validation regular"].sum()),
+        )
+        readiness_columns[2].metric(
+            "Regular test states",
+            int(readiness["Test regular"].sum()),
+        )
+        if ready_count < len(readiness):
+            st.warning(
+                "The newest arena preflight is waiting for every validation "
+                "and test state to be provider-confirmed regular, carry a "
+                "fresh underlying quote, and contain an executable option "
+                "quote. Expensive agent training is skipped until then."
+            )
+        else:
+            st.success(
+                "The newest arena validation/test tails passed the regular, "
+                "fresh, and executable pre-training gate."
+            )
+        with st.expander("Arena evidence readiness"):
+            st.dataframe(readiness, width="stretch", hide_index=True)
     if not runs:
         st.subheader("No walk-forward agent run yet")
         st.write(
@@ -116,6 +155,143 @@ with agent_tab:
             language="bash",
         )
     else:
+        roster = agent_roster(runs)
+        st.subheader("Persisted trading agents")
+        st.caption(
+            "One validation-selected policy per ticker from the newest successful "
+            "run. Guarded agents still exist and retain their checkpoints and "
+            "research decisions; the sandbox executes no-op until their "
+            "validation edge clears the activation gate."
+        )
+        if roster.empty:
+            st.info("Saved runs were found, but none contains a selected policy.")
+        else:
+            latest_runs = {}
+            for saved_run in runs:
+                ticker = str(saved_run.get("symbol", "")).upper()
+                if ticker and ticker not in latest_runs:
+                    latest_runs[ticker] = saved_run
+            candidate_frames = []
+            for ticker, latest_run in latest_runs.items():
+                candidates = agent_leaderboard(latest_run).copy()
+                if candidates.empty:
+                    continue
+                candidates.insert(0, "Ticker", ticker)
+                candidate_frames.append(candidates)
+            candidate_fleet = (
+                pd.concat(candidate_frames, ignore_index=True)
+                if candidate_frames
+                else pd.DataFrame()
+            )
+            gnn_candidates = (
+                int(
+                    candidate_fleet["Architecture"]
+                    .str.contains("Graph", case=False, na=False)
+                    .sum()
+                )
+                if not candidate_fleet.empty
+                else 0
+            )
+            roster_metrics = st.columns(6)
+            roster_metrics[0].metric("Persisted agents", len(roster))
+            roster_metrics[1].metric(
+                "Sandbox active",
+                int((roster["State"] == "Paper active").sum()),
+            )
+            roster_metrics[2].metric("GNN challengers", gnn_candidates)
+            roster_metrics[3].metric(
+                "Recorded decisions", int(roster["Decisions"].sum())
+            )
+            roster_metrics[4].metric(
+                "Research fills",
+                int(roster["Research executions"].sum()),
+            )
+            roster_metrics[5].metric(
+                "Median actor latency",
+                f"{float(roster['Median latency (us)'].median()):.1f} us",
+            )
+
+            card_columns = st.columns(min(3, len(roster)))
+            for index, (_, agent) in enumerate(roster.iterrows()):
+                with card_columns[index % len(card_columns)]:
+                    with st.container(border=True):
+                        st.markdown(
+                            f"#### {agent['Ticker']} · {agent['Research policy']}"
+                        )
+                        st.caption(str(agent["Agent ID"]))
+                        st.write(f"**{agent['State']}** · {agent['Topology']}")
+                        st.metric(
+                            "Held-out return",
+                            f"{float(agent['Held-out return']):.3%}",
+                        )
+                        st.write(
+                            f"Last research decision: **{agent['Last research action']}**"
+                        )
+                        st.caption(
+                            f"Sandbox: {agent['Last sandbox action']} · "
+                            f"{float(agent['Median latency (us)']):.1f} us · "
+                            f"{int(agent['Training seeds'])} training seeds"
+                        )
+
+            selected_agent_ticker = st.selectbox(
+                "Inspect agent decision tape",
+                tuple(roster["Ticker"]),
+                key="agent_decision_tape_ticker",
+            )
+            selected_agent_run = latest_runs[selected_agent_ticker]
+            selected_agent_fold = max(
+                selected_agent_run.get("folds", []),
+                key=lambda item: int(item.get("fold", -1)),
+            )
+            decisions = agent_decision_tape(
+                selected_agent_run,
+                int(selected_agent_fold.get("fold", 0)),
+            )
+            st.subheader(f"{selected_agent_ticker} agent decision tape")
+            st.caption(
+                "Every research-policy decision is retained, including HOLD. "
+                "Sandbox action shows the order surface that was actually "
+                "allowed to operate after the validation-only guard."
+            )
+            if decisions.empty:
+                st.info("This older agent artifact does not contain a decision trace.")
+            else:
+                st.dataframe(
+                    decisions.sort_values("Timestamp", ascending=False),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Reward": st.column_config.NumberColumn(format="%.6f"),
+                        "NAV": st.column_config.NumberColumn(format="$%.2f"),
+                    },
+                )
+            with st.expander("Agent registry and complete candidate fleet"):
+                st.dataframe(
+                    roster,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Held-out return": st.column_config.NumberColumn(
+                            format="percent"
+                        ),
+                        "Sandbox return": st.column_config.NumberColumn(
+                            format="percent"
+                        ),
+                        "Validation edge vs no-op (bp)": (
+                            st.column_config.NumberColumn(format="%.3f")
+                        ),
+                        "Median latency (us)": st.column_config.NumberColumn(
+                            format="%.1f"
+                        ),
+                    },
+                )
+                if not candidate_fleet.empty:
+                    st.dataframe(
+                        candidate_fleet,
+                        width="stretch",
+                        hide_index=True,
+                    )
+
         arena = arena_overview(runs)
         if len(arena) > 1:
             st.subheader("Cross-ticker agent arena")
@@ -159,10 +335,12 @@ with agent_tab:
             with arena_chart:
                 st.caption("Research winner versus activated sandbox return")
                 st.bar_chart(
-                    arena.set_index("Ticker")[[
-                        "Held-out return",
-                        "Sandbox return",
-                    ]],
+                    arena.set_index("Ticker")[
+                        [
+                            "Held-out return",
+                            "Sandbox return",
+                        ]
+                    ],
                     height=260,
                 )
             with winner_chart:
@@ -204,25 +382,20 @@ with agent_tab:
                     "contract-level smile residual removed. Positive feature "
                     "lift means the signal helped; held-out data is excluded."
                 )
-                grouped = (
-                    ablations.groupby(["Encoder", "Agent"], as_index=False)
-                    .agg(
-                        **{
-                            "Mean feature lift (bp)": (
-                                "Feature lift (bp)",
-                                "mean",
-                            ),
-                            "Helped tickers": (
-                                "Feature helped",
-                                lambda values: int((values == "Yes").sum()),
-                            ),
-                            "Evaluated tickers": ("Ticker", "nunique"),
-                        }
-                    )
+                grouped = ablations.groupby(["Encoder", "Agent"], as_index=False).agg(
+                    **{
+                        "Mean feature lift (bp)": (
+                            "Feature lift (bp)",
+                            "mean",
+                        ),
+                        "Helped tickers": (
+                            "Feature helped",
+                            lambda values: int((values == "Yes").sum()),
+                        ),
+                        "Evaluated tickers": ("Ticker", "nunique"),
+                    }
                 )
-                grouped["Candidate"] = (
-                    grouped["Encoder"] + " / " + grouped["Agent"]
-                )
+                grouped["Candidate"] = grouped["Encoder"] + " / " + grouped["Agent"]
                 ablation_chart, ablation_table = st.columns((2, 3))
                 with ablation_chart:
                     st.bar_chart(
@@ -339,24 +512,16 @@ with agent_tab:
         )
         mean_return = float(heldout["Test return"].mean()) if not heldout.empty else 0.0
         activation = (
-            str(heldout.iloc[0]["Activation"])
-            if not heldout.empty
-            else "Unavailable"
+            str(heldout.iloc[0]["Activation"]) if not heldout.empty else "Unavailable"
         )
         sandbox_return = (
-            float(heldout["Sandbox return"].mean())
-            if not heldout.empty
-            else 0.0
+            float(heldout["Sandbox return"].mean()) if not heldout.empty else 0.0
         )
         sandbox_executions = (
-            int(heldout["Sandbox executions"].sum())
-            if not heldout.empty
-            else 0
+            int(heldout["Sandbox executions"].sum()) if not heldout.empty else 0
         )
         sandbox_latency = (
-            float(heldout["Sandbox latency (us)"].mean())
-            if not heldout.empty
-            else 0.0
+            float(heldout["Sandbox latency (us)"].mean()) if not heldout.empty else 0.0
         )
         metric_columns = st.columns(8)
         metric_columns[0].metric("Agents compared", len(leaderboard))

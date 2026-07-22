@@ -44,6 +44,197 @@ def discover_agent_runs(data_dir: Path) -> list[dict[str, Any]]:
     return sorted(runs, key=lambda run: run["_modified_at"], reverse=True)
 
 
+def discover_agent_arena_manifests(data_dir: Path) -> list[dict[str, Any]]:
+    """Load arena orchestration manifests, including readiness-only attempts."""
+    paths = {
+        path.resolve()
+        for path in data_dir.glob("agent_runs/**/agent-arena.json")
+        if path.is_file()
+    }
+    manifests = []
+    for path in paths:
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not str(manifest.get("schema_version", "")).startswith(
+            "research-demo.agent-arena."
+        ):
+            continue
+        manifest["_artifact_path"] = str(path)
+        manifest["_modified_at"] = path.stat().st_mtime
+        manifest["_run_name"] = path.parent.name
+        manifests.append(manifest)
+    return sorted(
+        manifests,
+        key=lambda manifest: manifest["_modified_at"],
+        reverse=True,
+    )
+
+
+def arena_readiness_overview(manifest: dict[str, Any]) -> pd.DataFrame:
+    """Project validation/test evidence readiness before expensive training."""
+    records = []
+    for item in manifest.get("preflight", []):
+        validation = item.get("validation") or {}
+        test = item.get("test") or {}
+        records.append(
+            {
+                "Ticker": str(item.get("symbol", "unknown")).upper(),
+                "Ready": "Yes" if item.get("ready") else "Waiting",
+                "Reason": _humanize(str(item.get("reason", "unknown"))),
+                "Validation snapshots": int(validation.get("snapshot_count", 0)),
+                "Validation regular": int(validation.get("regular_snapshot_count", 0)),
+                "Validation fresh": int(
+                    validation.get("fresh_underlying_quote_count", 0)
+                ),
+                "Validation executable": int(
+                    validation.get("executable_option_quote_count", 0)
+                ),
+                "Test snapshots": int(test.get("snapshot_count", 0)),
+                "Test regular": int(test.get("regular_snapshot_count", 0)),
+                "Test fresh": int(test.get("fresh_underlying_quote_count", 0)),
+                "Test executable": int(test.get("executable_option_quote_count", 0)),
+                "Test start": test.get("first_timestamp", "Unknown"),
+                "Test end": test.get("last_timestamp", "Unknown"),
+            }
+        )
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records).sort_values("Ticker").reset_index(drop=True)
+
+
+def agent_decision_tape(
+    summary: dict[str, Any],
+    fold_number: int,
+) -> pd.DataFrame:
+    """Project every held-out policy decision, including explicit holds."""
+    fold = _fold(summary, fold_number)
+    winner = _selected_candidate(fold)
+    model = winner.get("model", {})
+    activation_gate = fold.get("model_selection", {}).get("activation_gate", {})
+    activated = bool(activation_gate.get("activated", True))
+    symbol = str(summary.get("symbol", "unknown")).upper()
+    records = []
+    traces = fold.get("heldout_traces", {}).get("agent", [])
+    for path_index, trace in enumerate(traces):
+        for decision_index, decision in enumerate(trace.get("decisions", [])):
+            orders = tuple(int(value) for value in decision.get("orders", []))
+            executions = decision.get("executions", [])
+            research_action = _decision_label(
+                orders,
+                executions,
+                int(decision.get("invalid_actions", 0)),
+            )
+            records.append(
+                {
+                    "Timestamp": decision.get("decision_timestamp"),
+                    "Arrival": decision.get("arrival_timestamp"),
+                    "Ticker": symbol,
+                    "Agent": _agent_label(winner),
+                    "Topology": _topology_label(model),
+                    "Path": path_index,
+                    "Decision": decision_index,
+                    "Research action": research_action,
+                    "Sandbox action": research_action if activated else "HOLD (guard)",
+                    "Requested legs": sum(value != 0 for value in orders),
+                    "Executions": len(executions),
+                    "Invalid actions": int(decision.get("invalid_actions", 0)),
+                    "Reward": _number(decision.get("reward")),
+                    "NAV": _number(decision.get("nav")),
+                    "Activation": "Active" if activated else "Guarded",
+                }
+            )
+    frame = pd.DataFrame(records)
+    if not frame.empty:
+        frame["Timestamp"] = pd.to_datetime(frame["Timestamp"], utc=True)
+        frame["Arrival"] = pd.to_datetime(frame["Arrival"], utc=True)
+    return frame
+
+
+def agent_roster(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
+    """Describe the latest persisted selected policy for each ticker."""
+    newest_by_symbol: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        symbol = str(run.get("symbol", "")).upper()
+        if symbol and symbol not in newest_by_symbol:
+            newest_by_symbol[symbol] = run
+
+    records = []
+    for symbol, run in newest_by_symbol.items():
+        folds = run.get("folds", [])
+        if not folds:
+            continue
+        fold = max(folds, key=lambda item: int(item.get("fold", -1)))
+        winner = _selected_candidate(fold)
+        if not winner:
+            continue
+        model = winner.get("model", {})
+        model_id = str(winner.get("model_id", "unknown"))
+        gate = fold.get("model_selection", {}).get("activation_gate", {})
+        activated = bool(gate.get("activated", True))
+        reports = heldout_results(run)
+        fold_number = int(fold.get("fold", 0))
+        report = reports[reports["Fold"] == fold_number]
+        activity = agent_decision_tape(run, fold_number)
+        latest = activity.iloc[-1] if not activity.empty else None
+        aggregate = report.iloc[0] if not report.empty else None
+        data_quality = fold.get("test_data_quality", {})
+        training_seed_count = int(
+            winner.get("training_seed_aggregate", {}).get("training_seed_count", 1)
+        )
+        records.append(
+            {
+                "Agent ID": f"{symbol}-{model_id}",
+                "Ticker": symbol,
+                "State": "Paper active" if activated else "Guarded / no-op",
+                "Research policy": _agent_label(winner),
+                "Temporal core": _humanize(str(model.get("kind", "unknown"))),
+                "Topology": _topology_label(model),
+                "Architecture": _architecture_label(model),
+                "Algorithm": str(model.get("algorithm", "unknown")).upper(),
+                "Action policy": _decoder_label(model),
+                "Feature set": _feature_set_label(model),
+                "Training seeds": training_seed_count,
+                "Validation edge vs no-op (bp)": 10_000.0
+                * _number(gate.get("score_advantage")),
+                "Held-out return": (
+                    float(aggregate["Test return"])
+                    if aggregate is not None
+                    else float("nan")
+                ),
+                "Sandbox return": (
+                    float(aggregate["Sandbox return"])
+                    if aggregate is not None
+                    else float("nan")
+                ),
+                "Decisions": len(activity),
+                "Research executions": (
+                    int(aggregate["Executions"]) if aggregate is not None else 0
+                ),
+                "Sandbox executions": (
+                    int(aggregate["Sandbox executions"]) if aggregate is not None else 0
+                ),
+                "Last research action": (
+                    str(latest["Research action"]) if latest is not None else "No trace"
+                ),
+                "Last sandbox action": (
+                    str(latest["Sandbox action"]) if latest is not None else "No trace"
+                ),
+                "Median latency (us)": _number(
+                    winner.get("inference_latency", {}).get("median_microseconds")
+                ),
+                "Checkpoint": str(fold.get("checkpoint", "Unavailable")),
+                "Test start": data_quality.get("first_timestamp", "Unknown"),
+                "Test end": data_quality.get("last_timestamp", "Unknown"),
+                "Experiment": run.get("_run_name", "unknown"),
+            }
+        )
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records).sort_values("Ticker").reset_index(drop=True)
+
+
 def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
     """Aggregate validation-only candidate evidence across folds."""
     records: list[dict[str, Any]] = []
@@ -62,9 +253,7 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
                     "Agent": AGENT_LABELS.get(kind, kind.upper()),
                     "Architecture": _architecture_label(model),
                     "Feature set": _feature_set_label(model),
-                    "Smile residual": _feature_status(
-                        model, "contract_smile_residual"
-                    ),
+                    "Smile residual": _feature_status(model, "contract_smile_residual"),
                     "Action policy": _decoder_label(model),
                     "Algorithm": str(model.get("algorithm", "unknown")).upper(),
                     "Validation score": _number(
@@ -83,9 +272,7 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
                     "Competitive folds": int(
                         candidate.get("selection_competitive", True)
                     ),
-                    "Training seeds": int(
-                        seed_aggregate.get("training_seed_count", 1)
-                    ),
+                    "Training seeds": int(seed_aggregate.get("training_seed_count", 1)),
                     "Episodes": _number(candidate.get("episodes_completed")),
                     "Selected folds": int(candidate.get("model_id") == selected),
                 }
@@ -135,12 +322,8 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
         action_policy = _decoder_label(model)
         feature_set = _feature_set_label(model)
         smile_residual = _feature_status(model, "contract_smile_residual")
-        selection_rule = fold.get("model_selection", {}).get(
-            "simplicity_rule", {}
-        )
-        activation_gate = fold.get("model_selection", {}).get(
-            "activation_gate", {}
-        )
+        selection_rule = fold.get("model_selection", {}).get("simplicity_rule", {})
+        activation_gate = fold.get("model_selection", {}).get("activation_gate", {})
         activated = bool(activation_gate.get("activated", True))
         no_op_reports = fold.get("baselines", {}).get("no_op", [])
         selected_latency = _number(
@@ -167,9 +350,7 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
                     "Selected latency (us)": selected_latency,
                     "Score traded (bp)": 10_000.0
                     * _number(
-                        selection_rule.get(
-                            "score_sacrificed_for_simplicity", 0.0
-                        )
+                        selection_rule.get("score_sacrificed_for_simplicity", 0.0)
                     ),
                     "Competitive candidates": int(
                         selection_rule.get("competitive_candidate_count", 1)
@@ -180,9 +361,7 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
                     "Sandbox lift": sandbox_return - research_return,
                     "Sandbox executions": sandbox_executions,
                     "Sandbox fees": _number(sandbox_report.get("fees")),
-                    "Sandbox latency (us)": (
-                        selected_latency if activated else 0.0
-                    ),
+                    "Sandbox latency (us)": (selected_latency if activated else 0.0),
                     "Test return": research_return,
                     "Final NAV": _number(report.get("final_nav")),
                     "Max drawdown": _number(report.get("max_drawdown")),
@@ -227,8 +406,7 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
         activations = sorted(set(heldout["Activation"]))
         sandbox_policies = sorted(set(heldout["Sandbox policy"]))
         test_qualities = [
-            fold.get("test_data_quality", {})
-            for fold in run.get("folds", [])
+            fold.get("test_data_quality", {}) for fold in run.get("folds", [])
         ]
         test_starts = sorted(
             str(item["first_timestamp"])
@@ -254,22 +432,12 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
                 "Sandbox policy": ", ".join(sandbox_policies),
                 "Sandbox return": float(heldout["Sandbox return"].mean()),
                 "Sandbox lift": float(heldout["Sandbox lift"].mean()),
-                "Sandbox executions": int(
-                    heldout["Sandbox executions"].sum()
-                ),
+                "Sandbox executions": int(heldout["Sandbox executions"].sum()),
                 "Sandbox fees": float(heldout["Sandbox fees"].sum()),
-                "Sandbox latency (us)": float(
-                    heldout["Sandbox latency (us)"].mean()
-                ),
-                "Selected latency (us)": float(
-                    heldout["Selected latency (us)"].mean()
-                ),
-                "Score traded (bp)": float(
-                    heldout["Score traded (bp)"].mean()
-                ),
-                "Competitive candidates": int(
-                    heldout["Competitive candidates"].max()
-                ),
+                "Sandbox latency (us)": float(heldout["Sandbox latency (us)"].mean()),
+                "Selected latency (us)": float(heldout["Selected latency (us)"].mean()),
+                "Score traded (bp)": float(heldout["Score traded (bp)"].mean()),
+                "Competitive candidates": int(heldout["Competitive candidates"].max()),
                 "Held-out return": float(heldout["Test return"].mean()),
                 "Final NAV": float(heldout["Final NAV"].mean()),
                 "Max drawdown": float(heldout["Max drawdown"].max()),
@@ -314,9 +482,7 @@ def feature_ablation_results(
                 disabled = tuple(model.get("disabled_feature_groups") or ())
                 if feature_group not in disabled:
                     continue
-                ablation_lift = _number(
-                    candidate.get("validation_score_lift_vs_full")
-                )
+                ablation_lift = _number(candidate.get("validation_score_lift_vs_full"))
                 if pd.isna(ablation_lift):
                     continue
                 kind = str(model.get("kind", "unknown"))
@@ -325,9 +491,7 @@ def feature_ablation_results(
                     {
                         "Ticker": symbol,
                         "Fold": int(fold.get("fold", 0)),
-                        "Encoder": _humanize(
-                            str(model.get("encoder", "unknown"))
-                        ),
+                        "Encoder": _humanize(str(model.get("encoder", "unknown"))),
                         "Agent": AGENT_LABELS.get(kind, kind.upper()),
                         "Feature": _humanize(feature_group),
                         "Feature lift (bp)": feature_lift_bp,
@@ -337,9 +501,7 @@ def feature_ablation_results(
                                 "median_microseconds"
                             )
                         ),
-                        "Ablated parameters": _number(
-                            candidate.get("parameter_count")
-                        ),
+                        "Ablated parameters": _number(candidate.get("parameter_count")),
                         "Training seeds": int(
                             candidate.get("training_seed_aggregate", {}).get(
                                 "training_seed_count", 1
@@ -349,9 +511,11 @@ def feature_ablation_results(
                 )
     if not records:
         return pd.DataFrame()
-    return pd.DataFrame(records).sort_values(
-        ["Ticker", "Encoder", "Agent"]
-    ).reset_index(drop=True)
+    return (
+        pd.DataFrame(records)
+        .sort_values(["Ticker", "Encoder", "Agent"])
+        .reset_index(drop=True)
+    )
 
 
 def promotion_assessment(summary: dict[str, Any]) -> dict[str, Any]:
@@ -383,9 +547,7 @@ def promotion_assessment(summary: dict[str, Any]) -> dict[str, Any]:
         provenances.append(
             fold.get("test_data_quality", {}).get("execution_provenance", "unknown")
         )
-        activation_gates.append(
-            fold.get("model_selection", {}).get("activation_gate")
-        )
+        activation_gates.append(fold.get("model_selection", {}).get("activation_gate"))
 
     paired_count = min(len(agent_returns), len(no_op_returns))
     excess = [
@@ -573,6 +735,30 @@ def _architecture_label(model: dict[str, Any]) -> str:
     encoder = _humanize(str(model.get("encoder", "unknown")))
     kind = _humanize(str(model.get("kind", "unknown")))
     return f"{encoder} / {kind}"
+
+
+def _topology_label(model: dict[str, Any]) -> str:
+    encoder = str(model.get("encoder", "unknown"))
+    if "graph" in encoder:
+        return "Surface GNN"
+    if "attention" in encoder:
+        return "Surface attention"
+    return "Flat vector"
+
+
+def _decision_label(
+    orders: Sequence[int],
+    executions: Sequence[dict[str, Any]],
+    invalid_actions: int,
+) -> str:
+    sides = {str(item.get("side", "unknown")).upper() for item in executions}
+    if executions:
+        side = next(iter(sides)) if len(sides) == 1 else "MULTI"
+        suffix = "fill" if len(executions) == 1 else "fills"
+        return f"{side} · {len(executions)} {suffix}"
+    if any(value != 0 for value in orders):
+        return "BLOCKED" if invalid_actions else "UNFILLED"
+    return "HOLD"
 
 
 def _feature_set_label(model: dict[str, Any]) -> str:

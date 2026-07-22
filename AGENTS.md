@@ -343,7 +343,13 @@ validation fixes the winning model. Preserve test-slice market-state and quote-
 time coverage beside those paths. The interface may aggregate validation
 candidates into a leaderboard, but it must never relabel validation metrics as
 held-out performance or imply alpha when block-bootstrap evidence is
-insufficient. Training and market fetching stay outside Streamlit reruns.
+insufficient. Treat each newest per-ticker winner as a persisted agent with a
+stable model-derived ID, checkpoint, recurrent core, encoder topology,
+activation state, latency, and test time range. Show every stored decision,
+including HOLD, and keep the research action separate from the sandbox action
+when the validation gate substitutes no-op. Guarded agents are real saved
+policies, not missing agents, and GNN challengers must remain visible even when
+a flat policy wins. Training and market fetching stay outside Streamlit reruns.
 
 `agent-arena` is the reproducible integration-demo entry point. Keep candidate
 families, split sizes, training budget, costs, and risk rules identical across
@@ -384,6 +390,17 @@ collected states unused. General walk-forward commands remain multi-fold unless
 summary, and show test timestamps in the interface. Default `agent-arena` runs
 must use timestamped subdirectories beneath `data/agent_runs/recurrent-arena`;
 an explicit `--output-dir` may reproduce or replace a caller-owned target.
+
+The default arena must preflight that latest tail before model construction.
+Every validation and test snapshot must be provider-confirmed `REGULAR`, have a
+covered underlying quote age within the environment threshold, and contain at
+least one positive non-crossed option bid/ask. Load and materially deduplicate
+raw snapshots for this check; do not engineer policy features until the ticker
+passes. Persist per-partition regular, fresh, and executable counts plus time
+bounds. Readiness-only failures are expected status, not a crashed job, and must
+remain visible in Streamlit while the most recent successful agents stay
+inspectable. `--allow-unready-tail` is an explicit plumbing override and must
+never support an economic or alpha claim.
 
 Validation selection does not automatically authorize sandbox execution. After
 the research winner is fixed, evaluate deterministic no-op on validation only
