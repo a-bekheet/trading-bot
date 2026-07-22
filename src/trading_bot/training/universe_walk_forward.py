@@ -59,7 +59,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v37"
+    "research-demo.universe-walk-forward.v42"
 )
 
 
@@ -417,6 +417,11 @@ def run_universe_walk_forward_training(
                     if candidate.auxiliary_coefficient is None
                     else candidate.auxiliary_coefficient
                 ),
+                delta_neutrality_coefficient=(
+                    fold_training.delta_neutrality_coefficient
+                    if candidate.delta_neutrality_coefficient is None
+                    else candidate.delta_neutrality_coefficient
+                ),
                 time_aware_discounting=(
                     fold_training.time_aware_discounting
                     if candidate.time_aware_discounting is None
@@ -546,6 +551,10 @@ def run_universe_walk_forward_training(
                         candidate,
                         auxiliary_target_exclusions=(),
                     ).identifier,
+                    "delta_neutrality_reference_model_id": replace(
+                        candidate,
+                        delta_neutrality_coefficient=0.0,
+                    ).identifier,
                     "discount_reference_model_id": replace(
                         candidate,
                         time_aware_discounting=None,
@@ -565,6 +574,10 @@ def run_universe_walk_forward_training(
                     "entropy_objective_reference_model_id": replace(
                         candidate,
                         entropy_objective=None,
+                    ).identifier,
+                    "critic_layer_norm_reference_model_id": replace(
+                        candidate,
+                        critic_layer_norm=False,
                     ).identifier,
                 })
         grouped_runs = []
@@ -640,6 +653,9 @@ def run_universe_walk_forward_training(
                 "effective_auxiliary_target_exclusions": list(
                     run["training_config"].auxiliary_target_exclusions
                 ),
+                "effective_delta_neutrality_coefficient": run[
+                    "training_config"
+                ].delta_neutrality_coefficient,
                 "effective_time_aware_discounting": run[
                     "training_config"
                 ].time_aware_discounting,
@@ -745,6 +761,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_configured_horizons": None,
                 "validation_score_lift_vs_full_auxiliary_targets": None,
                 "validation_reward_lift_vs_full_auxiliary_targets": None,
+                "validation_score_lift_vs_delta_neutrality_disabled": None,
+                "validation_reward_lift_vs_delta_neutrality_disabled": None,
                 "validation_score_lift_vs_time_aware_discounting": None,
                 "validation_reward_lift_vs_time_aware_discounting": None,
                 "validation_score_lift_vs_burn_in": None,
@@ -755,6 +773,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_joint_factorized_objective": None,
                 "validation_score_lift_vs_feasible_normalized_entropy": None,
                 "validation_reward_lift_vs_feasible_normalized_entropy": None,
+                "validation_score_lift_vs_critic_layer_norm_disabled": None,
+                "validation_reward_lift_vs_critic_layer_norm_disabled": None,
                 "selection": {
                     "scope": selected["evaluation_scope"],
                     "episode": selected["episode"],
@@ -787,6 +807,12 @@ def run_universe_walk_forward_training(
                         "evaluation_downside_deviation"
                     ],
                     "mean_turnover": selected["evaluation_turnover"],
+                    "mean_abs_beta_to_underlying": selected[
+                        "evaluation_abs_beta_to_underlying"
+                    ],
+                    "mean_abs_delta_notional_weight": selected[
+                        "evaluation_mean_abs_delta_notional_weight"
+                    ],
                     "per_symbol": selected["evaluation_by_symbol"],
                 },
             }
@@ -848,6 +874,24 @@ def run_universe_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["auxiliary_target_reference_model_id"]
+                    ]
+                )
+            delta_neutrality_reference = validation_scores.get(
+                run["delta_neutrality_reference_model_id"]
+            )
+            if (
+                run["training_config"].delta_neutrality_coefficient > 0
+                and delta_neutrality_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_delta_neutrality_disabled"
+                ] = aggregate_score - delta_neutrality_reference
+                result[
+                    "validation_reward_lift_vs_delta_neutrality_disabled"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["delta_neutrality_reference_model_id"]
                     ]
                 )
             discount_reference = validation_scores.get(
@@ -933,6 +977,24 @@ def run_universe_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["entropy_objective_reference_model_id"]
+                    ]
+                )
+            critic_layer_norm_reference = validation_scores.get(
+                run["critic_layer_norm_reference_model_id"]
+            )
+            if (
+                run["model_spec"].critic_layer_norm
+                and critic_layer_norm_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_critic_layer_norm_disabled"
+                ] = aggregate_score - critic_layer_norm_reference
+                result[
+                    "validation_reward_lift_vs_critic_layer_norm_disabled"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["critic_layer_norm_reference_model_id"]
                     ]
                 )
             candidate_results.append(result)
@@ -1023,6 +1085,12 @@ def run_universe_walk_forward_training(
                     "evaluation_downside_deviation"
                 ],
                 "mean_turnover": selected["evaluation_turnover"],
+                "mean_abs_beta_to_underlying": selected[
+                    "evaluation_abs_beta_to_underlying"
+                ],
+                "mean_abs_delta_notional_weight": selected[
+                    "evaluation_mean_abs_delta_notional_weight"
+                ],
                 "per_symbol": selected["evaluation_by_symbol"],
                 "model_id": winning_run["model_id"],
                 "training_seed": selected_training.seed,
@@ -1039,7 +1107,9 @@ def run_universe_walk_forward_training(
                     "per_ticker": (
                         "reward - drawdown_penalty * max_drawdown - "
                         "downside_penalty * downside_deviation - "
-                        "turnover_penalty * turnover"
+                        "turnover_penalty * turnover - "
+                        "absolute_beta_penalty * abs(beta) - "
+                        "delta_notional_penalty * mean_abs_delta_notional"
                     ),
                     "aggregate": "(1-w) * mean + w * worst - d * std",
                     "drawdown_penalty": (
@@ -1050,6 +1120,12 @@ def run_universe_walk_forward_training(
                     ),
                     "turnover_penalty": (
                         selected_training.selection_turnover_penalty
+                    ),
+                    "absolute_beta_penalty": (
+                        selected_training.selection_abs_beta_penalty
+                    ),
+                    "delta_notional_penalty": (
+                        selected_training.selection_delta_notional_penalty
                     ),
                     "cross_ticker_std_penalty": (
                         selected_training.selection_cross_ticker_std_penalty
@@ -1067,6 +1143,9 @@ def run_universe_walk_forward_training(
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
                     "raw_mean_entropy_objective_ablation",
+                    "delta_neutrality_training_ablation",
+                    "critic_layer_norm_ablation",
+                    "auxiliary_target_ablation",
                     "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
@@ -1195,8 +1274,16 @@ def main() -> None:
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
                 burn_in_steps=args.burn_in_steps,
+                learning_rate=args.learning_rate,
                 gamma=args.gamma,
                 gae_lambda=args.gae_lambda,
+                ppo_epochs=args.ppo_epochs,
+                minibatch_size=args.minibatch_size,
+                clip_ratio=args.clip_ratio,
+                value_clip=args.value_clip,
+                target_kl=args.target_kl,
+                value_coefficient=args.value_coefficient,
+                gradient_clip=args.gradient_clip,
                 time_aware_discounting=args.time_aware_discounting,
                 discount_reference_seconds=args.discount_reference_seconds,
                 max_steps=args.max_steps,
@@ -1220,6 +1307,10 @@ def main() -> None:
                 selection_turnover_penalty=(
                     args.selection_turnover_penalty
                 ),
+                selection_abs_beta_penalty=args.selection_abs_beta_penalty,
+                selection_delta_notional_penalty=(
+                    args.selection_delta_notional_penalty
+                ),
                 selection_cross_ticker_std_penalty=(
                     args.selection_cross_ticker_std_penalty
                 ),
@@ -1229,6 +1320,9 @@ def main() -> None:
                 entropy_coefficient=args.entropy_coefficient,
                 entropy_objective=args.entropy_objective,
                 factorized_ppo_objective=args.factorized_ppo_objective,
+                delta_neutrality_coefficient=(
+                    args.delta_neutrality_coefficient
+                ),
                 auxiliary_coefficient=args.auxiliary_coefficient,
                 auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),
                 algorithm=args.algorithm,

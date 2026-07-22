@@ -20,7 +20,11 @@ from trading_bot.market_data.freshness import (
 )
 from trading_bot.market_data.universe import TOP_50_TICKERS
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
-from trading_bot.training.evaluation import EpisodeReport, run_episode
+from trading_bot.training.evaluation import (
+    EpisodeReport,
+    delta_notional_weight,
+    run_episode,
+)
 from trading_bot.training.features import REALIZED_VOL_WINDOWS
 from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_actor_critic
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
@@ -35,7 +39,7 @@ from trading_bot.training.sequence import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v49"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v54"
 CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION = (
     "research-demo.critic-balance-diagnostic.v1"
 )
@@ -43,6 +47,7 @@ RECURRENT_POLICY_STATE_SCHEMA_VERSION = "research-demo.recurrent-policy-state.v1
 BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION = (
     "research-demo.batched-recurrent-policy-state.v1"
 )
+MAX_ABS_DELTA_NOTIONAL_WEIGHT_FOR_TRAINING = 10.0
 
 
 @dataclass(frozen=True)
@@ -107,8 +112,11 @@ class TrainingConfig:
     selection_drawdown_penalty: float = 0.0
     selection_downside_penalty: float = 0.0
     selection_turnover_penalty: float = 0.0
+    selection_abs_beta_penalty: float = 0.0
+    selection_delta_notional_penalty: float = 0.0
     selection_cross_ticker_std_penalty: float = 0.0
     selection_worst_ticker_weight: float = 0.0
+    delta_neutrality_coefficient: float = 0.0
     auxiliary_coefficient: float = 0.0
     auxiliary_horizons: tuple[int, ...] = (1,)
     auxiliary_target_exclusions: tuple[str, ...] = ()
@@ -141,6 +149,13 @@ class TrainingConfig:
             raise ValueError("ppo_epochs and minibatch_size must be positive")
         if self.value_coefficient < 0 or self.entropy_coefficient < 0:
             raise ValueError("loss coefficients cannot be negative")
+        if (
+            not math.isfinite(self.delta_neutrality_coefficient)
+            or self.delta_neutrality_coefficient < 0
+        ):
+            raise ValueError(
+                "delta_neutrality_coefficient must be finite and non-negative"
+            )
         if self.entropy_objective not in {
             "feasible_normalized",
             "raw_mean",
@@ -229,6 +244,8 @@ class TrainingConfig:
             self.selection_drawdown_penalty,
             self.selection_downside_penalty,
             self.selection_turnover_penalty,
+            self.selection_abs_beta_penalty,
+            self.selection_delta_notional_penalty,
             self.selection_cross_ticker_std_penalty,
         )
         if any(
@@ -422,6 +439,30 @@ def _hidden_cursors_are_zero(hidden_state, indices) -> bool:
     return not bool(hidden_state[:, indices, :].count_nonzero())
 
 
+def _flat_active_input_indices(config: RecurrentConfig) -> np.ndarray | None:
+    """Return deployment-side flat input compaction without Torch gather."""
+    if config.encoder != "flat" or not config.masked_input_indices:
+        return None
+    active = np.ones(config.input_size, dtype=bool)
+    active[np.asarray(config.masked_input_indices, dtype=np.int64)] = False
+    return np.flatnonzero(active)
+
+
+def _flat_contiguous_mask_slice(
+    config: RecurrentConfig,
+) -> tuple[int, int] | None:
+    """Return one removable raw-input interval, otherwise use generic gather."""
+    if config.encoder != "flat" or not config.masked_input_indices:
+        return None
+    start = config.masked_input_indices[0]
+    stop = config.masked_input_indices[-1] + 1
+    return (
+        (start, stop)
+        if config.masked_input_indices == tuple(range(start, stop))
+        else None
+    )
+
+
 class StreamingRecurrentPolicy:
     """Deterministic callable policy with explicit causal state lifecycle."""
 
@@ -445,6 +486,8 @@ class StreamingRecurrentPolicy:
         self.enforce_chronology = enforce_chronology
         self._torch = _torch()
         self._device = next(model.parameters()).device
+        self._active_input_indices = _flat_active_input_indices(model.config)
+        self._contiguous_mask_slice = _flat_contiguous_mask_slice(model.config)
         self._hidden_state = None
         self._last_timestamp: str | None = None
         self._steps = 0
@@ -528,9 +571,18 @@ class StreamingRecurrentPolicy:
             )
         if self.enforce_chronology and self._last_timestamp is not None:
             _elapsed_seconds(self._last_timestamp, observation.timestamp)
-        sequence = _one_step_tensor(observation, self._torch).to(self._device)
-        if sequence.shape[-1] != self.model.config.input_size:
+        vector = observation_vector(observation)
+        if vector.size != self.model.config.input_size:
             raise ValueError("observation feature layout does not match the model")
+        if self._active_input_indices is not None:
+            if self._contiguous_mask_slice is None:
+                vector = vector[self._active_input_indices]
+            else:
+                start, stop = self._contiguous_mask_slice
+                vector = np.concatenate((vector[:start], vector[stop:]))
+        sequence = self._torch.from_numpy(vector).view(1, 1, -1).to(
+            self._device
+        )
         action_mask = (
             self._torch.from_numpy(observation.action_mask)
             .unsqueeze(0)
@@ -580,6 +632,8 @@ class BatchedStreamingRecurrentPolicy:
         self.enforce_chronology = enforce_chronology
         self._torch = _torch()
         self._device = next(model.parameters()).device
+        self._active_input_indices = _flat_active_input_indices(model.config)
+        self._contiguous_mask_slice = _flat_contiguous_mask_slice(model.config)
         self._hidden_state = None
         self._last_timestamps: list[str | None] = [None] * batch_size
         self._steps = [0] * batch_size
@@ -724,6 +778,18 @@ class BatchedStreamingRecurrentPolicy:
         vectors = [observation_vector(item) for item in observations]
         if any(vector.size != self.model.config.input_size for vector in vectors):
             raise ValueError("observation feature layout does not match the model")
+        if self._active_input_indices is not None:
+            if self._contiguous_mask_slice is None:
+                vectors = [
+                    vector[self._active_input_indices]
+                    for vector in vectors
+                ]
+            else:
+                start, stop = self._contiguous_mask_slice
+                vectors = [
+                    np.concatenate((vector[:start], vector[stop:]))
+                    for vector in vectors
+                ]
         for index, observation in enumerate(observations):
             previous = self._last_timestamps[index]
             if self.enforce_chronology and previous is not None:
@@ -944,17 +1010,40 @@ def selection_score(
         float(report.max_drawdown),
         float(report.downside_deviation),
         float(report.turnover),
+        float(getattr(report, "return_beta_to_underlying", 0.0)),
+        float(getattr(report, "mean_abs_delta_notional_weight", 0.0)),
+        float(getattr(report, "return_beta_coverage", 0.0)),
+        float(getattr(report, "delta_notional_weight_coverage", 0.0)),
     )
     if not all(math.isfinite(value) for value in values):
         raise ValueError("selection report metrics must be finite")
-    reward, drawdown, downside, turnover = values
-    if min(drawdown, downside, turnover) < 0:
+    (
+        reward,
+        drawdown,
+        downside,
+        turnover,
+        beta,
+        delta_notional,
+        beta_coverage,
+        delta_coverage,
+    ) = values
+    if min(drawdown, downside, turnover, delta_notional) < 0:
         raise ValueError("selection risk metrics must be non-negative")
+    if config.selection_abs_beta_penalty > 0 and beta_coverage < 1.0:
+        raise ValueError(
+            "selection absolute-beta penalty requires covered validation beta"
+        )
+    if config.selection_delta_notional_penalty > 0 and delta_coverage < 1.0:
+        raise ValueError(
+            "selection Delta-notional penalty requires covered validation exposure"
+        )
     return float(
         reward
         - config.selection_drawdown_penalty * drawdown
         - config.selection_downside_penalty * downside
         - config.selection_turnover_penalty * turnover
+        - config.selection_abs_beta_penalty * abs(beta)
+        - config.selection_delta_notional_penalty * delta_notional
     )
 
 
@@ -1623,6 +1712,8 @@ def train_actor_critic(
         choice_steps = []
         actions = []
         rewards = []
+        raw_rewards = []
+        delta_notional_weights = []
         transition_seconds = []
         old_log_probabilities = []
         old_values = []
@@ -1637,6 +1728,7 @@ def train_actor_critic(
             "invalid_action": 0.0,
             "drawdown": 0.0,
             "downside": 0.0,
+            "delta_neutrality": 0.0,
         }
         slot_changed_count = 0
         slot_comparable_count = 0
@@ -1694,18 +1786,37 @@ def train_actor_critic(
             transition_seconds.append(
                 _elapsed_seconds(previous_timestamp, observation.timestamp)
             )
+            raw_reward = float(reward)
+            observed_delta_weight = delta_notional_weight(observation)
+            bounded_abs_delta_weight = (
+                min(
+                    abs(observed_delta_weight),
+                    MAX_ABS_DELTA_NOTIONAL_WEIGHT_FOR_TRAINING,
+                )
+                if observed_delta_weight is not None
+                else 0.0
+            )
+            delta_neutrality_return = (
+                -config.delta_neutrality_coefficient
+                * bounded_abs_delta_weight
+            )
             if auxiliary_target_contract:
                 auxiliary_observations.append(observation)
             sequences.append(sequence.squeeze(0).squeeze(0))
             action_masks.append(action_mask.squeeze(0))
             actions.append(action.squeeze(0))
-            rewards.append(float(reward))
+            rewards.append(raw_reward + delta_neutrality_return)
+            raw_rewards.append(raw_reward)
+            delta_notional_weights.append(observed_delta_weight)
             old_log_probabilities.append(old_log_probability.squeeze(0))
             old_values.append(value.squeeze(0))
             invalid_actions += int(info["invalid_action_count"])
             executions += len(info["executions"])
             for name, value in info["reward_components"].items():
                 reward_component_totals[name] += float(value)
+            reward_component_totals["delta_neutrality"] += (
+                delta_neutrality_return
+            )
             slot_changed_count += int(info.get("slot_changed_count", 0))
             slot_comparable_count += int(info.get("slot_comparable_count", 0))
             steps += 1
@@ -2052,6 +2163,8 @@ def train_actor_critic(
         evaluation_max_drawdown = None
         evaluation_downside_deviation = None
         evaluation_turnover = None
+        evaluation_abs_beta_to_underlying = None
+        evaluation_mean_abs_delta_notional_weight = None
         selection_improved = None
         stop_for_selection_patience = False
         should_evaluate = (
@@ -2088,6 +2201,14 @@ def train_actor_critic(
             evaluation_turnover = float(
                 np.mean([report.turnover for report in reports.values()])
             )
+            evaluation_abs_beta_to_underlying = float(np.mean([
+                abs(getattr(report, "return_beta_to_underlying", 0.0))
+                for report in reports.values()
+            ]))
+            evaluation_mean_abs_delta_notional_weight = float(np.mean([
+                getattr(report, "mean_abs_delta_notional_weight", 0.0)
+                for report in reports.values()
+            ]))
             evaluation_selection_score = aggregate["score"]
             selection_improved = (
                 evaluation_selection_score
@@ -2138,7 +2259,32 @@ def train_actor_critic(
                 "burn_in_start_index": burn_in_start,
                 "burn_in_steps": burn_in_steps,
                 "total_reward": float(sum(rewards)),
+                "raw_total_reward": float(sum(raw_rewards)),
                 "reward_components": reward_component_totals.copy(),
+                "delta_neutrality_coefficient": (
+                    config.delta_neutrality_coefficient
+                ),
+                "mean_abs_delta_notional_weight": float(np.mean([
+                    abs(value)
+                    for value in delta_notional_weights
+                    if value is not None
+                ])) if any(
+                    value is not None for value in delta_notional_weights
+                ) else 0.0,
+                "max_abs_delta_notional_weight": float(max(
+                    (
+                        abs(value)
+                        for value in delta_notional_weights
+                        if value is not None
+                    ),
+                    default=0.0,
+                )),
+                "delta_notional_weight_coverage": float(
+                    sum(
+                        value is not None
+                        for value in delta_notional_weights
+                    ) / len(delta_notional_weights)
+                ),
                 "transition_seconds_mean": float(np.mean(transition_seconds)),
                 "transition_seconds_min": float(np.min(transition_seconds)),
                 "transition_seconds_max": float(np.max(transition_seconds)),
@@ -2177,6 +2323,12 @@ def train_actor_critic(
                     evaluation_downside_deviation
                 ),
                 "evaluation_turnover": evaluation_turnover,
+                "evaluation_abs_beta_to_underlying": (
+                    evaluation_abs_beta_to_underlying
+                ),
+                "evaluation_mean_abs_delta_notional_weight": (
+                    evaluation_mean_abs_delta_notional_weight
+                ),
                 "evaluation_scope": selection_scope,
                 "selection_improved": (
                     int(selection_improved)
@@ -2411,6 +2563,17 @@ def checkpoint_manifest(
             },
         },
         "critic_balance_diagnostic": critic_balance_diagnostics(metrics),
+        "delta_neutrality_training_objective": {
+            "enabled": training_config.delta_neutrality_coefficient > 0,
+            "coefficient": training_config.delta_neutrality_coefficient,
+            "exposure": "absolute_portfolio_delta_times_spot_divided_by_nav",
+            "maximum_abs_exposure_for_training": (
+                MAX_ABS_DELTA_NOTIONAL_WEIGHT_FOR_TRAINING
+            ),
+            "scope": "training_rewards_only",
+            "evaluation_rewards": "unshaped_executable_net_liquidation",
+            "inference_path": "unchanged",
+        },
         "temporal_training": {
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
@@ -2513,6 +2676,12 @@ def checkpoint_manifest(
                 ),
                 "turnover_penalty": (
                     training_config.selection_turnover_penalty
+                ),
+                "absolute_beta_penalty": (
+                    training_config.selection_abs_beta_penalty
+                ),
+                "delta_notional_penalty": (
+                    training_config.selection_delta_notional_penalty
                 ),
                 "cross_ticker_std_penalty": (
                     training_config.selection_cross_ticker_std_penalty
@@ -2648,6 +2817,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--reward-drawdown-penalty", type=float, default=0.0)
     parser.add_argument("--reward-downside-penalty", type=float, default=0.0)
     parser.add_argument(
+        "--delta-neutrality-coefficient",
+        type=float,
+        default=0.0,
+        help=(
+            "train-only penalty per decision for absolute Delta notional "
+            "divided by NAV; evaluation rewards remain unshaped"
+        ),
+    )
+    parser.add_argument(
         "--portfolio-valuation",
         choices=("liquidation", "midpoint"),
         default="liquidation",
@@ -2684,6 +2862,7 @@ def _parser() -> argparse.ArgumentParser:
         default=16,
     )
     parser.add_argument("--ppo-epochs", type=int, default=4)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument(
         "--factorized-ppo-objective",
         choices=("joint", "dimensionwise"),
@@ -2711,7 +2890,10 @@ def _parser() -> argparse.ArgumentParser:
         help="interval at which configured gamma and GAE lambda apply",
     )
     parser.add_argument("--clip-ratio", type=float, default=0.2)
+    parser.add_argument("--value-clip", type=float, default=0.2)
     parser.add_argument("--target-kl", type=float, default=0.03)
+    parser.add_argument("--value-coefficient", type=float, default=0.5)
+    parser.add_argument("--gradient-clip", type=float, default=0.5)
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument(
         "--entropy-objective",
@@ -2759,6 +2941,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--selection-drawdown-penalty", type=float, default=0.0)
     parser.add_argument("--selection-downside-penalty", type=float, default=0.0)
     parser.add_argument("--selection-turnover-penalty", type=float, default=0.0)
+    parser.add_argument("--selection-abs-beta-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--selection-delta-notional-penalty",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument(
         "--selection-cross-ticker-std-penalty",
         type=float,
@@ -2770,6 +2958,15 @@ def _parser() -> argparse.ArgumentParser:
         default=0.0,
     )
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
+    parser.add_argument(
+        "--critic-layer-norm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "normalize recurrent features only on the critic branch; "
+            "actor inference is unchanged"
+        ),
+    )
     parser.add_argument("--max-abs-delta", type=float)
     parser.add_argument("--max-abs-gamma", type=float)
     parser.add_argument("--max-abs-theta", type=float)
@@ -2872,6 +3069,7 @@ def main() -> None:
             len(AUXILIARY_TARGET_FEATURES) * len(auxiliary_horizons)
         ),
         auxiliary_horizons=auxiliary_horizons,
+        critic_layer_norm=args.critic_layer_norm,
     )
     training_config = TrainingConfig(
         episodes=args.episodes,
@@ -2884,13 +3082,17 @@ def main() -> None:
         volatility_regime_window=args.volatility_regime_window,
         volatility_regime_bins=args.volatility_regime_bins,
         ppo_epochs=args.ppo_epochs,
+        learning_rate=args.learning_rate,
         minibatch_size=args.minibatch_size,
         gamma=args.gamma,
         gae_lambda=args.gae_lambda,
         time_aware_discounting=args.time_aware_discounting,
         discount_reference_seconds=args.discount_reference_seconds,
         clip_ratio=args.clip_ratio,
+        value_clip=args.value_clip,
         target_kl=args.target_kl,
+        value_coefficient=args.value_coefficient,
+        gradient_clip=args.gradient_clip,
         entropy_coefficient=args.entropy_coefficient,
         entropy_objective=args.entropy_objective,
         factorized_ppo_objective=args.factorized_ppo_objective,
@@ -2907,10 +3109,15 @@ def main() -> None:
         selection_drawdown_penalty=args.selection_drawdown_penalty,
         selection_downside_penalty=args.selection_downside_penalty,
         selection_turnover_penalty=args.selection_turnover_penalty,
+        selection_abs_beta_penalty=args.selection_abs_beta_penalty,
+        selection_delta_notional_penalty=(
+            args.selection_delta_notional_penalty
+        ),
         selection_cross_ticker_std_penalty=(
             args.selection_cross_ticker_std_penalty
         ),
         selection_worst_ticker_weight=args.selection_worst_ticker_weight,
+        delta_neutrality_coefficient=args.delta_neutrality_coefficient,
         algorithm=args.algorithm,
     )
     training_env = environments[0] if len(environments) == 1 else environments

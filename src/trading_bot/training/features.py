@@ -18,14 +18,43 @@ VOLATILITY_REGIME_MIN_HISTORY = 4
 VOLATILITY_REGIME_ZSCORE_CLIP = 8.0
 FRONT_ATM_LOG_MONEYNESS_TOLERANCE = 0.10
 FRONT_WING_DELTA_TOLERANCE = 0.15
+SMILE_FIT_MIN_POINTS = 5
+SMILE_FIT_MAX_ABS_FORWARD_LOG_MONEYNESS = 0.35
+SMILE_FIT_REFERENCE_LOG_MONEYNESS = 0.05
+SMILE_FIT_FEATURES = (
+    "frontSmileCurvature",
+    "frontSmileFitRmsePct",
+    "frontAtmSmileResidualPct",
+    "frontSmileFitCoverage",
+)
+INTRADAY_CLOCK_FEATURES = (
+    "easternCaptureDayFraction",
+    "easternCaptureClockCoverage",
+)
+BENCHMARK_CONTEXT_FEATURES = (
+    "benchmarkReturn",
+    "benchmarkReturnCoverage",
+    "relativeUnderlyingReturn",
+    "relativeUnderlyingReturnCoverage",
+    "benchmarkQuoteAgeSeconds",
+    "benchmarkQuoteAgeCoverage",
+    "benchmarkRealizedVol4",
+    "benchmarkRealizedVol4Coverage",
+    "benchmarkLogReturn4",
+    "benchmarkRealizedVol16",
+    "benchmarkRealizedVol16Coverage",
+    "benchmarkLogReturn16",
+)
 MARKET_ENGINEERED_FEATURES = (
     "underlyingReturn",
+    *BENCHMARK_CONTEXT_FEATURES,
     "regularMarketSession",
     "marketStateCoverage",
     "underlyingQuoteAgeSeconds",
     "underlyingQuoteAgeCoverage",
     "snapshotGapSeconds",
     "snapshotGapCoverage",
+    *INTRADAY_CLOCK_FEATURES,
     "realizedVol4",
     "realizedVol4Coverage",
     "underlyingLogReturn4",
@@ -37,6 +66,7 @@ MARKET_ENGINEERED_FEATURES = (
     "front25DeltaRiskReversal",
     "front25DeltaButterfly",
     "front25DeltaCoverage",
+    *SMILE_FIT_FEATURES,
     "atmTermStructureSlope",
     "atmTermStructureCurvature",
     "atmTermSlopeCoverage",
@@ -79,6 +109,30 @@ ENGINEERED_FEATURES = (
     "atmTermSlope", "putCallIvSpread", "parityResidual",
     *MARKET_ENGINEERED_FEATURES,
 )
+
+
+def intraday_clock_features(frame: pd.DataFrame) -> dict[str, float]:
+    """Encode causal America/New_York capture time as a day fraction."""
+    values = dict.fromkeys(INTRADAY_CLOCK_FEATURES, 0.0)
+    if frame.empty or "collectedAt" not in frame:
+        return values
+    timestamp = pd.to_datetime(
+        frame["collectedAt"].iloc[0],
+        errors="coerce",
+        utc=True,
+    )
+    if pd.isna(timestamp):
+        return values
+    eastern = timestamp.tz_convert("America/New_York")
+    seconds = (
+        eastern.hour * 3_600
+        + eastern.minute * 60
+        + eastern.second
+        + eastern.microsecond / 1_000_000
+    )
+    values["easternCaptureDayFraction"] = seconds / 86_400.0
+    values["easternCaptureClockCoverage"] = 1.0
+    return values
 
 
 def _executable_arbitrage_features(result: pd.DataFrame) -> None:
@@ -356,6 +410,118 @@ def underlying_quote_age_features(frame: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def benchmark_history_point(
+    frame: pd.DataFrame,
+) -> tuple[pd.Timestamp, float] | None:
+    """Extract one provider-timestamped benchmark price when observable."""
+    required = {
+        "collectedAt",
+        "benchmarkSymbol",
+        "benchmarkPrice",
+        "benchmarkQuoteTime",
+    }
+    if frame.empty or not required.issubset(frame.columns):
+        return None
+    symbol = benchmark_symbol(frame)
+    if symbol is None:
+        return None
+    collected_at = frame["collectedAt"].iloc[0]
+    quote_time = frame["benchmarkQuoteTime"].iloc[0]
+    age, coverage = underlying_quote_age(collected_at, quote_time)
+    if coverage < 0.5 or age < 0:
+        return None
+    timestamp = pd.to_datetime(quote_time, errors="coerce", utc=True)
+    try:
+        price = float(frame["benchmarkPrice"].iloc[0])
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(timestamp) or not math.isfinite(price) or price <= 0:
+        return None
+    return timestamp, price
+
+
+def benchmark_symbol(frame: pd.DataFrame) -> str | None:
+    """Return a normalized declared benchmark identity when available."""
+    if frame.empty or "benchmarkSymbol" not in frame:
+        return None
+    value = frame["benchmarkSymbol"].iloc[0]
+    if pd.isna(value):
+        return None
+    normalized = str(value).strip().upper()
+    return normalized or None
+
+
+def benchmark_context_features(
+    current: pd.DataFrame,
+    previous: pd.DataFrame | None,
+    history: Sequence[tuple[pd.Timestamp, float]],
+) -> dict[str, float]:
+    """Return causal benchmark regime and ticker-relative return features."""
+    result = {name: 0.0 for name in BENCHMARK_CONTEXT_FEATURES}
+    if not current.empty:
+        collected_at = (
+            current["collectedAt"].iloc[0]
+            if "collectedAt" in current
+            else None
+        )
+        quote_time = (
+            current["benchmarkQuoteTime"].iloc[0]
+            if "benchmarkQuoteTime" in current
+            else None
+        )
+        age, coverage = underlying_quote_age(collected_at, quote_time)
+        result["benchmarkQuoteAgeSeconds"] = age
+        result["benchmarkQuoteAgeCoverage"] = coverage
+
+    rolling = realized_volatility_features(history)
+    for window in REALIZED_VOL_WINDOWS:
+        result[f"benchmarkRealizedVol{window}"] = rolling[
+            f"realizedVol{window}"
+        ]
+        result[f"benchmarkRealizedVol{window}Coverage"] = rolling[
+            f"realizedVol{window}Coverage"
+        ]
+        result[f"benchmarkLogReturn{window}"] = rolling[
+            f"underlyingLogReturn{window}"
+        ]
+
+    if previous is None or previous.empty:
+        return result
+    current_point = benchmark_history_point(current)
+    previous_point = benchmark_history_point(previous)
+    if (
+        current_point is None
+        or previous_point is None
+        or current_point[0] <= previous_point[0]
+    ):
+        return result
+    current_symbol = benchmark_symbol(current)
+    previous_symbol = benchmark_symbol(previous)
+    if current_symbol is None or current_symbol != previous_symbol:
+        return result
+    benchmark_return = current_point[1] / previous_point[1] - 1.0
+    if not math.isfinite(benchmark_return):
+        return result
+    result["benchmarkReturn"] = benchmark_return
+    result["benchmarkReturnCoverage"] = 1.0
+    try:
+        current_spot = float(current["underlyingPrice"].iloc[0])
+        previous_spot = float(previous["underlyingPrice"].iloc[0])
+    except (KeyError, TypeError, ValueError):
+        return result
+    if (
+        math.isfinite(current_spot)
+        and current_spot > 0
+        and math.isfinite(previous_spot)
+        and previous_spot > 0
+    ):
+        result["relativeUnderlyingReturn"] = (
+            current_spot / previous_spot - 1.0 - benchmark_return
+        )
+        result["relativeUnderlyingReturnCoverage"] = 1.0
+    return result
+
+
 def volatility_regime_observation(
     frame: pd.DataFrame,
 ) -> tuple[float | None, float | None]:
@@ -539,6 +705,58 @@ def _surface_features(result: pd.DataFrame) -> None:
     ).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
+def _quadratic_smile_fit(
+    x: np.ndarray,
+    y: np.ndarray,
+) -> tuple[float, float, float] | None:
+    """Fit one stable smile and return curvature, RMSE, and LOO ATM residual."""
+    if len(x) < SMILE_FIT_MIN_POINTS or len(x) != len(y):
+        return None
+    center = float(x.mean())
+    scale = float(x.std())
+    if not math.isfinite(scale) or scale <= 1e-8:
+        return None
+    standardized = (x - center) / scale
+    design = np.column_stack((
+        np.ones(len(standardized), dtype=np.float64),
+        standardized,
+        np.square(standardized),
+    ))
+    coefficients, _, rank, _ = np.linalg.lstsq(design, y, rcond=None)
+    if rank != 3 or not np.isfinite(coefficients).all():
+        return None
+    fitted = design @ coefficients
+    residual = y - fitted
+    level = float(np.median(y))
+    if not math.isfinite(level) or level <= 0:
+        return None
+
+    def fitted_iv(log_moneyness: float) -> float:
+        z = (log_moneyness - center) / scale
+        return float(coefficients @ np.asarray((1.0, z, z * z)))
+
+    reference = SMILE_FIT_REFERENCE_LOG_MONEYNESS
+    curvature = (
+        0.5 * (fitted_iv(-reference) + fitted_iv(reference))
+        - fitted_iv(0.0)
+    )
+    rmse_pct = float(np.sqrt(np.mean(np.square(residual))) / level)
+    atm_position = int(np.argmin(np.abs(x)))
+    gram_inverse = np.linalg.pinv(design.T @ design)
+    leverage = float(
+        design[atm_position] @ gram_inverse @ design[atm_position]
+    )
+    if not math.isfinite(leverage) or leverage >= 1.0 - 1e-8:
+        return None
+    atm_residual_pct = float(
+        residual[atm_position]
+        / (1.0 - leverage)
+        / y[atm_position]
+    )
+    values = (curvature, rmse_pct, atm_residual_pct)
+    return values if all(math.isfinite(value) for value in values) else None
+
+
 def _market_surface_features(result: pd.DataFrame) -> None:
     """Add compact, causal surface factors and explicit quality coverage."""
     neutral = (
@@ -547,6 +765,7 @@ def _market_surface_features(result: pd.DataFrame) -> None:
         "front25DeltaRiskReversal",
         "front25DeltaButterfly",
         "front25DeltaCoverage",
+        *SMILE_FIT_FEATURES,
         "atmTermStructureSlope",
         "atmTermStructureCurvature",
         "atmTermSlopeCoverage",
@@ -618,6 +837,64 @@ def _market_surface_features(result: pd.DataFrame) -> None:
 
     front_dte = float(surface["dteDays"].min())
     front = surface[np.isclose(surface["dteDays"], front_dte)]
+    coordinates = front[
+        np.isfinite(front["forwardLogMoneyness"])
+        & (
+            front["forwardLogMoneyness"].abs()
+            <= SMILE_FIT_MAX_ABS_FORWARD_LOG_MONEYNESS
+        )
+    ]
+    out_of_the_money = coordinates[
+        (
+            coordinates["optionType"].eq("call")
+            & (coordinates["forwardLogMoneyness"] <= 0)
+        )
+        | (
+            coordinates["optionType"].eq("put")
+            & (coordinates["forwardLogMoneyness"] >= 0)
+        )
+    ]
+    negative_points = int(
+        out_of_the_money.loc[
+            out_of_the_money["forwardLogMoneyness"] < 0,
+            "forwardLogMoneyness",
+        ].nunique()
+    )
+    positive_points = int(
+        out_of_the_money.loc[
+            out_of_the_money["forwardLogMoneyness"] > 0,
+            "forwardLogMoneyness",
+        ].nunique()
+    )
+    if (
+        negative_points >= 2
+        and positive_points >= 2
+        and float(out_of_the_money["forwardLogMoneyness"].min())
+        <= -SMILE_FIT_REFERENCE_LOG_MONEYNESS
+        and float(out_of_the_money["forwardLogMoneyness"].max())
+        >= SMILE_FIT_REFERENCE_LOG_MONEYNESS
+    ):
+        fit_points = (
+            out_of_the_money.groupby(
+                "forwardLogMoneyness",
+                sort=True,
+            )["iv"]
+            .median()
+            .reset_index()
+        )
+        fit = _quadratic_smile_fit(
+            fit_points["forwardLogMoneyness"].to_numpy(dtype=np.float64),
+            fit_points["iv"].to_numpy(dtype=np.float64),
+        )
+        if fit is not None:
+            result["frontSmileFitCoverage"] = 1.0
+            for name, value in zip(
+                SMILE_FIT_FEATURES[:-1],
+                fit,
+                strict=True,
+            ):
+                result[name] = value
+
     term_points = []
     for _, expiry_rows in surface.groupby("expiration", sort=False):
         expiry_atm_values = []
@@ -801,6 +1078,7 @@ def engineer_snapshot(
     previous: pd.DataFrame | None = None,
     *,
     spot_history: Sequence[tuple[pd.Timestamp, float]] = (),
+    benchmark_history: Sequence[tuple[pd.Timestamp, float]] = (),
     volatility_history: Sequence[
         tuple[float | None, float | None]
     ] = (),
@@ -831,12 +1109,20 @@ def engineer_snapshot(
         previous_spot = float(previous["underlyingPrice"].iloc[0])
         current_spot = float(spot.iloc[0]) if np.isfinite(spot.iloc[0]) else previous_spot
         result["underlyingReturn"] = current_spot / previous_spot - 1 if previous_spot else 0.0
+    for name, value in benchmark_context_features(
+        result,
+        previous,
+        benchmark_history,
+    ).items():
+        result[name] = value
     market_state = result["marketState"].iloc[0] if "marketState" in result else None
     regular_market_session, market_state_coverage = market_state_features(
         market_state
     )
     result["regularMarketSession"] = regular_market_session
     result["marketStateCoverage"] = market_state_coverage
+    for name, value in intraday_clock_features(result).items():
+        result[name] = value
     for name, value in underlying_quote_age_features(result).items():
         result[name] = value
     _contract_dynamics_features(result, previous)

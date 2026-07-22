@@ -14,7 +14,9 @@ from typing import Any, Sequence
 
 from trading_bot.market_data.freshness import (
     DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+    underlying_quote_age,
 )
+from trading_bot.market_data.market_state import market_state_features
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
     ShortVolatilityConfig,
@@ -60,7 +62,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v53"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v59"
 
 
 @dataclass(frozen=True)
@@ -189,11 +191,13 @@ class ModelSpec:
     auxiliary_coefficient: float | None = None
     auxiliary_horizons: tuple[int, ...] = (1,)
     auxiliary_target_exclusions: tuple[str, ...] = ()
+    delta_neutrality_coefficient: float | None = None
     time_aware_discounting: bool | None = None
     burn_in_steps: int | None = None
     start_sampling: str | None = None
     factorized_ppo_objective: str | None = None
     entropy_objective: str | None = None
+    critic_layer_norm: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid", "mixture"}:
@@ -244,6 +248,14 @@ class ModelSpec:
             raise ValueError(
                 "model auxiliary_coefficient must be finite and non-negative"
             )
+        if self.delta_neutrality_coefficient is not None and (
+            not math.isfinite(self.delta_neutrality_coefficient)
+            or self.delta_neutrality_coefficient < 0
+        ):
+            raise ValueError(
+                "model delta_neutrality_coefficient must be finite and "
+                "non-negative"
+            )
         if self.time_aware_discounting is not None and not isinstance(
             self.time_aware_discounting,
             bool,
@@ -291,6 +303,17 @@ class ModelSpec:
             raise ValueError(
                 "model entropy_objective must be feasible_normalized, "
                 "raw_mean, or None"
+            )
+        if not isinstance(self.critic_layer_norm, bool):
+            raise ValueError("model critic_layer_norm must be a boolean")
+        if (
+            self.critic_layer_norm
+            and self.kind != "hybrid"
+            and self.hidden_size < 2
+        ):
+            raise ValueError(
+                "model critic_layer_norm requires a critic width of at "
+                "least two"
             )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
@@ -354,6 +377,7 @@ class ModelSpec:
                 len(AUXILIARY_TARGET_FEATURES) * len(self.auxiliary_horizons)
             ),
             auxiliary_horizons=self.auxiliary_horizons,
+            critic_layer_norm=self.critic_layer_norm,
             masked_input_indices=feature_ablation_indices(
                 self.disabled_feature_groups,
                 env.slot_count,
@@ -393,7 +417,12 @@ def resolve_recurrent_config(
     if model_spec.parameter_budget is None:
         return requested, parameter_count(requested)
 
-    minimum = replace(requested, hidden_size=1)
+    minimum_hidden_size = (
+        2
+        if model_spec.critic_layer_norm and model_spec.kind != "hybrid"
+        else 1
+    )
+    minimum = replace(requested, hidden_size=minimum_hidden_size)
     minimum_count = parameter_count(minimum)
     if minimum_count > model_spec.parameter_budget:
         raise ValueError(
@@ -401,7 +430,7 @@ def resolve_recurrent_config(
             f"minimum {minimum_count} for {model_spec.encoder}:{model_spec.kind}"
         )
 
-    low = 1
+    low = minimum_hidden_size
     high = model_spec.hidden_size
     best = minimum
     best_count = minimum_count
@@ -420,6 +449,58 @@ def resolve_recurrent_config(
 
 def _reports_to_dict(reports) -> list[dict[str, Any]]:
     return [report.to_dict() for report in reports]
+
+
+def _traces_to_dict(traces) -> list[dict[str, Any]]:
+    """Serialize auditable paths without coupling the UI to Torch objects."""
+    return [
+        {
+            "report": trace.report.to_dict(),
+            "timestamps": list(trace.timestamps),
+            "step_returns": list(trace.step_returns),
+            "navs": list(trace.navs),
+            "decisions": list(trace.decisions),
+        }
+        for trace in traces
+    ]
+
+
+def _partition_data_quality(dataset: SnapshotDataset) -> dict[str, Any]:
+    """Persist the execution-provenance coverage behind a result path."""
+    session_coverage = []
+    regular = []
+    quote_time_coverage = []
+    for snapshot in dataset.snapshots:
+        first = snapshot.frame.iloc[0]
+        is_regular, has_session = market_state_features(
+            first.get("marketState")
+        )
+        _, has_quote_time = underlying_quote_age(
+            snapshot.timestamp,
+            first.get("underlyingQuoteTime"),
+        )
+        session_coverage.append(float(has_session))
+        regular.append(float(is_regular))
+        quote_time_coverage.append(float(has_quote_time))
+    count = len(dataset)
+    session_rate = sum(session_coverage) / count
+    regular_rate = sum(regular) / count
+    quote_time_rate = sum(quote_time_coverage) / count
+    if session_rate == 0:
+        execution_provenance = "legacy_unknown_session_fallback"
+    elif regular_rate == 1:
+        execution_provenance = "provider_confirmed_regular"
+    else:
+        execution_provenance = "provider_nonregular_present"
+    return {
+        "snapshot_count": count,
+        "market_state_coverage": session_rate,
+        "regular_session_fraction": regular_rate,
+        "underlying_quote_time_coverage": quote_time_rate,
+        "execution_provenance": execution_provenance,
+        "first_timestamp": dataset.snapshots[0].timestamp,
+        "last_timestamp": dataset.snapshots[-1].timestamp,
+    }
 
 
 def _normalize_model_specs(
@@ -556,6 +637,16 @@ def _select_seed_robust_group(
     groups: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
     """Select an eligible architecture from its seed-robust validation score."""
+    def delta_neutrality_enabled(group: dict[str, Any]) -> bool:
+        representative = group["representative"]
+        training = representative.get("training_config")
+        coefficient = (
+            training.delta_neutrality_coefficient
+            if training is not None
+            else representative["model_spec"].delta_neutrality_coefficient
+        )
+        return bool(coefficient is not None and coefficient > 0)
+
     eligible = [group for group in groups if group["latency_eligible"]]
     if not eligible:
         raise ValueError("at least one latency-eligible candidate is required")
@@ -571,6 +662,10 @@ def _select_seed_robust_group(
             int(
                 group["representative"]["model_spec"].entropy_objective
                 == "raw_mean"
+            ),
+            int(delta_neutrality_enabled(group)),
+            int(
+                group["representative"]["model_spec"].critic_layer_norm
             ),
             int(bool(
                 group["representative"][
@@ -678,6 +773,11 @@ def run_walk_forward_training(
                     fold_training.auxiliary_coefficient
                     if candidate.auxiliary_coefficient is None
                     else candidate.auxiliary_coefficient
+                ),
+                delta_neutrality_coefficient=(
+                    fold_training.delta_neutrality_coefficient
+                    if candidate.delta_neutrality_coefficient is None
+                    else candidate.delta_neutrality_coefficient
                 ),
                 time_aware_discounting=(
                     fold_training.time_aware_discounting
@@ -796,6 +896,14 @@ def run_walk_forward_training(
                     "validation_turnover": float(
                         selected["evaluation_turnover"]
                     ),
+                    "validation_abs_beta_to_underlying": float(
+                        selected["evaluation_abs_beta_to_underlying"]
+                    ),
+                    "validation_mean_abs_delta_notional_weight": float(
+                        selected[
+                            "evaluation_mean_abs_delta_notional_weight"
+                        ]
+                    ),
                     "selection_scope": selected["evaluation_scope"],
                     "episodes_completed": len(metrics),
                     "stopped_early": bool(
@@ -827,6 +935,10 @@ def run_walk_forward_training(
                         candidate,
                         auxiliary_target_exclusions=(),
                     ).identifier,
+                    "delta_neutrality_reference_model_id": replace(
+                        candidate,
+                        delta_neutrality_coefficient=0.0,
+                    ).identifier,
                     "discount_reference_model_id": replace(
                         candidate,
                         time_aware_discounting=None,
@@ -846,6 +958,10 @@ def run_walk_forward_training(
                     "entropy_objective_reference_model_id": replace(
                         candidate,
                         entropy_objective=None,
+                    ).identifier,
+                    "critic_layer_norm_reference_model_id": replace(
+                        candidate,
+                        critic_layer_norm=False,
                     ).identifier,
                 })
 
@@ -899,6 +1015,9 @@ def run_walk_forward_training(
                 "effective_auxiliary_target_exclusions": list(
                     run["training_config"].auxiliary_target_exclusions
                 ),
+                "effective_delta_neutrality_coefficient": run[
+                    "training_config"
+                ].delta_neutrality_coefficient,
                 "effective_time_aware_discounting": run[
                     "training_config"
                 ].time_aware_discounting,
@@ -1004,6 +1123,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_configured_horizons": None,
                 "validation_reward_lift_vs_full_auxiliary_targets": None,
                 "validation_score_lift_vs_full_auxiliary_targets": None,
+                "validation_reward_lift_vs_delta_neutrality_disabled": None,
+                "validation_score_lift_vs_delta_neutrality_disabled": None,
                 "validation_reward_lift_vs_time_aware_discounting": None,
                 "validation_score_lift_vs_time_aware_discounting": None,
                 "validation_reward_lift_vs_burn_in": None,
@@ -1014,6 +1135,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_joint_factorized_objective": None,
                 "validation_reward_lift_vs_feasible_normalized_entropy": None,
                 "validation_score_lift_vs_feasible_normalized_entropy": None,
+                "validation_reward_lift_vs_critic_layer_norm_disabled": None,
+                "validation_score_lift_vs_critic_layer_norm_disabled": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -1035,6 +1158,12 @@ def run_walk_forward_training(
                         "validation_downside_deviation"
                     ],
                     "turnover": run["validation_turnover"],
+                    "abs_beta_to_underlying": run[
+                        "validation_abs_beta_to_underlying"
+                    ],
+                    "mean_abs_delta_notional_weight": run[
+                        "validation_mean_abs_delta_notional_weight"
+                    ],
                 },
             }
             for group in grouped_runs
@@ -1118,6 +1247,24 @@ def run_walk_forward_training(
                         run["auxiliary_target_reference_model_id"]
                     ]
                 )
+            delta_neutrality_reference = validation_scores.get(
+                run["delta_neutrality_reference_model_id"]
+            )
+            if (
+                run["training_config"].delta_neutrality_coefficient > 0
+                and delta_neutrality_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_delta_neutrality_disabled"
+                ] = aggregate_score - delta_neutrality_reference
+                result[
+                    "validation_reward_lift_vs_delta_neutrality_disabled"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["delta_neutrality_reference_model_id"]
+                    ]
+                )
             discount_reference = validation_scores.get(
                 run["discount_reference_model_id"]
             )
@@ -1199,6 +1346,24 @@ def run_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["entropy_objective_reference_model_id"]
+                    ]
+                )
+            critic_layer_norm_reference = validation_scores.get(
+                run["critic_layer_norm_reference_model_id"]
+            )
+            if (
+                run["model_spec"].critic_layer_norm
+                and critic_layer_norm_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_critic_layer_norm_disabled"
+                ] = aggregate_score - critic_layer_norm_reference
+                result[
+                    "validation_reward_lift_vs_critic_layer_norm_disabled"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["critic_layer_norm_reference_model_id"]
                     ]
                 )
         model = winning_run["model"]
@@ -1354,6 +1519,7 @@ def run_walk_forward_training(
                 "validation": validation_env.manifest.fingerprint,
                 "test": test_env.manifest.fingerprint,
             },
+            "test_data_quality": _partition_data_quality(test_data),
             "selection": {
                 "scope": selected["evaluation_scope"],
                 "episode": selected["episode"],
@@ -1388,6 +1554,12 @@ def run_walk_forward_training(
                     "turnover_penalty": (
                         selected_training.selection_turnover_penalty
                     ),
+                    "absolute_beta_penalty": (
+                        selected_training.selection_abs_beta_penalty
+                    ),
+                    "delta_notional_penalty": (
+                        selected_training.selection_delta_notional_penalty
+                    ),
                     "cross_ticker_std_penalty": (
                         selected_training.selection_cross_ticker_std_penalty
                     ),
@@ -1404,6 +1576,9 @@ def run_walk_forward_training(
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
                     "raw_mean_entropy_objective_ablation",
+                    "delta_neutrality_training_ablation",
+                    "critic_layer_norm_ablation",
+                    "auxiliary_target_ablation",
                     "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
@@ -1428,6 +1603,13 @@ def run_walk_forward_training(
                 "candidates": candidate_results,
             },
             "test": _reports_to_dict(test_reports),
+            "heldout_traces": {
+                "agent": _traces_to_dict(test_traces),
+                "baselines": {
+                    name: _traces_to_dict(traces)
+                    for name, traces in baseline_traces.items()
+                },
+            },
             "baselines": {
                 name: _reports_to_dict(reports)
                 for name, reports in baseline_reports.items()
@@ -1598,7 +1780,24 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum trainable parameters; hidden-size becomes the search cap",
     )
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
+    parser.add_argument(
+        "--critic-layer-norm",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "normalize recurrent features only on the critic branch; "
+            "actor inference is unchanged"
+        ),
+    )
+    parser.add_argument(
+        "--critic-layer-norm-ablation",
+        action="store_true",
+        help=(
+            "add matched candidates with critic-only LayerNorm disabled"
+        ),
+    )
     parser.add_argument("--episodes", type=int, default=25)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--sequence-length", type=int, default=8)
     parser.add_argument("--burn-in-steps", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=128)
@@ -1634,6 +1833,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--selection-drawdown-penalty", type=float, default=0.0)
     parser.add_argument("--selection-downside-penalty", type=float, default=0.0)
     parser.add_argument("--selection-turnover-penalty", type=float, default=0.0)
+    parser.add_argument("--selection-abs-beta-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--selection-delta-notional-penalty",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument(
         "--selection-cross-ticker-std-penalty",
         type=float,
@@ -1646,6 +1851,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--ppo-epochs", type=int, default=4)
+    parser.add_argument("--minibatch-size", type=int, default=64)
+    parser.add_argument("--clip-ratio", type=float, default=0.2)
+    parser.add_argument("--value-clip", type=float, default=0.2)
+    parser.add_argument("--target-kl", type=float, default=0.03)
+    parser.add_argument("--value-coefficient", type=float, default=0.5)
+    parser.add_argument("--gradient-clip", type=float, default=0.5)
     parser.add_argument(
         "--time-aware-discounting",
         action=argparse.BooleanOptionalAction,
@@ -1675,6 +1887,22 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "use the exact joint action ratio or the legacy per-dimension "
             "clipped PPO research objective"
+        ),
+    )
+    parser.add_argument(
+        "--delta-neutrality-coefficient",
+        type=float,
+        default=0.0,
+        help=(
+            "train-only penalty for absolute Delta notional divided by NAV; "
+            "validation and test rewards remain unshaped"
+        ),
+    )
+    parser.add_argument(
+        "--delta-neutrality-ablation",
+        action="store_true",
+        help=(
+            "add matched candidates with Delta-neutrality shaping disabled"
         ),
     )
     parser.add_argument(
@@ -1881,6 +2109,7 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 algorithm=algorithm,
                 parameter_budget=args.parameter_budget,
                 auxiliary_horizons=auxiliary_horizons,
+                critic_layer_norm=args.critic_layer_norm,
             )
         )
     full_specs = tuple(specs)
@@ -1989,6 +2218,26 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             replace(spec, entropy_objective="raw_mean")
             for spec in full_specs
         )
+    if args.delta_neutrality_ablation:
+        if args.delta_neutrality_coefficient <= 0:
+            raise ValueError(
+                "--delta-neutrality-ablation requires "
+                "--delta-neutrality-coefficient > 0"
+            )
+        specs.extend(
+            replace(spec, delta_neutrality_coefficient=0.0)
+            for spec in full_specs
+        )
+    if args.critic_layer_norm_ablation:
+        if not args.critic_layer_norm:
+            raise ValueError(
+                "--critic-layer-norm-ablation requires "
+                "--critic-layer-norm"
+            )
+        specs.extend(
+            replace(spec, critic_layer_norm=False)
+            for spec in full_specs
+        )
     return _normalize_model_specs(specs)
 
 
@@ -2005,8 +2254,16 @@ def main() -> None:
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
                 burn_in_steps=args.burn_in_steps,
+                learning_rate=args.learning_rate,
                 gamma=args.gamma,
                 gae_lambda=args.gae_lambda,
+                ppo_epochs=args.ppo_epochs,
+                minibatch_size=args.minibatch_size,
+                clip_ratio=args.clip_ratio,
+                value_clip=args.value_clip,
+                target_kl=args.target_kl,
+                value_coefficient=args.value_coefficient,
+                gradient_clip=args.gradient_clip,
                 time_aware_discounting=args.time_aware_discounting,
                 discount_reference_seconds=args.discount_reference_seconds,
                 max_steps=args.max_steps,
@@ -2026,6 +2283,10 @@ def main() -> None:
                 ),
                 selection_downside_penalty=args.selection_downside_penalty,
                 selection_turnover_penalty=args.selection_turnover_penalty,
+                selection_abs_beta_penalty=args.selection_abs_beta_penalty,
+                selection_delta_notional_penalty=(
+                    args.selection_delta_notional_penalty
+                ),
                 selection_cross_ticker_std_penalty=(
                     args.selection_cross_ticker_std_penalty
                 ),
@@ -2035,6 +2296,9 @@ def main() -> None:
                 entropy_coefficient=args.entropy_coefficient,
                 entropy_objective=args.entropy_objective,
                 factorized_ppo_objective=args.factorized_ppo_objective,
+                delta_neutrality_coefficient=(
+                    args.delta_neutrality_coefficient
+                ),
                 auxiliary_coefficient=args.auxiliary_coefficient,
                 auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),
                 algorithm=args.algorithm,

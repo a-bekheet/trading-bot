@@ -16,8 +16,11 @@ from trading_bot.training.env import (
     PORTFOLIO_FEATURES,
 )
 from trading_bot.training.features import (
+    BENCHMARK_CONTEXT_FEATURES,
     CONTRACT_DYNAMICS_FEATURES,
+    INTRADAY_CLOCK_FEATURES,
     REALIZED_VOL_WINDOWS,
+    SMILE_FIT_FEATURES,
 )
 from trading_bot.training.schemas import Observation
 
@@ -49,6 +52,7 @@ FEATURE_ABLATION_GROUPS = {
         "snapshotGapSeconds",
         "snapshotGapCoverage",
     ),
+    "intraday_clock": INTRADAY_CLOCK_FEATURES,
     "market_session": (
         "regularMarketSession",
         "marketStateCoverage",
@@ -57,6 +61,7 @@ FEATURE_ABLATION_GROUPS = {
         "underlyingQuoteAgeSeconds",
         "underlyingQuoteAgeCoverage",
     ),
+    "systematic_context": BENCHMARK_CONTEXT_FEATURES,
     "price_trend": (
         "underlyingLogReturn4",
         "underlyingLogReturn16",
@@ -66,6 +71,7 @@ FEATURE_ABLATION_GROUPS = {
         "front25DeltaButterfly",
         "front25DeltaCoverage",
     ),
+    "smile_fit": SMILE_FIT_FEATURES,
     "term_structure": (
         "atmTermStructureSlope",
         "atmTermStructureCurvature",
@@ -232,6 +238,8 @@ _SPOT_SCALED_CONTRACT_INDICES = np.asarray([
 _SIGNED_SURFACE_MARKET_FEATURES = (
     "front25DeltaRiskReversal",
     "front25DeltaButterfly",
+    "frontSmileCurvature",
+    "frontAtmSmileResidualPct",
     "atmTermStructureSlope",
     "atmTermStructureCurvature",
     "frontAtmIvChange",
@@ -338,11 +346,19 @@ def _dimensionless_components(
             np.sign(market[return_index])
             * np.log1p(abs(market[return_index]) * 100.0)
         )
+        for name in ("benchmarkReturn", "relativeUnderlyingReturn"):
+            index = market_indices[name]
+            value = market[index]
+            market[index] = np.sign(value) * np.log1p(abs(value) * 100.0)
         gap_index = market_indices["snapshotGapSeconds"]
         market[gap_index] = np.log1p(max(market[gap_index], 0.0)) / 10.0
         quote_age_index = market_indices["underlyingQuoteAgeSeconds"]
         market[quote_age_index] = (
             np.log1p(max(market[quote_age_index], 0.0)) / 10.0
+        )
+        benchmark_age_index = market_indices["benchmarkQuoteAgeSeconds"]
+        market[benchmark_age_index] = (
+            np.log1p(max(market[benchmark_age_index], 0.0)) / 10.0
         )
         for window in REALIZED_VOL_WINDOWS:
             volatility_index = market_indices[f"realizedVol{window}"]
@@ -354,8 +370,26 @@ def _dimensionless_components(
             market[trend_index] = (
                 np.sign(trend) * np.log1p(abs(trend) * 100.0)
             )
+            benchmark_volatility_index = market_indices[
+                f"benchmarkRealizedVol{window}"
+            ]
+            market[benchmark_volatility_index] = np.log1p(
+                max(market[benchmark_volatility_index], 0.0)
+            )
+            benchmark_trend_index = market_indices[
+                f"benchmarkLogReturn{window}"
+            ]
+            benchmark_trend = market[benchmark_trend_index]
+            market[benchmark_trend_index] = (
+                np.sign(benchmark_trend)
+                * np.log1p(abs(benchmark_trend) * 100.0)
+            )
         front_iv_index = market_indices["frontAtmIv"]
         market[front_iv_index] = np.log1p(max(market[front_iv_index], 0.0))
+        smile_rmse_index = market_indices["frontSmileFitRmsePct"]
+        market[smile_rmse_index] = np.log1p(
+            max(market[smile_rmse_index], 0.0)
+        )
         for name in _SIGNED_SURFACE_MARKET_FEATURES:
             index = market_indices[name]
             value = market[index]

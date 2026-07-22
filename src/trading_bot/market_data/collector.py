@@ -17,6 +17,11 @@ from typing import Iterator
 import pandas as pd
 
 from trading_bot.analytics.greeks import black_scholes_greeks, years_to_expiration
+from trading_bot.market_data.benchmark import (
+    DEFAULT_BENCHMARK_SYMBOL,
+    BenchmarkSnapshot,
+    fetch_benchmark_snapshot,
+)
 from trading_bot.market_data.option_chain import fetch_option_chain_snapshot
 from trading_bot.market_data.rates import RISK_FREE_RATE_SOURCE, fetch_risk_free_rate
 from trading_bot.market_data.snapshot_identity import (
@@ -32,11 +37,12 @@ CSV_COLUMNS = (
     "percentChange", "volume", "openInterest", "impliedVolatility", "inTheMoney",
     "contractSize", "currency", "underlyingPrice", "underlyingPriceSource",
     "underlyingQuoteTime", "underlyingQuoteTimeSource", "marketState", "riskFreeRate",
-    "riskFreeRateSource", "dividendYield", "timeToExpiryYears", "delta", "gamma",
-    "theta", "vega", "greekModel",
+    "riskFreeRateSource", "dividendYield", "benchmarkSymbol", "benchmarkPrice",
+    "benchmarkPriceSource", "benchmarkQuoteTime", "benchmarkQuoteTimeSource",
+    "timeToExpiryYears", "delta", "gamma", "theta", "vega", "greekModel",
 )
-COLLECTOR_STATUS_SCHEMA_VERSION = "collector.status.v1"
-SNAPSHOT_STATE_SCHEMA_VERSION = "collector.snapshot-state.v6"
+COLLECTOR_STATUS_SCHEMA_VERSION = "collector.status.v2"
+SNAPSHOT_STATE_SCHEMA_VERSION = "collector.snapshot-state.v7"
 COLLECTOR_STATUS_FILENAME = "_collector_status.json"
 
 
@@ -58,6 +64,9 @@ class CycleResult:
     appended: int = 0
     unchanged: int = 0
     rows_appended: int = 0
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL
+    benchmark_price: float | None = None
+    benchmark_quote_time: str | None = None
     errors: dict[str, str] = field(default_factory=dict)
 
     def heartbeat(self) -> None:
@@ -208,6 +217,7 @@ def save_snapshot(
     risk_free_rate: float,
     collected_at: datetime | None = None,
     expiration_count: int | None = 3,
+    benchmark_snapshot: BenchmarkSnapshot | None = None,
 ) -> tuple[Path, int]:
     """Append one materially changed surface; return zero rows if unchanged."""
     market_snapshot = fetch_option_chain_snapshot(symbol, expiration_count)
@@ -238,6 +248,23 @@ def save_snapshot(
             "riskFreeRate": risk_free_rate,
             "riskFreeRateSource": RISK_FREE_RATE_SOURCE,
             "dividendYield": dividend_yield,
+            "benchmarkSymbol": (
+                benchmark_snapshot.symbol if benchmark_snapshot else ""
+            ),
+            "benchmarkPrice": (
+                benchmark_snapshot.price if benchmark_snapshot else None
+            ),
+            "benchmarkPriceSource": (
+                benchmark_snapshot.price_source if benchmark_snapshot else ""
+            ),
+            "benchmarkQuoteTime": (
+                benchmark_snapshot.quote_time if benchmark_snapshot else None
+            ),
+            "benchmarkQuoteTimeSource": (
+                benchmark_snapshot.quote_time_source
+                if benchmark_snapshot
+                else None
+            ),
             "timeToExpiryYears": years,
             "greekModel": "black-scholes-merton",
         }
@@ -284,11 +311,13 @@ def collect_cycle(
     expiration_count: int | None = 3,
     *,
     continuous: bool = False,
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
 ) -> CycleResult:
     """Collect every ticker and persist a queryable heartbeat throughout."""
     result = CycleResult(
         cycle_started_at=_utc_now().isoformat(),
         continuous=continuous,
+        benchmark_symbol=benchmark_symbol.strip().upper(),
     )
     _write_cycle_status(output_dir, result)
     try:
@@ -304,6 +333,24 @@ def collect_cycle(
         _write_cycle_status(output_dir, result)
         return result
 
+    benchmark_snapshot = None
+    try:
+        benchmark_snapshot = fetch_benchmark_snapshot(benchmark_symbol)
+        result.benchmark_symbol = benchmark_snapshot.symbol
+        result.benchmark_price = benchmark_snapshot.price
+        result.benchmark_quote_time = benchmark_snapshot.quote_time
+        logging.info(
+            "benchmark: %s %.6f (%s)",
+            benchmark_snapshot.symbol,
+            benchmark_snapshot.price,
+            benchmark_snapshot.price_source,
+        )
+    except Exception as error:
+        message = str(error)
+        logging.error("benchmark: %s", message)
+        result.errors["benchmark"] = message
+        _write_cycle_status(output_dir, result)
+
     for index, symbol in enumerate(TOP_50_TICKERS):
         result.tickers_attempted += 1
         try:
@@ -312,6 +359,7 @@ def collect_cycle(
                 output_dir,
                 risk_free_rate,
                 expiration_count=expiration_count,
+                benchmark_snapshot=benchmark_snapshot,
             )
             result.successes += 1
             if row_count:
@@ -340,9 +388,15 @@ def collect_all(
     output_dir: Path,
     ticker_delay: float = 1.0,
     expiration_count: int | None = 3,
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
 ) -> tuple[int, int]:
     """Collect every ticker, continuing when an individual ticker fails."""
-    result = collect_cycle(output_dir, ticker_delay, expiration_count)
+    result = collect_cycle(
+        output_dir,
+        ticker_delay,
+        expiration_count,
+        benchmark_symbol=benchmark_symbol,
+    )
     return result.successes, result.failures
 
 
@@ -352,6 +406,11 @@ def main() -> int:
     parser.add_argument("--interval", type=int, default=900)
     parser.add_argument("--ticker-delay", type=float, default=1.0)
     parser.add_argument(
+        "--benchmark-symbol",
+        default=DEFAULT_BENCHMARK_SYMBOL,
+        help="shared benchmark quote fetched once per cycle (default: SPY)",
+    )
+    parser.add_argument(
         "--expirations",
         type=int,
         default=3,
@@ -359,9 +418,15 @@ def main() -> int:
     )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
-    if args.interval < 1 or args.ticker_delay < 0 or args.expirations < 0:
+    if (
+        args.interval < 1
+        or args.ticker_delay < 0
+        or args.expirations < 0
+        or not args.benchmark_symbol.strip()
+    ):
         parser.error(
-            "--interval must be positive; delays and expiration count cannot be negative"
+            "--interval must be positive; delays and expiration count cannot "
+            "be negative; benchmark symbol cannot be empty"
         )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -373,6 +438,7 @@ def main() -> int:
                     args.ticker_delay,
                     expiration_count=args.expirations or None,
                     continuous=not args.once,
+                    benchmark_symbol=args.benchmark_symbol,
                 )
                 logging.info(
                     "cycle complete: %d succeeded, %d failed, %d appended, "

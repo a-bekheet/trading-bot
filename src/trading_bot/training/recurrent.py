@@ -38,6 +38,7 @@ class RecurrentConfig:
     masked_input_indices: tuple[int, ...] = ()
     auxiliary_target_count: int = 0
     auxiliary_horizons: tuple[int, ...] = (1,)
+    critic_layer_norm: bool = False
 
     def __post_init__(self) -> None:
         if min(self.input_size, self.slot_count, self.action_count, self.hidden_size) < 1:
@@ -75,6 +76,13 @@ class RecurrentConfig:
             raise ValueError("masked_input_indices cannot disable every input")
         if self.auxiliary_target_count < 0:
             raise ValueError("auxiliary_target_count cannot be negative")
+        if not isinstance(self.critic_layer_norm, bool):
+            raise ValueError("critic_layer_norm must be a boolean")
+        critic_width = self.hidden_size * (2 if self.kind == "hybrid" else 1)
+        if self.critic_layer_norm and critic_width < 2:
+            raise ValueError(
+                "critic_layer_norm requires a critic width of at least two"
+            )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
             not normalized_horizons
@@ -219,6 +227,15 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 ),
                 persistent=False,
             )
+            self.register_buffer(
+                "_graph_diagonal",
+                (
+                    torch.eye(config.slot_count, dtype=torch.bool).unsqueeze(0)
+                    if fixed_graph_encoder
+                    else torch.empty(0, dtype=torch.bool)
+                ),
+                persistent=False,
+            )
             self.input_norm = nn.LayerNorm(temporal_input_size)
             if graph_encoder:
                 self.contract_norm = nn.LayerNorm(config.contract_feature_count)
@@ -344,6 +361,11 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                             config.action_count,
                         )[:, 0] = config.initial_hold_bias
                 self.joint_hold = None
+            self.value_norm = (
+                nn.LayerNorm(output_size)
+                if config.critic_layer_norm
+                else nn.Identity()
+            )
             self.value = nn.Linear(output_size, 1)
             self.auxiliary = (
                 nn.Linear(output_size, config.auxiliary_target_count)
@@ -407,9 +429,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 ).sqrt().clamp_min(1e-6)
                 relation = centered / relation_scale
                 distances = torch.cdist(relation, relation)
-                diagonal = torch.eye(
-                    config.slot_count, dtype=torch.bool, device=hidden.device
-                ).unsqueeze(0)
+                diagonal = self._graph_diagonal
                 local_pairs = pair_valid & ~diagonal
                 if surface_graph_encoder:
                     assert config.graph_option_side_index is not None
@@ -535,10 +555,15 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         def _encode_sequence(self, sequence, hidden_state=None):
             if self._masked_input_indices.numel():
                 if compact_flat_mask:
-                    sequence = sequence.index_select(
-                        -1,
-                        self._active_input_indices,
-                    )
+                    if sequence.shape[-1] == config.input_size:
+                        sequence = sequence.index_select(
+                            -1,
+                            self._active_input_indices,
+                        )
+                    elif sequence.shape[-1] != temporal_input_size:
+                        raise ValueError(
+                            "flat sequence width must be raw or precompacted"
+                        )
                 else:
                     sequence = sequence.clone()
                     sequence.index_fill_(-1, self._masked_input_indices, 0.0)
@@ -664,7 +689,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                     action_mask,
                     node_embeddings,
                 ),
-                self.value(encoded).squeeze(-1),
+                self.value(self.value_norm(encoded)).squeeze(-1),
             )
 
         @staticmethod

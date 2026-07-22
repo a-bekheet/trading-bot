@@ -107,6 +107,56 @@ class RecurrentTests(TestCase):
             RecurrentConfig(5, 2, 3, auxiliary_horizons=(2, 1))
         with self.assertRaisesRegex(ValueError, "attention_heads"):
             RecurrentConfig(5, 2, 3, attention_heads=0)
+        with self.assertRaisesRegex(ValueError, "critic_layer_norm"):
+            RecurrentConfig(5, 2, 3, critic_layer_norm=1)
+        with self.assertRaisesRegex(ValueError, "critic width"):
+            RecurrentConfig(
+                5,
+                2,
+                3,
+                hidden_size=1,
+                critic_layer_norm=True,
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_critic_layer_norm_changes_only_the_value_branch(self):
+        base = RecurrentConfig(
+            7,
+            2,
+            3,
+            action_slot_count=3,
+            hidden_size=4,
+        )
+        torch.manual_seed(19)
+        plain = build_recurrent_actor_critic(base)
+        torch.manual_seed(19)
+        normalized = build_recurrent_actor_critic(RecurrentConfig(**{
+            **base.__dict__,
+            "critic_layer_norm": True,
+        }))
+        sequence = torch.randn(2, 3, base.input_size)
+        action_mask = torch.ones(2, 3, 3, 3, dtype=torch.bool)
+
+        plain_logits, _ = plain.policy_sequence(sequence, action_mask)
+        normalized_logits, _ = normalized.policy_sequence(
+            sequence,
+            action_mask,
+        )
+        _, plain_values, _ = plain.forward_sequence(sequence, action_mask)
+        _, normalized_values, _ = normalized.forward_sequence(
+            sequence,
+            action_mask,
+        )
+
+        torch.testing.assert_close(normalized_logits, plain_logits)
+        self.assertFalse(torch.equal(normalized_values, plain_values))
+        self.assertIsInstance(plain.value_norm, torch.nn.Identity)
+        self.assertIsInstance(normalized.value_norm, torch.nn.LayerNorm)
+        self.assertEqual(
+            sum(parameter.numel() for parameter in normalized.parameters())
+            - sum(parameter.numel() for parameter in plain.parameters()),
+            2 * base.hidden_size,
+        )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_surface_graph_requires_coordinates_and_option_side(self):
@@ -274,6 +324,16 @@ class RecurrentTests(TestCase):
             sum(parameter.numel() for parameter in model.parameters()),
             sum(parameter.numel() for parameter in full.parameters()),
         )
+
+        compact = sequence.index_select(-1, model._active_input_indices)
+        compact_logits, compact_values, _ = model.forward_sequence(
+            compact,
+            mask,
+        )
+        torch.testing.assert_close(first_logits, compact_logits)
+        torch.testing.assert_close(first_values, compact_values)
+        with self.assertRaisesRegex(ValueError, "raw or precompacted"):
+            model.forward_sequence(sequence[..., :4], mask)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_recurrent_variants_have_safe_masked_action_shapes(self):
@@ -923,6 +983,19 @@ class RecurrentTests(TestCase):
         self.assertTrue(any(
             ".neighbor." in name for name, _ in model.named_parameters()
         ))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_fixed_graph_reuses_nonpersistent_diagonal_buffer(self):
+        model = build_recurrent_actor_critic(
+            self.surface_graph_set_config()
+        )
+
+        self.assertEqual(
+            tuple(model._graph_diagonal.shape),
+            (1, model.config.slot_count, model.config.slot_count),
+        )
+        self.assertEqual(model._graph_diagonal.dtype, torch.bool)
+        self.assertNotIn("_graph_diagonal", model.state_dict())
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_set_uses_fewer_parameters_than_flattened_graph(self):

@@ -1,5 +1,6 @@
-"""Streamlit interface for option data and paper trading."""
+"""Streamlit research workspace for agents, market data, and paper trading."""
 
+import json
 import math
 from pathlib import Path
 
@@ -14,14 +15,62 @@ from trading_bot.interface.data import (
     market_data_freshness_status,
     market_session_status,
 )
+from trading_bot.interface.results import (
+    agent_leaderboard,
+    arena_overview,
+    discover_agent_runs,
+    equity_curve,
+    evidence_summary,
+    heldout_results,
+    trade_ledger,
+)
 
 
 DATA_DIR = Path("data")
 PAPER_DATABASE = DATA_DIR / "paper_portfolio.db"
 
 st.set_page_config(page_title="Options Sandbox", layout="wide")
-st.title("Options Research & Paper-Trading Sandbox")
-st.warning("Paper trading only. This application has no live broker connection.")
+st.markdown(
+    """
+    <style>
+    .stApp {background: #f5f7fb;}
+    [data-testid="stMetric"] {
+        background: white;
+        border: 1px solid #e6e9f0;
+        border-radius: 14px;
+        padding: 14px 16px;
+        box-shadow: 0 4px 18px rgba(24, 33, 56, 0.04);
+    }
+    .agent-hero {
+        padding: 24px 28px;
+        border-radius: 20px;
+        background: linear-gradient(125deg, #121b34 0%, #243866 64%, #245b79 100%);
+        color: white;
+        margin-bottom: 14px;
+    }
+    .agent-hero h1 {font-size: 2rem; margin: 0 0 6px 0;}
+    .agent-hero p {margin: 0; color: #dce6ff;}
+    .scope-pill {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: #e9eefb;
+        color: #23345f;
+        font-size: 0.78rem;
+        font-weight: 650;
+        margin-right: 6px;
+    }
+    </style>
+    <div class="agent-hero">
+      <h1>Options Agent Research Lab</h1>
+      <p>Train, compare, inspect, and paper-test recurrent options agents.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.caption(
+    "RESEARCH DEMO · PAPER TRADING ONLY · NO LIVE BROKER CONNECTION"
+)
 
 tickers = available_tickers(DATA_DIR)
 if not tickers:
@@ -29,6 +78,7 @@ if not tickers:
     st.stop()
 
 broker = PaperBroker(PAPER_DATABASE)
+st.sidebar.header("Research workspace")
 symbol = st.sidebar.selectbox("Ticker", tickers)
 option_type = st.sidebar.radio("Option type", ("call", "put"), horizontal=True)
 snapshot = load_latest_snapshot(DATA_DIR, symbol)
@@ -39,9 +89,233 @@ execution_enabled = bool(
     session["trading_enabled"] and freshness["trading_enabled"]
 )
 
-market_tab, portfolio_tab, history_tab = st.tabs(
-    ("Market Data & Paper Order", "Paper Portfolio", "Trade History")
+agent_tab, market_tab, portfolio_tab, history_tab = st.tabs(
+    (
+        "Agent Results",
+        "Market & Paper Order",
+        "Paper Portfolio",
+        "Trade History",
+    )
 )
+
+with agent_tab:
+    runs = discover_agent_runs(DATA_DIR)
+    if not runs:
+        st.subheader("No walk-forward agent run yet")
+        st.write(
+            "Run the GRU/LSTM/mixture tournament below, then refresh this page. "
+            "The result will include validation rankings, a held-out equity "
+            "path, risk, latency, and the actual simulated fill ledger."
+        )
+        st.code(
+            "train-walk-forward --symbol AAPL --output-dir "
+            "data/agent_runs/aapl-recurrent-tournament --min-train-size 6 "
+            "--validation-size 2 --test-size 3 --step-size 100 --episodes 2 "
+            "--hidden-size 8 --sequence-length 2 --burn-in-steps 0 "
+            "--max-steps 4 --initial-hold-bias 0 "
+            "--candidate flat:gru --candidate flat:lstm "
+            "--candidate flat:mixture",
+            language="bash",
+        )
+    else:
+        arena = arena_overview(runs)
+        if len(arena) > 1:
+            st.subheader("Cross-ticker agent arena")
+            st.caption(
+                "Newest run per ticker. Each row uses its own validation "
+                "tournament and separately selected held-out policy."
+            )
+            arena_columns = st.columns(5)
+            arena_columns[0].metric("Tickers evaluated", len(arena))
+            arena_columns[1].metric(
+                "Total held-out fills", int(arena["Executions"].sum())
+            )
+            arena_columns[2].metric(
+                "Mean demo return",
+                f"{float(arena['Held-out return'].mean()):.3%}",
+            )
+            arena_columns[3].metric(
+                "Positive ticker paths",
+                int((arena["Held-out return"] > 0).sum()),
+            )
+            arena_columns[4].metric(
+                "Total held-out steps", int(arena["Steps"].sum())
+            )
+            arena_chart, winner_chart = st.columns((3, 2))
+            with arena_chart:
+                st.caption("Held-out return by ticker")
+                st.bar_chart(
+                    arena.set_index("Ticker")[["Held-out return"]],
+                    height=260,
+                )
+            with winner_chart:
+                st.caption("Validation-selected architecture count")
+                winner_counts = (
+                    arena["Selected agent"].value_counts().rename("Selections")
+                )
+                st.bar_chart(winner_counts, height=260)
+            st.dataframe(
+                arena,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Held-out return": st.column_config.NumberColumn(
+                        format="percent"
+                    ),
+                    "Final NAV": st.column_config.NumberColumn(format="$%.2f"),
+                    "Max drawdown": st.column_config.NumberColumn(
+                        format="percent"
+                    ),
+                    "Fees": st.column_config.NumberColumn(format="$%.2f"),
+                },
+            )
+            st.divider()
+
+        st.subheader("Experiment drill-down")
+        run_options = {
+            (
+                f"{run['_run_name']} · {run.get('symbol', 'unknown')} · "
+                f"{len(run.get('folds', []))} fold(s)"
+            ): run
+            for run in runs
+        }
+        run_label = st.selectbox("Experiment", tuple(run_options))
+        run = run_options[run_label]
+        leaderboard = agent_leaderboard(run)
+        heldout = heldout_results(run)
+        evidence = evidence_summary(run)
+
+        st.markdown(
+            '<span class="scope-pill">Validation-ranked agents</span>'
+            '<span class="scope-pill">Selected winner tested once</span>'
+            '<span class="scope-pill">Net-liquidation accounting</span>',
+            unsafe_allow_html=True,
+        )
+        if evidence["grade"] == "Exploratory":
+            st.warning(
+                "Exploratory evidence only. The held-out path is too short "
+                "for an alpha claim; results are shown to make agent behavior "
+                "inspectable, not to imply profitability."
+            )
+        provenance = {
+            fold.get("test_data_quality", {}).get("execution_provenance")
+            for fold in run.get("folds", [])
+        }
+        if "legacy_unknown_session_fallback" in provenance:
+            st.error(
+                "Execution provenance warning: at least one held-out slice "
+                "uses legacy snapshots without provider-confirmed market-session "
+                "or quote-time coverage. Its fills are sandbox demonstrations, "
+                "not evidence of executable market performance."
+            )
+        elif "provider_nonregular_present" in provenance:
+            st.warning(
+                "The held-out slice includes provider-confirmed non-regular "
+                "snapshots. The environment masks non-hold actions there; "
+                "keep this path in the sandbox-evidence category."
+            )
+
+        selected_name = (
+            heldout.iloc[0]["Agent"] if not heldout.empty else "Unavailable"
+        )
+        mean_return = (
+            float(heldout["Test return"].mean()) if not heldout.empty else 0.0
+        )
+        executions = (
+            int(heldout["Executions"].sum()) if not heldout.empty else 0
+        )
+        metric_columns = st.columns(6)
+        metric_columns[0].metric("Agents compared", len(leaderboard))
+        metric_columns[1].metric("Selected agent", selected_name)
+        metric_columns[2].metric("Held-out return", f"{mean_return:.3%}")
+        metric_columns[3].metric("Held-out fills", executions)
+        metric_columns[4].metric(
+            "Fastest candidate",
+            f"{leaderboard['Median latency (us)'].min():.1f} us"
+            if not leaderboard.empty
+            else "n/a",
+        )
+        metric_columns[5].metric("Evidence", evidence["grade"])
+
+        st.subheader("Agent leaderboard")
+        st.caption(
+            "Models are ranked only on validation evidence. Held-out data is "
+            "opened after a winner is fixed."
+        )
+        st.dataframe(
+            leaderboard,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Validation score": st.column_config.NumberColumn(format="%.6f"),
+                "Validation reward": st.column_config.NumberColumn(format="%.6f"),
+                "Median latency (us)": st.column_config.NumberColumn(format="%.1f"),
+                "Parameters": st.column_config.NumberColumn(format="%d"),
+            },
+        )
+
+        fold_numbers = [int(fold["fold"]) for fold in run.get("folds", [])]
+        selected_fold = st.selectbox("Inspect held-out fold", fold_numbers)
+        fold_result = heldout[heldout["Fold"] == selected_fold]
+        if not fold_result.empty:
+            report = fold_result.iloc[0]
+            st.subheader("Held-out result")
+            result_columns = st.columns(6)
+            result_columns[0].metric("Final NAV", f"${report['Final NAV']:,.2f}")
+            result_columns[1].metric("Return", f"{report['Test return']:.3%}")
+            result_columns[2].metric("Max drawdown", f"{report['Max drawdown']:.3%}")
+            result_columns[3].metric("Turnover", f"{report['Turnover']:.3f}x")
+            result_columns[4].metric("Fees", f"${report['Fees']:,.2f}")
+            result_columns[5].metric("Executions", int(report["Executions"]))
+
+        curve = equity_curve(run, selected_fold)
+        if curve.empty:
+            st.info(
+                "This older artifact has aggregate metrics but no stored path. "
+                "Re-run the tournament to unlock equity and trade inspection."
+            )
+        else:
+            st.subheader("Held-out equity path")
+            chart = curve.pivot_table(
+                index="Timestamp",
+                columns="Series",
+                values="Equity",
+                aggfunc="first",
+            )
+            st.line_chart(chart, height=340)
+
+        ledger = trade_ledger(run, selected_fold)
+        st.subheader("Agent fills")
+        if ledger.empty:
+            st.info(
+                "The selected policy made no executable held-out trades in "
+                "this fold. This is a real result, not a missing ledger."
+            )
+        else:
+            st.dataframe(
+                ledger,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Price": st.column_config.NumberColumn(format="$%.4f"),
+                    "Fee": st.column_config.NumberColumn(format="$%.2f"),
+                    "Post-trade NAV": st.column_config.NumberColumn(
+                        format="$%.2f"
+                    ),
+                },
+            )
+
+        with st.expander("Run provenance and raw held-out metrics"):
+            st.write(
+                f"Artifact: `{run['_artifact_path']}` · schema: "
+                f"`{run.get('schema_version')}`"
+            )
+            st.dataframe(heldout, width="stretch", hide_index=True)
+            st.json(json.loads(json.dumps({
+                "walk_forward": run.get("walk_forward"),
+                "training": run.get("training"),
+                "candidate_models": run.get("candidate_models"),
+            })))
 
 with market_tab:
     first = snapshot.iloc[0]

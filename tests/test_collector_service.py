@@ -34,6 +34,8 @@ class CollectorServiceTests(TestCase):
                 "900",
                 "--ticker-delay",
                 "0.5",
+                "--benchmark-symbol",
+                "SPY",
                 "--expirations",
                 "1",
             ],

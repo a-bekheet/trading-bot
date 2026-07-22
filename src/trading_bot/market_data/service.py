@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from trading_bot.market_data.benchmark import DEFAULT_BENCHMARK_SYMBOL
+
 
 LAUNCH_AGENT_LABEL = "io.github.a-bekheet.trading-bot.collector"
 
@@ -23,6 +25,7 @@ def launch_agent_payload(
     interval: int,
     ticker_delay: float,
     expirations: int,
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
 ) -> dict[str, Any]:
     """Build a deterministic LaunchAgent property list."""
     return {
@@ -37,6 +40,8 @@ def launch_agent_payload(
             str(interval),
             "--ticker-delay",
             str(ticker_delay),
+            "--benchmark-symbol",
+            benchmark_symbol,
             "--expirations",
             str(expirations),
         ],
@@ -82,6 +87,7 @@ def install(
     interval: int,
     ticker_delay: float,
     expirations: int,
+    benchmark_symbol: str = DEFAULT_BENCHMARK_SYMBOL,
 ) -> Path:
     if sys.platform != "darwin":
         raise RuntimeError("collector-service currently supports macOS only")
@@ -102,6 +108,7 @@ def install(
         interval=interval,
         ticker_delay=ticker_delay,
         expirations=expirations,
+        benchmark_symbol=benchmark_symbol,
     )
     launch_agents = Path.home() / "Library" / "LaunchAgents"
     launch_agents.mkdir(parents=True, exist_ok=True)
@@ -134,10 +141,17 @@ def main() -> int:
     parser.add_argument("--interval", type=int, default=900)
     parser.add_argument("--ticker-delay", type=float, default=1.0)
     parser.add_argument("--expirations", type=int, default=3)
+    parser.add_argument("--benchmark-symbol", default=DEFAULT_BENCHMARK_SYMBOL)
     args = parser.parse_args()
-    if args.interval < 1 or args.ticker_delay < 0 or args.expirations < 0:
+    if (
+        args.interval < 1
+        or args.ticker_delay < 0
+        or args.expirations < 0
+        or not args.benchmark_symbol.strip()
+    ):
         parser.error(
-            "--interval must be positive; delays and expiration count cannot be negative"
+            "--interval must be positive; delays and expiration count cannot "
+            "be negative; benchmark symbol cannot be empty"
         )
     try:
         if args.action == "install":
@@ -147,6 +161,7 @@ def main() -> int:
                 interval=args.interval,
                 ticker_delay=args.ticker_delay,
                 expirations=args.expirations,
+                benchmark_symbol=args.benchmark_symbol,
             )
             print(f"installed and started {LAUNCH_AGENT_LABEL}: {path}")
         else:

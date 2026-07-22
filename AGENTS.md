@@ -33,7 +33,10 @@ does not place live trades.
   deterministic evaluation, safe
   checkpoint restoration, and provenance. `walk_forward.py` owns validation-only
   model selection, held-out test evaluation, fold artifacts, and its CLI. These
-  modules stay outside ordinary collector imports.
+  modules stay outside ordinary collector imports. `arena.py` applies one fixed
+  GRU/LSTM/gated-mixture comparison contract across independent tickers, writes
+  one normal walk-forward summary per ticker, and records partial failures in a
+  small arena index; it must not merge ticker timelines or peek across tests.
 - `tests/`: offline tests; market-data calls must be mocked here.
 - `data/`: generated append-only CSVs, one per ticker; intentionally git-ignored.
 
@@ -51,26 +54,35 @@ Create those packages only when implementing their first real behavior.
    is dated 2026-07-21 and sourced from CompaniesMarketCap's U.S. ranking.
 2. `market_data.rates` fetches `^IRX` once per cycle as a short-term risk-free
    proxy.
-3. `market_data.option_chain` retrieves a configurable number of expirations,
+3. `market_data.benchmark` fetches one provider-timestamped SPY one-minute
+   close per cycle by default. `--benchmark-symbol` may change the declared
+   proxy. Benchmark failure is optional and must not stop ticker collection;
+   missing context remains zero with zero coverage.
+4. `market_data.option_chain` retrieves a configurable number of expirations,
    calls, puts, underlying price, dividend yield, and the provider's explicit
    market-session state. Collection defaults to
    three expirations; one is the low-latency mode and zero in the CLI means all.
    Yahoo's option payload reports dividend yield in percentage units, so the
    adapter divides it by 100.
-4. `analytics.greeks` calculates Black-Scholes-Merton Greeks.
-5. `market_data.collector` appends the enriched rows to `data/<TICKER>.csv`
+5. `analytics.greeks` calculates Black-Scholes-Merton Greeks.
+6. `market_data.collector` appends the enriched rows to `data/<TICKER>.csv`
    only when the raw quote/rate surface materially changes. It also holds a
    per-output-directory process lock and atomically updates
    `data/_collector_status.json` throughout each cycle.
-6. `market_data.status` validates heartbeat freshness, cycle failures, and
+7. `market_data.status` validates heartbeat freshness, cycle failures, and
    continuous-process liveness. `market_data.service` manages the optional
    macOS LaunchAgent used for unattended restart-on-failure collection.
-7. `interface.app` displays the latest saved snapshot; it never fetches markets.
-   It disables paper orders when the provider explicitly reports a non-regular
-   session and warns when legacy data has no session-state coverage.
-8. `execution.paper_broker` stores fake cash, long positions, and fills in
+8. `interface.app` displays saved walk-forward agent evidence and the latest
+   market snapshot; it never fetches markets. Agent results come only from
+   JSON artifacts under `data/agent_runs/` or `data/models/walk-forward/`.
+   Candidate rankings are validation-only; only the fixed winner is labeled
+   held out. The UI must keep exploratory sample-size and legacy execution-
+   provenance warnings visible. It disables paper orders when the provider
+   explicitly reports a non-regular session and warns when legacy data has no
+   session-state coverage.
+9. `execution.paper_broker` stores fake cash, long positions, and fills in
    `data/paper_portfolio.db`; `execution.valuation` marks positions from CSVs.
-9. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
+10. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
    `reset`/`step` API. It is `research_demo` only and must not be used as a
    historical-performance benchmark.
 
@@ -88,6 +100,9 @@ Snapshot identity excludes `collectedAt`, time-to-expiry, and derived Greeks.
 Do not let recomputation against unchanged stale quotes create a new market
 state. Identity must retain raw quote fields, contract membership, spot,
 dividend yield, and risk-free-rate inputs so any material change is persisted.
+The declared benchmark symbol, price, provider timestamp, and sources are also
+material. Fetch the benchmark once per cycle, never once per ticker, and never
+persist an untimestamped fallback merely to manufacture market context.
 The persisted Greek-model identifier is also material so a deliberate model
 version change can coexist with the older calculation. Provider `marketState`
 is material: a regular-to-closed transition must be stored even when quotes do
@@ -105,6 +120,8 @@ surface. Do not delete old CSV rows as part of this filter.
 - `underlyingPrice`, `underlyingPriceSource`, `underlyingQuoteTime`,
   `underlyingQuoteTimeSource`, `marketState`, `riskFreeRate`,
   `riskFreeRateSource`, `dividendYield`
+- `benchmarkSymbol`, `benchmarkPrice`, `benchmarkPriceSource`,
+  `benchmarkQuoteTime`, `benchmarkQuoteTimeSource`
 - `timeToExpiryYears`, `impliedVolatility`, `greekModel`
 - `delta`, `gamma`, `theta`, `vega`
 
@@ -301,6 +318,16 @@ state:
   action-equivalent to deterministic full actor-critic inference and must not
   execute value or auxiliary heads. Training rollouts still require
   `sample_action(...)` because GAE and the value loss need critic estimates.
+- For flat feature-removal candidates, validate the raw external vector width,
+  compact it with the model's fixed active indices before creating the Torch
+  tensor, and let the recurrent model accept that precompacted width. Keep raw
+  training tensors supported and action-equivalent; do not reintroduce a Torch
+  `index_select` into every streaming actor call.
+- When those fixed masked indices form one contiguous interval, compact with the
+  two surviving NumPy slices; otherwise use the fixed advanced-index gather.
+  Do not replace either path with Python-filled reusable buffers or
+  `np.take(..., out=...)` without a new matched benchmark: that approach was
+  slower for both batch-one and synchronized batch-16 actors here.
 - Walk-forward latency gates measure actor-only batch-one deployment. Batched
   throughput is separate operational evidence and must never replace the
   batch-one gate unless the intended deployment itself has a fixed batch.
@@ -310,8 +337,23 @@ fingerprint to unrelated ticker files: doing so adds startup I/O and invalidates
 otherwise reproducible experiments whenever the collector updates another
 symbol.
 
+Walk-forward summaries are also the interface contract for tangible agents.
+Persist held-out timestamps, step returns, NAVs, decisions, and fills only after
+validation fixes the winning model. Preserve test-slice market-state and quote-
+time coverage beside those paths. The interface may aggregate validation
+candidates into a leaderboard, but it must never relabel validation metrics as
+held-out performance or imply alpha when block-bootstrap evidence is
+insufficient. Training and market fetching stay outside Streamlit reruns.
+
+`agent-arena` is the reproducible integration-demo entry point. Keep candidate
+families, split sizes, training budget, costs, and risk rules identical across
+its tickers unless the changed contract is explicit in the artifact. A failure
+for one ticker must be written with its exception type and message while other
+tickers continue. Do not average returns into a portfolio claim: each row is an
+independent, validation-selected research-demo path with its own provenance.
+
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v19`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v22`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
@@ -322,6 +364,37 @@ must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
 finite-value tests, and a checkpoint-schema bump; old weights must never be
 silently loaded against a changed feature layout.
+
+Capture time belongs once in the market vector as
+`easternCaptureDayFraction` plus `easternCaptureClockCoverage`. Convert the
+current `collectedAt` instant from UTC to `America/New_York` with DST support;
+invalid or absent timestamps are zero with zero coverage. Keep both inputs in
+the named `intraday_clock` ablation. This is policy context only: never use it
+to infer provider market state, holidays, early closes, quote time, or execution
+permission, and never let removing it alter the independent session mask.
+
+Systematic market context belongs once in the market vector. It contains only
+the provider-timestamped benchmark return, 4/16-observation cumulative return
+and realized volatility, ticker-minus-benchmark return, quote age, and coverage.
+Require strictly advancing benchmark provider time for one-step and relative
+returns; repeated or backward timestamps are unavailable, not observed zeros.
+Reset rolling benchmark history when the declared symbol changes so unlike
+price levels can never form a synthetic return.
+Keep this block removable through `systematic_context`. It is a cheap regime
+proxy, not a factor decomposition, hedge instrument, or alpha claim, and it
+must never control execution masks.
+
+Fitted smile geometry also belongs once in the market vector. Build it only
+from current, executable front-expiry OTM quotes inside 0.35 absolute forward
+log-moneyness. Require at least five unique points and two unique coordinates
+on each side of ATM, require observed support through +/-0.05, standardize
+coordinates before the quadratic solve, and expose
+fixed-radius curvature, relative RMSE, leave-one-out relative ATM residual, and
+binary coverage. Missing support is unavailable, not a flat smile. Keep the
+block removable through `smile_fit`; it is a noisy surface diagnostic and alpha
+hypothesis, never a reconstructed quote or execution authority. Yahoo option
+bid/ask rows have no synchronized exchange timestamp, so numeric quote validity
+is not proof of contemporaneous fillability.
 
 Every visible held contract exposes snapshots since opening and since its most
 recent trade. Same-sign adds retain the opening index, every fill resets the
@@ -399,7 +472,10 @@ be within 0.15 Delta of its target and ATM must be within 0.10 absolute forward
 log-moneyness; otherwise reduce coverage and leave the factor neutral.
 
 The trainer supports stateful PPO and Monte-Carlo REINFORCE with a learned value
-baseline. The default factorized decoder multiplies the independent masked-row
+baseline. Keep learning rate, PPO epochs, minibatch size, policy/value clipping,
+target KL, value coefficient, and gradient clipping exposed consistently by
+direct, single-ticker walk-forward, and universe walk-forward CLIs and persisted
+through `TrainingConfig`. The default factorized decoder multiplies the independent masked-row
 probabilities, equivalently summing their log probabilities, and uses one exact
 joint action likelihood per transition. PPO must clip one ratio formed from
 that joint likelihood; REINFORCE must use the joint log likelihood in its score
@@ -511,14 +587,28 @@ blend, preserve both experts' hidden states, and never reinterpret an old hybrid
 checkpoint as a mixture. The mixture's smaller heads do not imply lower latency;
 keep both parameter and batch-one inference measurements in tournaments.
 The declared selection score is total reward minus non-negative configured
-coefficients times maximum drawdown, downside deviation, and turnover. Use this
+coefficients times maximum drawdown, downside deviation, turnover, absolute
+underlying-return beta, and mean absolute Delta-notional weight. Use this
 one score consistently for best-episode restoration, patience, architecture,
 algorithm, and feature-ablation ranking. Persist raw reward, every component,
-and all coefficients. Defaults are zero; never tune coefficients from test.
+and all coefficients. A positive beta or Delta-notional coefficient requires
+covered validation evidence and must fail rather than score missing history as
+zero. Defaults are zero; never tune coefficients from test.
 Training-time drawdown and downside reward coefficients are independent from
 these validation-selection coefficients. Experiments may enable either layer
 or both, but must declare and persist the choice; never silently treat selection
 penalties as training reward or hide intentional double risk penalization.
+
+Delta-neutrality shaping is a separate train-only objective. Compute signed
+portfolio Delta notional as `portfolio_delta * current_spot / current_NAV`
+after each transition, require finite positive spot and NAV, and subtract the
+configured coefficient times its absolute value capped at 10. Persist raw and
+shaped reward, the separate component, raw exposure statistics, coverage, and
+cap semantics. Validation and test rewards remain unshaped executable
+net-liquidation returns. A matched `--delta-neutrality-ablation` must set only
+the coefficient to zero while preserving model parameters and inference work;
+report its validation lift, and prefer the disabled objective on an exact score
+tie. Never call point-in-time Delta weight realized beta or alpha.
 `train-demo` model selection is deterministic but in-sample and must remain
 labeled `in_sample_research_demo`. When `selection_env` is supplied, selection
 must use only that validation environment and be labeled
@@ -583,8 +673,17 @@ dropping them from the evidence. A cross-ticker ratio at or above the declared
 10x engineering threshold, or a mixture of positive and zero return-target
 scales, may recommend a normalization ablation, but the diagnostic must remain
 selection-inert. It cannot change a checkpoint, candidate, seed, or held-out
-result. PopArt, critic LayerNorm, or gradient balancing must enter as separate
-predeclared validation candidates and only after the diagnostic motivates them.
+result.
+
+Critic LayerNorm is implemented as the first separate candidate. It normalizes
+the recurrent representation only on the value branch immediately before the
+linear value head. Never route its output into the policy or auxiliary head, and
+never call it from `model.act(...)` or `policy_sequence(...)`. Require critic
+width at least two, keep it disabled by default, expose a matched disabled
+candidate through `--critic-layer-norm-ablation`, persist validation lift, and
+prefer disabled on an exact selection tie. This is one critic-conditioning
+ablation, not TOPPO. PopArt target normalization and per-task gradient balancing
+remain distinct future candidates and must not be bundled with it.
 
 `run_universe_walk_forward_training` is the shared-policy research boundary.
 Apply identical ordinal split indices to each ticker, but additionally require
@@ -631,6 +730,9 @@ invariants as `graph_set`. `graph_neighbors=0` retains counterpart edges for
 this encoder; only zero-neighbor `graph_set` is the no-adjacency Deep Sets
 baseline. Treat counterpart edges as representation structure, not put-call
 parity enforcement, reconstructed prices, or executable quotes.
+Fixed graph encoders must reuse the device-portable nonpersistent diagonal
+mask; do not allocate `torch.eye` per forward or add the mask to checkpoint
+weights.
 
 The `attention_set` encoder is the learned-relation counterpart. It must have no
 slot or positional embedding: masked self-attention operates only among valid
@@ -650,7 +752,9 @@ return no folds when history is insufficient. Never relax requested sizes to
 manufacture a result. `evaluate_cost_stress` must run identical policy logic
 under each scenario; default stress doubles both executable spread and
 commission. Episode reports retain return, drawdown, volatility/downside,
-turnover, costs, execution quality, and final/peak Greek exposure diagnostics.
+turnover, costs, execution quality, final/peak Greek exposure diagnostics,
+underlying return/volatility, aligned strategy beta/correlation with coverage,
+and mean/maximum absolute Delta-notional weight with coverage.
 Held-out statistical comparisons pair agent and baseline returns by exact
 arrival timestamp, then use circular moving blocks. A deterministic policy on
 one deterministic CSV path must accept exactly one held-out seed: changing the
@@ -706,8 +810,9 @@ exactly `K` contract nodes. Keep `RecurrentConfig.slot_count` equal to
 fold, train only on `train`, choose and restore weights only from `validation`,
 then evaluate `test`. Architecture tournaments must give PPO and REINFORCE
 candidates the same fold and seed, rank the declared validation selection score
-only, and break exact ties by parameter count, active input count, optimizer
-updates, then stable model ID. Instantiate the test environment
+only, and apply the declared objective-ablation preferences before worst-seed
+actor latency, parameter count, active input count, optimizer updates, and
+stable model ID. Instantiate the test environment
 only after the winner is fixed, save only the winning checkpoint, and never
 attach test metrics to losing candidates. The test range may populate reports
 and provenance only after selection; it must never affect features,
@@ -779,6 +884,7 @@ train-demo --symbol AAPL --encoder surface_graph_set --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder attention_set --attention-heads 4 --kind hybrid --episodes 25
 train-demo --symbol AAPL --allow-collateralized-option-shorts --episodes 25
 train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:0 --candidate surface_graph_set:hybrid:ppo:3 --candidate attention_set:hybrid:ppo
+train-walk-forward --symbol AAPL --delta-neutrality-coefficient 0.0001 --delta-neutrality-ablation --selection-abs-beta-penalty 0.01 --selection-delta-notional-penalty 0.01 --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8
 train-walk-forward --symbol AAPL --auxiliary-coefficient 0.05 --auxiliary-target-ablation medianContractDeltaHedgedSpotReturn --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8
 train-walk-forward --symbol AAPL --allow-collateralized-option-shorts --short-volatility-min-edge 0.02 --min-train-size 500 --validation-size 100 --test-size 100
 ```
@@ -854,3 +960,6 @@ short lifecycle.
 - The current local AAPL sample is sufficient for integration smoke tests, not
   statistical training claims. Follow `docs/research-roadmap.md` gates before
   treating a model improvement as alpha.
+- SPY is only the default systematic-context proxy. Its return does not isolate
+  a stock option's systematic component, and the collector has no benchmark
+  option surface, factor model, or synchronized exchange feed.

@@ -37,6 +37,11 @@ MATERIAL_SNAPSHOT_COLUMNS = (
     "riskFreeRate",
     "riskFreeRateSource",
     "dividendYield",
+    "benchmarkSymbol",
+    "benchmarkPrice",
+    "benchmarkPriceSource",
+    "benchmarkQuoteTime",
+    "benchmarkQuoteTimeSource",
     "greekModel",
 )
 

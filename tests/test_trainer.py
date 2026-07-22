@@ -226,6 +226,7 @@ class TrainerTests(TestCase):
             graph_hidden_size=4,
             graph_layers=1,
             attention_heads=2,
+            critic_layer_norm=True,
         )
         training = TrainingConfig(
             episodes=1,
@@ -244,6 +245,8 @@ class TrainerTests(TestCase):
 
         self.assertEqual(restored.config.encoder, "attention_set")
         self.assertEqual(restored.config.attention_heads, 2)
+        self.assertTrue(restored.config.critic_layer_norm)
+        self.assertIsInstance(restored.value_norm, torch.nn.LayerNorm)
         self.assertEqual(manifest["schema_version"], CHECKPOINT_SCHEMA_VERSION)
         self.assertTrue(all(
             torch.isfinite(parameter).all()
@@ -390,6 +393,51 @@ class TrainerTests(TestCase):
             model.auxiliary.weight[target_index].detach(),
         ))
 
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_delta_neutrality_shapes_training_only_with_bounded_exposure(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        recurrent = ModelSpec(
+            kind="gru",
+            encoder="flat",
+            hidden_size=4,
+        ).build(env)
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=2,
+            evaluation_interval=1,
+            random_start=False,
+            delta_neutrality_coefficient=0.001,
+            seed=67,
+        )
+
+        with patch(
+            "trading_bot.training.trainer.delta_notional_weight",
+            return_value=20.0,
+        ):
+            _, metrics = train_actor_critic(env, recurrent, training)
+
+        metric = metrics[0]
+        expected_penalty = -0.001 * 10.0 * metric["steps"]
+        self.assertAlmostEqual(
+            metric["reward_components"]["delta_neutrality"],
+            expected_penalty,
+        )
+        self.assertAlmostEqual(
+            metric["total_reward"],
+            metric["raw_total_reward"] + expected_penalty,
+        )
+        self.assertEqual(metric["mean_abs_delta_notional_weight"], 20.0)
+        self.assertEqual(metric["max_abs_delta_notional_weight"], 20.0)
+        self.assertEqual(metric["delta_notional_weight_coverage"], 1.0)
+        self.assertEqual(
+            metric["evaluation_total_reward"],
+            metric["evaluation_by_symbol"][env.dataset.symbol][
+                "total_reward"
+            ],
+        )
+
     def test_cli_selects_single_or_top50_training_universe(self):
         single = _parser().parse_args(["--symbol", "msft"])
         universe = _parser().parse_args(["--universe", "top50"])
@@ -400,6 +448,17 @@ class TrainerTests(TestCase):
         auxiliary = _parser().parse_args([
             "--auxiliary-target-exclusion",
             "medianContractDeltaHedgedSpotReturn",
+            "--delta-neutrality-coefficient",
+            "0.0001",
+            "--learning-rate",
+            "0.001",
+            "--value-clip",
+            "0.1",
+            "--value-coefficient",
+            "0.4",
+            "--gradient-clip",
+            "0.3",
+            "--critic-layer-norm",
         ])
 
         self.assertEqual(_symbols_from_args(single), ("MSFT",))
@@ -416,6 +475,12 @@ class TrainerTests(TestCase):
             auxiliary.auxiliary_target_exclusion,
             ["medianContractDeltaHedgedSpotReturn"],
         )
+        self.assertEqual(auxiliary.delta_neutrality_coefficient, 0.0001)
+        self.assertEqual(auxiliary.learning_rate, 0.001)
+        self.assertEqual(auxiliary.value_clip, 0.1)
+        self.assertEqual(auxiliary.value_coefficient, 0.4)
+        self.assertEqual(auxiliary.gradient_clip, 0.3)
+        self.assertTrue(auxiliary.critic_layer_norm)
         self.assertEqual(
             _environment_kwargs_from_args(single)[
                 "reward_drawdown_penalty"
@@ -605,6 +670,55 @@ class TrainerTests(TestCase):
                 )
                 policy.reset()
                 np.testing.assert_array_equal(policy(first), first_action)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_streaming_flat_ablation_precompaction_is_action_equivalent(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset(seed=68)
+        for masked, expected_slice in (
+            ((0, 2, 4), None),
+            ((1, 2, 3), (1, 4)),
+        ):
+            with self.subTest(masked=masked):
+                config = RecurrentConfig(
+                    input_size=observation_vector(observation).size,
+                    slot_count=2,
+                    action_count=env.action_shape[1],
+                    action_slot_count=env.action_shape[0],
+                    hidden_size=8,
+                    masked_input_indices=masked,
+                )
+                model = build_recurrent_actor_critic(config)
+                model.eval()
+                raw = torch.from_numpy(observation_vector(observation)).view(
+                    1,
+                    1,
+                    -1,
+                )
+                mask = torch.from_numpy(observation.action_mask).unsqueeze(0)
+                with torch.inference_mode():
+                    expected, _ = model.act(raw, mask, deterministic=True)
+
+                policy = recurrent_policy(model, 2)
+                batched = batched_recurrent_policy(model, 2, 2)
+                actual = policy(observation)
+
+                self.assertEqual(
+                    policy._contiguous_mask_slice,
+                    expected_slice,
+                )
+                self.assertEqual(
+                    batched._contiguous_mask_slice,
+                    expected_slice,
+                )
+                np.testing.assert_array_equal(
+                    actual,
+                    expected.squeeze(0).numpy(),
+                )
+                np.testing.assert_array_equal(
+                    batched((observation, observation)),
+                    np.repeat(expected.numpy(), 2, axis=0),
+                )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_streaming_policy_rejects_state_contamination_and_bad_snapshots(self):
@@ -935,6 +1049,7 @@ class TrainerTests(TestCase):
             sequence_length=2,
             evaluation_interval=1,
             seed=11,
+            delta_neutrality_coefficient=0.001,
             auxiliary_coefficient=0.05,
             auxiliary_target_exclusions=(
                 "medianContractDeltaHedgedSpotReturn",
@@ -1131,6 +1246,17 @@ class TrainerTests(TestCase):
             "contract_minimum_coverage": 0.5,
             "inference_path": "excluded_from_policy_inference",
         })
+        self.assertEqual(sidecar["delta_neutrality_training_objective"], {
+            "enabled": True,
+            "coefficient": 0.001,
+            "exposure": (
+                "absolute_portfolio_delta_times_spot_divided_by_nav"
+            ),
+            "maximum_abs_exposure_for_training": 10.0,
+            "scope": "training_rewards_only",
+            "evaluation_rewards": "unshaped_executable_net_liquidation",
+            "inference_path": "unchanged",
+        })
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
         self.assertEqual(sidecar["selection"]["metric"], "evaluation_selection_score")
         self.assertEqual(
@@ -1140,6 +1266,8 @@ class TrainerTests(TestCase):
                 "drawdown_penalty": 0.0,
                 "downside_penalty": 0.0,
                 "turnover_penalty": 0.0,
+                "absolute_beta_penalty": 0.0,
+                "delta_notional_penalty": 0.0,
                 "cross_ticker_std_penalty": 0.0,
                 "worst_ticker_weight": 0.0,
             },
@@ -1169,7 +1297,7 @@ class TrainerTests(TestCase):
             },
         )
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v24")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v27")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
@@ -1185,7 +1313,7 @@ class TrainerTests(TestCase):
             sidecar["environment"]["reward_downside_penalty"],
             1.0,
         )
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v19")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v22")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],
@@ -1523,6 +1651,8 @@ class TrainerTests(TestCase):
             TrainingConfig(selection_min_delta=float("nan"))
         with self.assertRaisesRegex(ValueError, "auxiliary_coefficient"):
             TrainingConfig(auxiliary_coefficient=-0.1)
+        with self.assertRaisesRegex(ValueError, "delta_neutrality_coefficient"):
+            TrainingConfig(delta_neutrality_coefficient=float("nan"))
         for invalid in ((), (0,), (2, 1), (1, 1)):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(
                 ValueError,
@@ -1552,6 +1682,8 @@ class TrainerTests(TestCase):
             )
         with self.assertRaisesRegex(ValueError, "risk penalties"):
             TrainingConfig(selection_drawdown_penalty=-1)
+        with self.assertRaisesRegex(ValueError, "risk penalties"):
+            TrainingConfig(selection_abs_beta_penalty=-1)
         with self.assertRaisesRegex(ValueError, "risk penalties"):
             TrainingConfig(selection_cross_ticker_std_penalty=-1)
         with self.assertRaisesRegex(ValueError, "time_aware_discounting"):
@@ -1683,18 +1815,28 @@ class TrainerTests(TestCase):
             max_drawdown=0.01,
             downside_deviation=0.002,
             turnover=0.5,
+            return_beta_to_underlying=0.4,
+            return_beta_coverage=1.0,
+            mean_abs_delta_notional_weight=0.2,
+            delta_notional_weight_coverage=1.0,
         )
         config = TrainingConfig(
             selection_drawdown_penalty=1.0,
             selection_downside_penalty=2.0,
             selection_turnover_penalty=0.1,
+            selection_abs_beta_penalty=0.02,
+            selection_delta_notional_penalty=0.03,
         )
 
         score = selection_score(report, config)
 
-        self.assertAlmostEqual(score, -0.044)
+        self.assertAlmostEqual(score, -0.058)
         report.max_drawdown = -0.01
         with self.assertRaisesRegex(ValueError, "risk metrics"):
+            selection_score(report, config)
+        report.max_drawdown = 0.01
+        report.return_beta_coverage = 0.0
+        with self.assertRaisesRegex(ValueError, "covered validation beta"):
             selection_score(report, config)
 
     def test_aggregate_selection_score_penalizes_fragile_ticker_results(self):
