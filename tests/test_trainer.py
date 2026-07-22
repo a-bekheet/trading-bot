@@ -95,6 +95,12 @@ class TrainerTests(TestCase):
         self.assertEqual(_symbols_from_args(single), ("MSFT",))
         self.assertEqual(single.slot_assignment, "stable")
         self.assertEqual(single.action_decoder, "factorized")
+        self.assertFalse(single.allow_collateralized_option_shorts)
+        self.assertTrue(
+            _parser().parse_args([
+                "--allow-collateralized-option-shorts",
+            ]).allow_collateralized_option_shorts
+        )
         self.assertEqual(sparse.action_decoder, "single_leg")
         self.assertEqual(
             _parser().parse_args(["--slot-assignment", "ranked"]).slot_assignment,
@@ -283,16 +289,16 @@ class TrainerTests(TestCase):
         )
         self.assertEqual(sidecar["model"]["kind"], "hybrid")
         self.assertEqual(sidecar["model"]["encoder"], "graph")
-        self.assertEqual(sidecar["model"]["portfolio_feature_count"], 8)
+        self.assertEqual(sidecar["model"]["portfolio_feature_count"], 10)
         self.assertEqual(sidecar["model"]["action_slot_count"], 3)
         self.assertEqual(sidecar["model"]["initial_hold_bias"], 5.0)
         self.assertEqual(sidecar["model"]["masked_input_indices"], [0])
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v14")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v15")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v11")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v12")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],

@@ -56,6 +56,16 @@ def walk_forward_dataset() -> SnapshotDataset:
 
 
 class WalkForwardTrainingTests(TestCase):
+    def test_cli_makes_collateralized_option_shorts_explicitly_opt_in(self):
+        self.assertFalse(
+            _parser().parse_args([]).allow_collateralized_option_shorts
+        )
+        self.assertTrue(
+            _parser().parse_args([
+                "--allow-collateralized-option-shorts",
+            ]).allow_collateralized_option_shorts
+        )
+
     def test_cli_builds_matched_fixed_step_discount_ablation(self):
         args = _parser().parse_args(["--fixed-step-discount-ablation"])
 

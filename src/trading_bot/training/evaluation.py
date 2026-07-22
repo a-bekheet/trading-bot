@@ -292,6 +292,9 @@ def cost_stressed_environment(
         slot_count=source.slot_count,
         slot_assignment=source.slot_assignment,
         max_quantity=source.max_quantity,
+        allow_collateralized_option_shorts=(
+            source.allow_collateralized_option_shorts
+        ),
         starting_cash=source.starting_cash,
         commission_per_contract=commission,
         spread_multiplier=spread,

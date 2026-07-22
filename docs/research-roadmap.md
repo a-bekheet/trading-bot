@@ -36,11 +36,12 @@ Every candidate must eventually pass:
 | Evidence | Useful idea for this repository | Decision |
 | --- | --- | --- |
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
-| [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | Add CVaR or learned P&L-distribution objectives only after explicit short-option liability episodes and enough independent paths exist; the current tiny research demo cannot identify tail risk. |
+| [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | The collateralized liability foundation now exists. Add CVaR or learned P&L-distribution objectives only after enough independent paths and lifecycle validation exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Causal realized-volatility horizons, walk-forward evaluation, and explicit per-contract position quantity/cost/P&L state implement this lesson. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v11`, compact ATM-IV-minus-realized-volatility and term/dynamics state, stable contract/position identity, Greek budgets, and paired moving-block intervals implement the state/risk lesson. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v12`, compact ATM-IV-minus-realized-volatility and term/dynamics state, stable contract/position identity, Greek budgets, collateral state, and paired moving-block intervals implement the state/risk lesson. |
+| [Deep Hedging with Options Using the Implied Volatility Surface (revised 2025)](https://arxiv.org/abs/2504.06208) | Joint return/surface dynamics, multiple hedge instruments, variance-risk-premium state, and transaction costs can create useful state-dependent no-trade regions. | Keep whole-surface factors, option-plus-share actions, and sparse action priors; add a collateralized carry baseline before attributing any short-volatility behavior to RL. |
 | [IV-surface feedback for deep option hedging (revised 2026)](https://arxiv.org/abs/2407.21138) | A compact surface factorization includes ATM level, maturity and moneyness slopes, smile attenuation, smirk, and their dynamics; bounded recurrent hybrids outperform standalone networks in its numerical study. | Executable 25-delta risk-reversal/butterfly, ATM term slope/curvature, and one-snapshot factor changes now have explicit coverage once per market snapshot; test them through named tournament ablations. |
-| [Shortfall-aware RL option hedging (2026)](https://arxiv.org/abs/2601.01709) | Better static IV fit need not produce better dynamic hedging; replication-error and shortfall objectives under costs are separate evidence. | Keep realized path diagnostics primary. Defer shortfall/CVaR training until explicit option-liability episodes and enough independent paths exist. |
+| [Shortfall-aware RL option hedging (2026)](https://arxiv.org/abs/2601.01709) | Better static IV fit need not produce better dynamic hedging; replication-error and shortfall objectives under costs are separate evidence. | Keep realized path diagnostics primary. The liability surface is implemented; defer shortfall/CVaR training until enough independent paths make tail estimates meaningful. |
 | [Autonomous AI Agents for Option Hedging (2026)](https://arxiv.org/abs/2603.06587) | Listed-option experiments emphasize realized path shortfall frequency and Expected Shortfall rather than static fit. | Preserve executable current position state now; add terminal shortfall distributions only after liability episodes and enough independent held-out paths make tail estimates meaningful. |
 | [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Compare the factorized decoder with an exact single-leg joint categorical now. Defer autoregressive multi-leg decoding until this simpler restriction earns validation lift; never post-process sampled rows in a way that breaks PPO likelihoods. |
 | [Structured Policy Initialization for Large Discrete Actions (2026)](https://arxiv.org/abs/2601.04441) | Independence can create incoherent combinatorial actions, while learning full action structure can be slow and unstable; a pretrained structure model can improve convergence. | Keep the exact single-leg structural baseline lightweight. Consider learned multi-leg action structure only after sufficient trajectories exist for pretraining and the single-leg restriction is demonstrably too limiting. |
@@ -196,12 +197,23 @@ inference on both flat and graph-set layouts, so it remains a tournament
 candidate subject to the same latency ceiling rather than replacing GRU or the
 concatenated hybrid.
 
-The `dimensionless.v11` policy transform now batches signed contract columns,
+The `dimensionless.v12` policy transform now batches signed contract columns,
 uses clipping for infinity handling, replaces NaNs in one pass, and assembles
 the float32 vector directly. This reduced local preprocessing median by 37% and
 cut matched batch-one medians across flat and graph-set hybrid/mixture models
 without changing policy features or checkpoint compatibility. It is latency
 headroom for future experiments, not evidence that any model earns more return.
+
+The RL environment now has an explicit, opt-in option-liability foundation.
+It permits only covered calls and fully cash-secured puts, exposes locked cash
+and shares to the policy, prevents collateral reuse across simultaneous orders,
+supports signed close/cross accounting, and physically assigns in-the-money
+short equity options on the first observed post-expiry date. The constraints
+follow the conservative covered/cash-secured concepts in
+[FINRA Rule 4210](https://www.finra.org/rules-guidance/rulebooks/finra-rules/4210?page=1),
+not a broker-specific portfolio-margin engine. Early assignment and corporate
+actions remain absent, so this enables controlled liability experiments rather
+than live-execution fidelity.
 
 Walk-forward artifacts now include post-selection, paired circular moving-block
 comparisons of the agent against every baseline. They report cumulative
@@ -242,10 +254,10 @@ candidate. This corrects objective semantics; it is not evidence of alpha.
 
 - No trade and first-feasible policies test environment mechanics.
 - Retain the implemented Black-Scholes Delta hedge as a comparator and extend
-  it to explicit option-liability episodes when the historical dataset permits.
-- Retain the implemented long-volatility IV-versus-realized rule; add a
-  collateralized short-volatility/carry comparator only after margin, assignment,
-  and option-liability accounting exist.
+  it to the new option-liability episodes when historical depth permits.
+- Retain the implemented long-volatility IV-versus-realized rule; next add a
+  deterministic collateralized short-volatility/carry comparator using the
+  same assignment, collateral, costs, and risk limits as the learned agent.
 - Retain the implemented underlying-trend comparator so a recurrent policy
   cannot receive credit for reproducing a trivial covered-return rule.
 - Retain the implemented recurrent Monte-Carlo REINFORCE-with-value-baseline
@@ -253,7 +265,7 @@ candidate. This corrects objective semantics; it is not evidence of alpha.
 
 ### 3. Improve the state without inflating latency
 
-- Keep the 33-field contract state under `dimensionless.v11` as the current
+- Keep the 33-field contract state under `dimensionless.v12` as the current
   model: current per-slot quantity, average entry price, and executable
   unrealized return prevent portfolio-state aliasing, while matched bid/ask and
   IV dynamics separate observed change from missing history. Test these through

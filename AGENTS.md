@@ -143,8 +143,8 @@ small and stable:
 - `Observation.contracts` has fixed shape `(K, features)` and carries
   `contract_ids`, `valid_mask`, and `action_mask`.
 - `Observation.portfolio` contains cash, invested cost, NAV, portfolio
-  Delta/Gamma/Theta/Vega, and the underlying-share position. Total Delta must
-  include the shares.
+  Delta/Gamma/Theta/Vega, the underlying-share position, reserved cash
+  collateral, and reserved covered shares. Total Delta must include the shares.
 - Every valid option row exposes current `positionQuantity`,
   `positionAveragePrice`, and `positionUnrealizedReturn`. These are causal agent
   state, not collector columns. Quantity and average price come from the
@@ -157,8 +157,17 @@ small and stable:
 - Option buckets represent contracts. Underlying buckets represent multiples
   of `underlying_lot_size`, may open bounded shorts, and must obey cash, Delta,
   and `max_abs_underlying_shares` constraints.
+- Option positions are long-only unless
+  `allow_collateralized_option_shorts=True`. The opt-in mode permits covered
+  calls and cash-secured puts only: reserve 100 owned shares per short call and
+  `strike * 100` cash per short put. Never reuse reserved collateral or permit
+  naked option exposure.
+- A short option requires a recognized call/put type, finite positive strike,
+  and parseable expiration. It must remain inside the underlying-share bound
+  after possible put assignment.
 - Masks are generated from the pre-step state and include quote validity,
-  fee-adjusted affordability, held quantity, and optional absolute Greek limits.
+  fee-adjusted affordability, signed position transitions, collateral, and
+  optional absolute Greek limits.
 - Multiple orders in one action are revalidated sequentially so cash cannot go
   negative even when individual pre-step actions were affordable.
 - Execute the underlying leg first, then option slots in ascending order. Masks
@@ -188,6 +197,12 @@ small and stable:
 - Multi-order actions revalidate Greek budgets sequentially. If market drift
   puts a portfolio over a limit, actions that reduce the absolute exposure must
   remain permitted even when they do not immediately return below the limit.
+- Settle expiry only on the first observed date strictly after the listed
+  expiration. Physically assign in-the-money short equity calls/puts at the
+  strike using 100 shares per contract; expire out-of-the-money positions
+  worthless. Long intrinsic value is cash-settled in this demo. Do not imply
+  that early assignment, exercise notices, dividends, or corporate actions are
+  modeled.
 
 The current environment is a deterministic accounting and API scaffold, not a
 historical simulator. Do not add a `historical` mode until the data manifest
@@ -207,11 +222,12 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v11`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v12`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
-to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
-is expressed in years, held quantity and unrealized return are signed-log
-compressed, and heavy-tailed fields are compressed and clipped. Raw
+to NAV/deployed capital, underlying shares and covered-share reserves are
+represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
+years, held quantity and unrealized return are signed-log compressed, and
+heavy-tailed fields are compressed and clipped. Raw
 volume and open interest
 must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
@@ -409,7 +425,9 @@ coverage and edge over front ATM IV, select feasible front-ATM positive- and
 negative-Delta legs, enter once, then hedge residual Delta on later snapshots.
 Persist its horizon, threshold, coverage, and quantity in each fold. Do not call
 it a straddle when the nearest feasible call and put have different strikes,
-and do not infer a short-volatility result from a long-only environment.
+and do not infer a short-volatility result merely because the opt-in liability
+surface exists. A declared collateralized carry baseline must use the same
+fills, collateral, lifecycle, and held-out evaluation as the agent.
 
 The underlying-trend baseline is also causal: require configured price-history
 coverage, derive direction from the selected 4/16-snapshot cumulative log
@@ -490,6 +508,7 @@ option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind mixture --episodes 25
+train-demo --symbol AAPL --allow-collateralized-option-shorts --episodes 25
 train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:0 --candidate graph_set:mixture:ppo:0
 ```
 
@@ -543,6 +562,9 @@ and a Python fallback; use C++ only when required by an existing library.
 - CSV storage is appropriate for this stage; reassess Parquet or a database only
   when measured data volume or query needs justify it.
 - The paper ledger uses SQLite because account updates require transactions.
+- The RL short-option lifecycle has no early assignment, exercise instruction,
+  dividend, or corporate-action model. Post-expiry physical assignment is a
+  conservative deterministic research approximation, not broker fidelity.
 - The current local AAPL sample is sufficient for integration smoke tests, not
   statistical training claims. Follow `docs/research-roadmap.md` gates before
   treating a model improvement as alpha.

@@ -177,6 +177,7 @@ class EvaluationTests(TestCase):
                 slot_count=1,
                 slot_assignment="ranked",
                 max_quantity=1,
+                allow_collateralized_option_shorts=True,
                 underlying_lot_size=25,
                 underlying_commission_per_share=0.01,
                 underlying_slippage_bps=10,
@@ -198,5 +199,9 @@ class EvaluationTests(TestCase):
         self.assertAlmostEqual(stressed_info["executions"][0]["price"], 100.2)
         self.assertEqual(stressed.slot_assignment, "ranked")
         self.assertEqual(stressed.manifest.slot_assignment, "ranked")
+        self.assertTrue(stressed.allow_collateralized_option_shorts)
+        self.assertTrue(
+            stressed.manifest.allow_collateralized_option_shorts
+        )
         self.assertAlmostEqual(base_info["fees"], 0.25)
         self.assertAlmostEqual(stressed_info["fees"], 0.5)

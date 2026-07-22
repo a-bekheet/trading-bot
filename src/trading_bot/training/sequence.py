@@ -248,7 +248,7 @@ def _dimensionless_components(
             spread_index = market_indices[f"atmIvMinusRealizedVol{window}"]
             spread = market[spread_index]
             market[spread_index] = np.sign(spread) * np.log1p(abs(spread))
-    if len(portfolio) == 8:
+    if len(portfolio) in {8, 10}:
         nav = float(portfolio[2])
         nav_scale = max(abs(nav), 1.0)
         underlying_notional = abs(float(portfolio[7])) * spot_scale
@@ -258,8 +258,7 @@ def _dimensionless_components(
             + underlying_notional,
             1.0,
         )
-        portfolio = np.array(
-            [
+        values = [
                 portfolio[0] / nav_scale,
                 portfolio[1] / nav_scale,
                 nav / deployed_capital,
@@ -268,9 +267,13 @@ def _dimensionless_components(
                 portfolio[5] / nav_scale,
                 portfolio[6] / nav_scale,
                 portfolio[7] * spot_scale / nav_scale,
-            ],
-            dtype=np.float64,
-        )
+        ]
+        if len(portfolio) == 10:
+            values.extend((
+                portfolio[8] / nav_scale,
+                portfolio[9] * spot_scale / nav_scale,
+            ))
+        portfolio = np.asarray(values, dtype=np.float64)
 
     for values in (market, contracts, portfolio):
         # Clipping already maps infinities to the finite policy boundary. A

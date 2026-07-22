@@ -36,9 +36,10 @@ MARKET_FEATURES = ("underlyingPrice", "riskFreeRate", *MARKET_ENGINEERED_FEATURE
 GREEK_NAMES = ("delta", "gamma", "theta", "vega")
 PORTFOLIO_FEATURES = (
     "cash", "investedCost", "netAssetValue", *GREEK_NAMES,
-    "underlyingShares",
+    "underlyingShares", "reservedCashCollateral", "reservedCoveredShares",
 )
 PORTFOLIO_GREEK_SLICE = slice(3, 7)
+OPTION_CONTRACT_MULTIPLIER = 100
 
 
 @dataclass
@@ -46,10 +47,13 @@ class Position:
     quantity: int
     average_price: float
     greeks: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    option_type: str = ""
+    strike: float = 0.0
+    expiration: str = ""
 
 
 class OptionsEnv:
-    """Long-only options plus bounded underlying trades over CSV snapshots.
+    """Bounded option and underlying trades over CSV snapshots.
 
     This is explicitly a research demo. It is deterministic and useful for
     integration testing, not a historical-performance simulator.
@@ -63,6 +67,7 @@ class OptionsEnv:
         slot_count: int = 32,
         slot_assignment: str = "stable",
         max_quantity: int = 3,
+        allow_collateralized_option_shorts: bool = False,
         starting_cash: float = 100_000.0,
         commission_per_contract: float = 0.65,
         spread_multiplier: float = 1.0,
@@ -103,6 +108,9 @@ class OptionsEnv:
         self.slot_count = slot_count
         self.slot_assignment = slot_assignment
         self.max_quantity = max_quantity
+        self.allow_collateralized_option_shorts = bool(
+            allow_collateralized_option_shorts
+        )
         self.starting_cash = starting_cash
         self.commission_per_contract = commission_per_contract
         self.spread_multiplier = spread_multiplier
@@ -117,6 +125,9 @@ class OptionsEnv:
             "slot_count": slot_count,
             "slot_assignment": slot_assignment,
             "max_quantity": max_quantity,
+            "allow_collateralized_option_shorts": (
+                self.allow_collateralized_option_shorts
+            ),
             "starting_cash": starting_cash,
             "commission_per_contract": commission_per_contract,
             "spread_multiplier": spread_multiplier,
@@ -154,7 +165,8 @@ class OptionsEnv:
             manifest = EnvManifest.for_directory(data_dir, symbol=dataset.symbol, **{
                 key: kwargs[key]
                 for key in (
-                    "slot_count", "slot_assignment", "max_quantity", "starting_cash",
+                    "slot_count", "slot_assignment", "max_quantity",
+                    "allow_collateralized_option_shorts", "starting_cash",
                     "commission_per_contract", "spread_multiplier",
                     "underlying_lot_size", "max_abs_underlying_shares",
                     "underlying_commission_per_share",
@@ -225,6 +237,7 @@ class OptionsEnv:
                 "trade_notional": 0.0,
                 "invalid_action_count": 0,
                 "executions": [],
+                "option_settlements": [],
                 "greek_exposures": {
                     name: float(observation.portfolio[3 + index])
                     for index, name in enumerate(GREEK_NAMES)
@@ -281,10 +294,14 @@ class OptionsEnv:
                     spot = float(current_frame["underlyingPrice"].iloc[0])
                     price = self._underlying_execution_price(spot, side)
                     fee = quantity * self.underlying_commission_per_share
-                    cash_change = signed_quantity * price + fee
-                    if cash_change > self._cash:
+                    if not self._underlying_fill_allowed(
+                        signed_quantity,
+                        price,
+                        fee,
+                    ):
                         invalid_actions += 1
                     else:
+                        cash_change = signed_quantity * price + fee
                         self._cash -= cash_change
                         self._underlying_shares += signed_quantity
                         fees += fee
@@ -314,7 +331,11 @@ class OptionsEnv:
                 continue
             quantity = encoded if encoded <= self.max_quantity else encoded - self.max_quantity
             side = "buy" if encoded <= self.max_quantity else "sell"
-            greek_change = self._contract_greeks(contract) * quantity * 100
+            greek_change = (
+                self._contract_greeks(contract)
+                * quantity
+                * OPTION_CONTRACT_MULTIPLIER
+            )
             if side == "sell":
                 greek_change = -greek_change
             if not self._risk_allowed(running_exposures, greek_change):
@@ -339,7 +360,7 @@ class OptionsEnv:
                 "quantity": quantity,
                 "price": price,
                 "fee": fee,
-                "multiplier": 100,
+                "multiplier": OPTION_CONTRACT_MULTIPLIER,
             })
 
         next_index = self._index + 1
@@ -347,6 +368,7 @@ class OptionsEnv:
             self._index = next_index
         truncated = self._index >= len(self.dataset) - 1
         next_frame = self._current_frame()
+        option_settlements = self._settle_expired_positions(next_frame)
         next_slots = self._slots(next_frame)
         next_observation, next_info = self._observation(next_frame, next_slots)
         self._cache_state(next_observation, next_info, next_slots)
@@ -372,6 +394,7 @@ class OptionsEnv:
             ),
             "invalid_action_count": invalid_actions,
             "executions": executions,
+            "option_settlements": option_settlements,
             "greek_exposures": {
                 name: float(next_observation.portfolio[3 + index])
                 for index, name in enumerate(GREEK_NAMES)
@@ -565,13 +588,26 @@ class OptionsEnv:
                     contracts[index, feature_index] = float(average_price)
                 elif name == "positionUnrealizedReturn":
                     liquidation_price = (
-                        self._execution_price(contract, "sell")
-                        if valid[index] and average_price > 0
+                        self._execution_price(
+                            contract,
+                            "sell" if position.quantity > 0 else "buy",
+                        )
+                        if (
+                            valid[index]
+                            and position is not None
+                            and position.quantity != 0
+                            and average_price > 0
+                        )
                         else 0.0
                     )
                     contracts[index, feature_index] = (
-                        liquidation_price / average_price - 1.0
-                        if average_price > 0 and liquidation_price > 0
+                        np.sign(position.quantity)
+                        * (liquidation_price / average_price - 1.0)
+                        if (
+                            position is not None
+                            and average_price > 0
+                            and liquidation_price > 0
+                        )
                         else 0.0
                     )
                 else:
@@ -586,20 +622,43 @@ class OptionsEnv:
             if not valid[index]:
                 continue
             action_mask[index, 0] = True
-            held = self._positions.get(ids[index] or "", Position(0, 0)).quantity
             ask = self._execution_price(contract, "buy")
             bid = self._execution_price(contract, "sell")
             contract_greeks = self._contract_greeks(contract)
+            held = self._positions.get(
+                ids[index] or "",
+                Position(0, 0.0),
+            ).quantity
             for quantity in range(1, self.max_quantity + 1):
                 fee = quantity * self.commission_per_contract
-                greek_change = contract_greeks * quantity * 100
+                greek_change = (
+                    contract_greeks
+                    * quantity
+                    * OPTION_CONTRACT_MULTIPLIER
+                )
+                if self.allow_collateralized_option_shorts:
+                    buy_allowed = self._option_fill_allowed(
+                        "buy", contract, quantity, ask, fee
+                    )
+                    sell_allowed = self._option_fill_allowed(
+                        "sell", contract, quantity, bid, fee
+                    )
+                else:
+                    buy_allowed = (
+                        self._cash
+                        >= ask
+                        * quantity
+                        * OPTION_CONTRACT_MULTIPLIER
+                        + fee
+                    )
+                    sell_allowed = held >= quantity
                 action_mask[index, quantity] = (
-                    self._cash >= ask * quantity * 100 + fee
+                    buy_allowed
                     and self._risk_allowed(exposures, greek_change)
                 )
                 action_mask[index, self.max_quantity + quantity] = (
-                    held >= quantity
-                    and bid > 0
+                    bid > 0
+                    and sell_allowed
                     and self._risk_allowed(exposures, -greek_change)
                 )
         underlying_slot = self.slot_count
@@ -609,23 +668,33 @@ class OptionsEnv:
             self.underlying_action_quantities[1:],
             start=1,
         ):
-            projected_position = self._underlying_shares + int(signed_quantity)
-            if abs(projected_position) > self.max_abs_underlying_shares:
-                continue
+            projected_position = self._underlying_shares + int(
+                signed_quantity
+            )
             side = "buy" if signed_quantity > 0 else "sell"
             price = self._underlying_execution_price(spot, side)
             fee = abs(signed_quantity) * self.underlying_commission_per_share
-            affordable = (
-                signed_quantity < 0
-                or self._cash >= signed_quantity * price + fee
-            )
             greek_change = np.array(
                 [signed_quantity, 0.0, 0.0, 0.0],
                 dtype=np.float64,
             )
+            if self.allow_collateralized_option_shorts:
+                fill_allowed = self._underlying_fill_allowed(
+                    int(signed_quantity), price, fee
+                )
+            else:
+                fill_allowed = (
+                    abs(projected_position)
+                    <= self.max_abs_underlying_shares
+                    and (
+                        signed_quantity < 0
+                        or self._cash
+                        >= signed_quantity * price + fee
+                    )
+                )
             action_mask[underlying_slot, encoded] = (
-                affordable
-                and price > 0
+                price > 0
+                and fill_allowed
                 and self._risk_allowed(exposures, greek_change)
             )
         first = frame.iloc[0]
@@ -633,11 +702,21 @@ class OptionsEnv:
             [float(first.get(name, 0.0) or 0.0) for name in MARKET_FEATURES],
             dtype=np.float64,
         )
-        invested = sum(position.quantity * position.average_price * 100 for position in self._positions.values())
+        invested = sum(
+            abs(position.quantity)
+            * position.average_price
+            * OPTION_CONTRACT_MULTIPLIER
+            for position in self._positions.values()
+        )
+        reserved_cash, reserved_shares, _ = self._collateral_requirements()
         portfolio = np.concatenate((
             np.array([self._cash, invested, nav], dtype=np.float64),
             exposures,
-            np.array([self._underlying_shares], dtype=np.float64),
+            np.array([
+                self._underlying_shares,
+                reserved_cash,
+                reserved_shares,
+            ], dtype=np.float64),
         ))
         observation = Observation(
             self.dataset.snapshots[self._index].timestamp,
@@ -655,6 +734,14 @@ class OptionsEnv:
             "portfolio_features": PORTFOLIO_FEATURES,
             "market_features": MARKET_FEATURES,
             "risk_limits": self.risk_limits.copy(),
+            "allow_collateralized_option_shorts": (
+                self.allow_collateralized_option_shorts
+            ),
+            "collateral": {
+                "reserved_cash": reserved_cash,
+                "reserved_covered_shares": reserved_shares,
+                "available_cash": self._cash - reserved_cash,
+            },
         }
         if previous_ids is None:
             info.update({
@@ -733,6 +820,141 @@ class OptionsEnv:
         return True
 
     @staticmethod
+    def _position_metadata(
+        contract: pd.Series,
+    ) -> tuple[str, float, str]:
+        option_type = str(contract.get("optionType", "")).lower()
+        try:
+            strike = float(contract.get("strike", 0.0))
+        except (TypeError, ValueError):
+            strike = 0.0
+        expiration = str(contract.get("expiration", ""))
+        return option_type, strike, expiration
+
+    @staticmethod
+    def _valid_expiration(expiration: str) -> bool:
+        try:
+            parsed = pd.Timestamp(expiration)
+        except (TypeError, ValueError):
+            return False
+        return not pd.isna(parsed)
+
+    def _collateral_requirements(
+        self,
+        *,
+        override_symbol: str | None = None,
+        override_quantity: int | None = None,
+        override_contract: pd.Series | None = None,
+    ) -> tuple[float, int, int]:
+        """Return cash, covered shares, and put-assignment shares reserved."""
+        cash = 0.0
+        covered_shares = 0
+        put_assignment_shares = 0
+        symbols = set(self._positions)
+        if override_symbol is not None:
+            symbols.add(override_symbol)
+        for symbol in symbols:
+            position = self._positions.get(symbol)
+            quantity = (
+                override_quantity
+                if symbol == override_symbol and override_quantity is not None
+                else position.quantity if position is not None else 0
+            )
+            if quantity >= 0:
+                continue
+            if symbol == override_symbol and override_contract is not None:
+                option_type, strike, expiration = self._position_metadata(
+                    override_contract
+                )
+            elif position is not None:
+                option_type = position.option_type
+                strike = position.strike
+                expiration = position.expiration
+            else:
+                return math.inf, 0, 0
+            if (
+                option_type not in {"call", "put"}
+                or not math.isfinite(strike)
+                or strike <= 0
+                or not self._valid_expiration(expiration)
+            ):
+                return math.inf, 0, 0
+            contracts = abs(quantity)
+            if option_type == "put":
+                cash += strike * contracts * OPTION_CONTRACT_MULTIPLIER
+                put_assignment_shares += (
+                    contracts * OPTION_CONTRACT_MULTIPLIER
+                )
+            else:
+                covered_shares += contracts * OPTION_CONTRACT_MULTIPLIER
+        return cash, covered_shares, put_assignment_shares
+
+    def _option_fill_allowed(
+        self,
+        side: str,
+        contract: pd.Series,
+        quantity: int,
+        price: float,
+        fee: float,
+    ) -> bool:
+        symbol = str(contract["contractSymbol"])
+        current_quantity = self._positions.get(
+            symbol,
+            Position(0, 0.0),
+        ).quantity
+        signed_quantity = quantity if side == "buy" else -quantity
+        projected_quantity = current_quantity + signed_quantity
+        if projected_quantity < 0 and not self.allow_collateralized_option_shorts:
+            return False
+        cash_delta = (
+            -price * quantity * OPTION_CONTRACT_MULTIPLIER - fee
+            if side == "buy"
+            else price * quantity * OPTION_CONTRACT_MULTIPLIER - fee
+        )
+        projected_cash = self._cash + cash_delta
+        if projected_cash < -1e-12:
+            return False
+        cash_collateral, covered_shares, put_assignment_shares = (
+            self._collateral_requirements(
+                override_symbol=symbol,
+                override_quantity=projected_quantity,
+                override_contract=contract,
+            )
+        )
+        return (
+            projected_cash + 1e-12 >= cash_collateral
+            and (
+                covered_shares == 0
+                or self._underlying_shares >= covered_shares
+            )
+            and abs(self._underlying_shares + put_assignment_shares)
+            <= self.max_abs_underlying_shares
+        )
+
+    def _underlying_fill_allowed(
+        self,
+        signed_quantity: int,
+        price: float,
+        fee: float,
+    ) -> bool:
+        projected_shares = self._underlying_shares + signed_quantity
+        if abs(projected_shares) > self.max_abs_underlying_shares:
+            return False
+        projected_cash = self._cash - signed_quantity * price - fee
+        cash_collateral, covered_shares, put_assignment_shares = (
+            self._collateral_requirements()
+        )
+        return (
+            projected_cash + 1e-12 >= cash_collateral
+            and (
+                covered_shares == 0
+                or projected_shares >= covered_shares
+            )
+            and abs(projected_shares + put_assignment_shares)
+            <= self.max_abs_underlying_shares
+        )
+
+    @staticmethod
     def _quote_valid(contract: pd.Series) -> bool:
         try:
             return all(math.isfinite(float(contract[name])) and float(contract[name]) > 0 for name in ("bid", "ask", "lastPrice")) and float(contract["bid"]) <= float(contract["ask"])
@@ -742,28 +964,117 @@ class OptionsEnv:
     def _fill(self, side: str, contract: pd.Series, quantity: int, price: float, fee: float) -> None:
         symbol = str(contract["contractSymbol"])
         greeks = tuple(float(value) for value in self._contract_greeks(contract))
-        notional = price * quantity * 100 + (fee if side == "buy" else -fee)
-        if side == "buy":
-            if self._cash < notional:
-                raise ValueError("insufficient cash")
-            self._cash -= notional
-            position = self._positions.get(symbol)
-            if position:
-                total = position.quantity + quantity
-                position.average_price = (position.quantity * position.average_price + quantity * price) / total
-                position.quantity = total
-                position.greeks = greeks
-            else:
-                self._positions[symbol] = Position(quantity, price, greeks)
+        if not self._option_fill_allowed(side, contract, quantity, price, fee):
+            raise ValueError("option fill violates cash, position, or collateral")
+        signed_quantity = quantity if side == "buy" else -quantity
+        cash_delta = (
+            -price * quantity * OPTION_CONTRACT_MULTIPLIER - fee
+            if side == "buy"
+            else price * quantity * OPTION_CONTRACT_MULTIPLIER - fee
+        )
+        self._cash += cash_delta
+        position = self._positions.get(symbol)
+        old_quantity = position.quantity if position is not None else 0
+        new_quantity = old_quantity + signed_quantity
+        if new_quantity == 0:
+            self._positions.pop(symbol, None)
+            return
+        if old_quantity == 0 or (old_quantity > 0) == (signed_quantity > 0):
+            old_cost = (
+                abs(old_quantity) * position.average_price
+                if position is not None
+                else 0.0
+            )
+            average_price = (
+                old_cost + abs(signed_quantity) * price
+            ) / abs(new_quantity)
+        elif (new_quantity > 0) == (old_quantity > 0):
+            average_price = position.average_price
         else:
-            if symbol not in self._positions or self._positions[symbol].quantity < quantity:
-                raise ValueError("insufficient position")
-            self._cash += notional
-            position = self._positions[symbol]
-            position.greeks = greeks
-            position.quantity -= quantity
-            if position.quantity == 0:
-                del self._positions[symbol]
+            average_price = price
+        option_type, strike, expiration = self._position_metadata(contract)
+        self._positions[symbol] = Position(
+            new_quantity,
+            average_price,
+            greeks,
+            option_type,
+            strike,
+            expiration,
+        )
+
+    def _settle_expired_positions(
+        self,
+        frame: pd.DataFrame,
+    ) -> list[dict[str, Any]]:
+        """Settle positions at the first observed date after expiration."""
+        timestamp = frame.iloc[0].get(
+            "collectedAt",
+            self.dataset.snapshots[self._index].timestamp,
+        )
+        parsed_timestamp = pd.to_datetime(
+            timestamp,
+            utc=True,
+            errors="coerce",
+        )
+        if pd.isna(parsed_timestamp):
+            return []
+        snapshot_date = parsed_timestamp.date()
+        spot = float(frame["underlyingPrice"].iloc[0])
+        settlements: list[dict[str, Any]] = []
+        for symbol, position in tuple(self._positions.items()):
+            try:
+                expiration_date = pd.Timestamp(position.expiration).date()
+            except (TypeError, ValueError):
+                continue
+            if snapshot_date <= expiration_date:
+                continue
+            intrinsic = (
+                max(spot - position.strike, 0.0)
+                if position.option_type == "call"
+                else max(position.strike - spot, 0.0)
+                if position.option_type == "put"
+                else 0.0
+            )
+            quantity = position.quantity
+            settlement_style = "expired_worthless"
+            if quantity < 0 and intrinsic > 0:
+                contracts = abs(quantity)
+                settlement_style = "physical_assignment"
+                if position.option_type == "call":
+                    self._underlying_shares -= (
+                        contracts * OPTION_CONTRACT_MULTIPLIER
+                    )
+                    self._cash += (
+                        position.strike
+                        * contracts
+                        * OPTION_CONTRACT_MULTIPLIER
+                    )
+                elif position.option_type == "put":
+                    self._underlying_shares += (
+                        contracts * OPTION_CONTRACT_MULTIPLIER
+                    )
+                    self._cash -= (
+                        position.strike
+                        * contracts
+                        * OPTION_CONTRACT_MULTIPLIER
+                    )
+            elif quantity > 0 and intrinsic > 0:
+                settlement_style = "cash_intrinsic"
+                self._cash += (
+                    intrinsic * quantity * OPTION_CONTRACT_MULTIPLIER
+                )
+            settlements.append({
+                "instrument": "option",
+                "contract_symbol": symbol,
+                "position_quantity": quantity,
+                "option_type": position.option_type,
+                "strike": position.strike,
+                "spot": spot,
+                "intrinsic_value": intrinsic,
+                "style": settlement_style,
+            })
+            del self._positions[symbol]
+        return settlements
 
     def _portfolio_metrics(self, frame: pd.DataFrame) -> tuple[float, np.ndarray]:
         quotes = frame.drop_duplicates("contractSymbol").set_index("contractSymbol")
@@ -773,14 +1084,28 @@ class OptionsEnv:
         exposures[0] = self._underlying_shares
         for symbol, position in self._positions.items():
             if symbol not in quotes.index:
-                value += position.quantity * position.average_price * 100
-                exposures += np.asarray(position.greeks) * position.quantity * 100
+                value += (
+                    position.quantity
+                    * position.average_price
+                    * OPTION_CONTRACT_MULTIPLIER
+                )
+                exposures += (
+                    np.asarray(position.greeks)
+                    * position.quantity
+                    * OPTION_CONTRACT_MULTIPLIER
+                )
                 continue
             quote = quotes.loc[symbol]
             bid, ask = float(quote["bid"]), float(quote["ask"])
             mark = (bid + ask) / 2 if bid > 0 and ask > 0 else float(quote["lastPrice"])
-            value += position.quantity * mark * 100
-            exposures += self._contract_greeks(quote) * position.quantity * 100
+            value += (
+                position.quantity * mark * OPTION_CONTRACT_MULTIPLIER
+            )
+            exposures += (
+                self._contract_greeks(quote)
+                * position.quantity
+                * OPTION_CONTRACT_MULTIPLIER
+            )
         return self._cash + value, exposures
 
     def _nav(self, frame: pd.DataFrame) -> float:

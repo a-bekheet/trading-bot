@@ -23,6 +23,7 @@ class EnvManifest:
     slot_count: int = 32
     slot_assignment: str = "stable"
     max_quantity: int = 3
+    allow_collateralized_option_shorts: bool = False
     starting_cash: float = 100_000.0
     commission_per_contract: float = 0.65
     spread_multiplier: float = 1.0

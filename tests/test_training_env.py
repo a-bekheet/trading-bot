@@ -101,7 +101,314 @@ def slot_churn_dataset() -> SnapshotDataset:
     return SnapshotDataset(tuple(snapshots), "TEST")
 
 
+def option_lifecycle_dataset(
+    option_type: str,
+    *,
+    spots: tuple[float, ...],
+    timestamps: tuple[str, ...],
+    expiration: str,
+    contract_count: int = 1,
+) -> SnapshotDataset:
+    snapshots = []
+    for timestamp, spot in zip(timestamps, spots, strict=True):
+        rows = []
+        for index in range(contract_count):
+            rows.append({
+                "collectedAt": timestamp,
+                "contractSymbol": f"TEST-{option_type}-{index}",
+                "symbol": "TEST",
+                "expiration": expiration,
+                "optionType": option_type,
+                "strike": 100,
+                "bid": 2.0,
+                "ask": 2.2,
+                "lastPrice": 2.1,
+                "impliedVolatility": 0.2,
+                "underlyingPrice": spot,
+                "riskFreeRate": 0.04,
+                "delta": 0.5 if option_type == "call" else -0.5,
+                "gamma": 0.01,
+                "theta": -0.1,
+                "vega": 0.2,
+            })
+        snapshots.append(Snapshot(
+            pd.to_datetime(timestamp, utc=True).isoformat(),
+            pd.DataFrame(rows),
+        ))
+    return SnapshotDataset(tuple(snapshots), "TEST")
+
+
 class OptionsEnvTests(TestCase):
+    def test_collateralized_short_put_can_close_or_cross_without_reusing_cash(self):
+        dataset = option_lifecycle_dataset(
+            "put",
+            spots=(100, 100, 100),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+                "2026-07-20T14:02:00Z",
+            ),
+            expiration="2026-08-21",
+        )
+        legacy = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=2,
+            starting_cash=9_900,
+        )
+        legacy_observation, _ = legacy.reset()
+        self.assertFalse(legacy_observation.action_mask[0, 3])
+
+        env = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=2,
+            starting_cash=9_900,
+            allow_collateralized_option_shorts=True,
+        )
+        observation, info = env.reset()
+        quantity_index = CONTRACT_FEATURES.index("positionQuantity")
+        average_index = CONTRACT_FEATURES.index("positionAveragePrice")
+        unrealized_index = CONTRACT_FEATURES.index(
+            "positionUnrealizedReturn"
+        )
+
+        self.assertTrue(observation.action_mask[0, 3])
+        self.assertFalse(observation.action_mask[0, 4])
+        self.assertEqual(info["collateral"]["reserved_cash"], 0)
+        opened, _, _, _, opened_info = env.step(np.array([3, 0]))
+
+        self.assertEqual(opened_info["invalid_action_count"], 0)
+        self.assertEqual(opened.contracts[0, quantity_index], -1)
+        self.assertEqual(opened.contracts[0, average_index], 2.0)
+        self.assertAlmostEqual(
+            opened.contracts[0, unrealized_index],
+            -0.1,
+        )
+        self.assertAlmostEqual(opened.portfolio[8], 10_000)
+        self.assertEqual(opened.portfolio[9], 0)
+        self.assertFalse(opened.action_mask[-1, 1])
+
+        crossed, _, _, truncated, crossed_info = env.step(
+            np.array([2, 0])
+        )
+
+        self.assertTrue(truncated)
+        self.assertEqual(crossed_info["invalid_action_count"], 0)
+        self.assertEqual(crossed.contracts[0, quantity_index], 1)
+        self.assertAlmostEqual(crossed.contracts[0, average_index], 2.2)
+        self.assertEqual(crossed.portfolio[8], 0)
+
+    def test_short_put_collateral_cannot_support_two_simultaneous_writers(self):
+        dataset = option_lifecycle_dataset(
+            "put",
+            spots=(100, 100, 100),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+                "2026-07-20T14:02:00Z",
+            ),
+            expiration="2026-08-21",
+            contract_count=2,
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=2,
+            max_quantity=1,
+            starting_cash=9_900,
+            allow_collateralized_option_shorts=True,
+        )
+        observation, _ = env.reset()
+        self.assertTrue(observation.action_mask[0, 2])
+        self.assertTrue(observation.action_mask[1, 2])
+
+        after, _, _, _, info = env.step(np.array([2, 2, 0]))
+
+        self.assertEqual(info["invalid_action_count"], 1)
+        self.assertEqual(len(info["executions"]), 1)
+        self.assertEqual(after.portfolio[8], 10_000)
+        self.assertGreaterEqual(info["collateral"]["available_cash"], 0)
+
+    def test_cash_secured_put_is_physically_assigned_after_expiration(self):
+        dataset = option_lifecycle_dataset(
+            "put",
+            spots=(100, 100, 80),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-21T15:00:00Z",
+                "2026-07-22T14:00:00Z",
+            ),
+            expiration="2026-07-21",
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=9_900,
+            max_abs_underlying_shares=100,
+            allow_collateralized_option_shorts=True,
+        )
+        env.reset()
+        opened, _, _, _, _ = env.step(np.array([2, 0]))
+        self.assertEqual(opened.portfolio[8], 10_000)
+        self.assertEqual(opened.portfolio[7], 0)
+
+        assigned, _, _, truncated, info = env.step(np.array([0, 0]))
+
+        self.assertTrue(truncated)
+        self.assertEqual(assigned.portfolio[7], 100)
+        self.assertEqual(assigned.portfolio[8], 0)
+        self.assertAlmostEqual(assigned.portfolio[0], 99.35)
+        self.assertEqual(len(info["option_settlements"]), 1)
+        settlement = info["option_settlements"][0]
+        self.assertEqual(settlement["style"], "physical_assignment")
+        self.assertEqual(settlement["position_quantity"], -1)
+        self.assertEqual(settlement["intrinsic_value"], 20)
+
+    def test_short_option_requires_a_valid_expiration(self):
+        dataset = option_lifecycle_dataset(
+            "put",
+            spots=(100, 100),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+            ),
+            expiration="not-a-date",
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=20_000,
+            allow_collateralized_option_shorts=True,
+        )
+
+        observation, _ = env.reset()
+
+        self.assertTrue(observation.action_mask[0, 1])
+        self.assertFalse(observation.action_mask[0, 2])
+
+    def test_short_option_respects_signed_greek_limit(self):
+        dataset = option_lifecycle_dataset(
+            "put",
+            spots=(100, 100),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+            ),
+            expiration="2026-08-21",
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=20_000,
+            underlying_lot_size=25,
+            allow_collateralized_option_shorts=True,
+            max_abs_delta=40,
+        )
+
+        env.reset()
+        observation, _, _, _, _ = env.step(np.array([0, 1]))
+
+        self.assertTrue(observation.action_mask[0, 1])
+        self.assertFalse(observation.action_mask[0, 2])
+
+    def test_option_expiry_distinguishes_worthless_and_long_intrinsic(self):
+        timestamps = (
+            "2026-07-20T14:00:00Z",
+            "2026-07-22T14:00:00Z",
+        )
+        short_put = OptionsEnv(
+            option_lifecycle_dataset(
+                "put",
+                spots=(100, 120),
+                timestamps=timestamps,
+                expiration="2026-07-21",
+            ),
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=9_900,
+            allow_collateralized_option_shorts=True,
+        )
+        short_put.reset()
+
+        expired, _, _, _, short_info = short_put.step(np.array([2, 0]))
+
+        self.assertAlmostEqual(expired.portfolio[0], 10_099.35)
+        self.assertEqual(expired.portfolio[8], 0)
+        self.assertEqual(
+            short_info["option_settlements"][0]["style"],
+            "expired_worthless",
+        )
+
+        long_call = OptionsEnv(
+            option_lifecycle_dataset(
+                "call",
+                spots=(100, 120),
+                timestamps=timestamps,
+                expiration="2026-07-21",
+            ),
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=1_000,
+        )
+        long_call.reset()
+
+        settled, _, _, _, long_info = long_call.step(np.array([1, 0]))
+
+        self.assertAlmostEqual(settled.portfolio[0], 2_779.35)
+        self.assertEqual(
+            long_info["option_settlements"][0]["style"],
+            "cash_intrinsic",
+        )
+
+    def test_covered_call_reserves_shares_and_is_assigned_after_expiration(self):
+        dataset = option_lifecycle_dataset(
+            "call",
+            spots=(100, 100, 100, 120),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+                "2026-07-20T14:02:00Z",
+                "2026-07-22T14:00:00Z",
+            ),
+            expiration="2026-07-21",
+            contract_count=2,
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=2,
+            max_quantity=1,
+            starting_cash=25_000,
+            underlying_lot_size=100,
+            max_abs_underlying_shares=100,
+            allow_collateralized_option_shorts=True,
+        )
+        initial, _ = env.reset()
+        self.assertFalse(initial.action_mask[0, 2])
+        self.assertFalse(initial.action_mask[1, 2])
+        shares, _, _, _, _ = env.step(np.array([0, 0, 1]))
+        self.assertEqual(shares.portfolio[7], 100)
+        self.assertTrue(shares.action_mask[0, 2])
+        self.assertTrue(shares.action_mask[1, 2])
+
+        covered, _, _, _, info = env.step(np.array([2, 2, 0]))
+
+        self.assertEqual(info["invalid_action_count"], 1)
+        self.assertEqual(len(info["executions"]), 1)
+        self.assertEqual(covered.portfolio[9], 100)
+        self.assertFalse(covered.action_mask[-1, 2])
+        assigned, _, _, truncated, info = env.step(np.array([0, 0, 0]))
+
+        self.assertTrue(truncated)
+        self.assertEqual(assigned.portfolio[7], 0)
+        self.assertEqual(assigned.portfolio[9], 0)
+        self.assertEqual(
+            info["option_settlements"][0]["style"],
+            "physical_assignment",
+        )
+
     def test_stable_slots_preserve_identity_and_expose_replacements(self):
         env = OptionsEnv(slot_churn_dataset(), slot_count=2)
         continuity_index = CONTRACT_FEATURES.index("slotContinuity")
@@ -220,9 +527,10 @@ class OptionsEnvTests(TestCase):
         self.assertTrue(truncated)
         self.assertGreater(reward, 0)
         self.assertAlmostEqual(sum(info["reward_components"].values()), reward)
-        self.assertEqual(next_observation.portfolio.shape, (8,))
+        self.assertEqual(next_observation.portfolio.shape, (10,))
         self.assertAlmostEqual(next_observation.portfolio[3], 50.0)
         self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
+        np.testing.assert_array_equal(next_observation.portfolio[8:], (0, 0))
         self.assertEqual(next_observation.contracts[0, quantity_index], 1)
         self.assertAlmostEqual(next_observation.contracts[0, average_index], 1.2)
         self.assertAlmostEqual(

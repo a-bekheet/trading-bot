@@ -50,7 +50,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v15"
+    "research-demo.universe-walk-forward.v16"
 )
 
 
@@ -904,6 +904,9 @@ def main() -> None:
                 "slot_count": args.slot_count,
                 "slot_assignment": args.slot_assignment,
                 "max_quantity": args.max_quantity,
+                "allow_collateralized_option_shorts": (
+                    args.allow_collateralized_option_shorts
+                ),
                 "underlying_lot_size": args.underlying_lot_size,
                 "max_abs_underlying_shares": (
                     args.max_abs_underlying_shares

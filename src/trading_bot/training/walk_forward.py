@@ -48,7 +48,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v31"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v32"
 
 
 @dataclass(frozen=True)
@@ -1020,6 +1020,15 @@ def _parser() -> argparse.ArgumentParser:
         default="stable",
     )
     parser.add_argument("--max-quantity", type=int, default=3)
+    parser.add_argument(
+        "--allow-collateralized-option-shorts",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "allow covered calls and cash-secured puts; naked shorts stay "
+            "forbidden"
+        ),
+    )
     parser.add_argument("--underlying-lot-size", type=int, default=25)
     parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
     parser.add_argument("--underlying-commission-per-share", type=float, default=0.005)
@@ -1183,6 +1192,9 @@ def main() -> None:
                 "slot_count": args.slot_count,
                 "slot_assignment": args.slot_assignment,
                 "max_quantity": args.max_quantity,
+                "allow_collateralized_option_shorts": (
+                    args.allow_collateralized_option_shorts
+                ),
                 "underlying_lot_size": args.underlying_lot_size,
                 "max_abs_underlying_shares": args.max_abs_underlying_shares,
                 "underlying_commission_per_share": (

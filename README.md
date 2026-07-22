@@ -141,11 +141,20 @@ configured lot size—25, 50, and 75 shares by default—and may create bounded
 short positions. Passing the older option-only vector remains valid and implies
 an underlying hold.
 
+Options remain long-only by default. Passing
+`--allow-collateralized-option-shorts` to a training command, or
+`allow_collateralized_option_shorts=True` to `OptionsEnv`, enables only covered
+calls and cash-secured puts. Each covered call locks 100 owned shares; each
+short put locks its full strike times 100 in cash. Locked collateral cannot
+support another order, and every leg of a multi-order action is revalidated
+against the running account. Naked option shorts remain unavailable.
+
 The portfolio state includes cash, invested cost, NAV, Delta, Gamma, Theta,
-Vega, and underlying shares. Total Delta includes the share position. Exposure
-units are share-equivalent Delta, Delta change per $1 Gamma, dollars per
-calendar day Theta, and dollars per one-percentage-point IV Vega. Limits are
-optional; risk-reducing trades remain available after Greek drift:
+Vega, underlying shares, reserved cash, and reserved covered shares. Total
+Delta includes the share position. Exposure units are share-equivalent Delta,
+Delta change per $1 Gamma, dollars per calendar day Theta, and dollars per
+one-percentage-point IV Vega. Limits are optional; risk-reducing trades remain
+available after Greek drift:
 
 ```python
 env = OptionsEnv.from_directory(
@@ -214,11 +223,12 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v11` transform. Prices, strikes, and average entry price are divided by spot, contract
-Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
-the underlying position is scaled by its NAV weight, portfolio values become
-ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields and position
-quantity are log-compressed. Unrealized return uses a signed log transform.
+`dimensionless.v12` transform. Prices, strikes, and average entry price are
+divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
+scaled by spot and NAV, share positions and covered-share reserves are scaled
+by their NAV weights, and cash collateral is divided by NAV. Portfolio values
+become ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields and
+position quantity are log-compressed. Unrealized return uses a signed log transform.
 Cumulative log returns use the same signed bounded transform as one-step return.
 Signed contract changes are log-compressed at fixed scales. The `time_context`,
 `price_trend`, `position_state`, and `contract_dynamics` walk-forward ablations
@@ -338,9 +348,29 @@ smoke tied at zero validation score and selected the zero-coefficient candidate
 through the declared tie rule. This verifies training, masking, checkpoint, and
 ablation plumbing but is not evidence of alpha.
 
+v0.42 adds an explicitly opt-in option-liability surface without introducing
+naked margin. Positions are signed and may close or cross through zero at the
+current bid/ask. Short equity options that are in the money are physically
+assigned using 100 shares per contract at the first observed date after
+expiration; out-of-the-money contracts expire worthless, while long intrinsic
+value remains cash-settled in this research approximation. There is no early
+assignment model. The action mask requires valid option type, positive strike,
+and a parseable expiration before opening a short.
+
+The `dimensionless.v12` layout has 1,129 inputs at 32 slots. On the included
+AAPL observation, adding the two normalized collateral fields left the local
+10,000-call preprocessing median effectively unchanged (30.25 versus 30.17
+microseconds). Opt-in collateral checks increased observation construction
+from 3.41 to 4.29 ms median; default mode retains its direct long-only mask
+path. Width-128 parameter counts are 1,192,002 for flat hybrid, 1,161,539 for
+flat mixture, 220,013 for zero-neighbor graph-set hybrid, and 217,326 for
+zero-neighbor graph-set mixture. A two-fold, width-eight AAPL walk-forward smoke
+loaded `research-demo.v15`/`dimensionless.v12` checkpoints with short mode
+enabled. These are machine-specific integration and latency checks, not alpha.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v11` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v12` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters
