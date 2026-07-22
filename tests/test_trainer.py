@@ -1,5 +1,6 @@
 import json
 import math
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -143,6 +144,7 @@ class TrainerTests(TestCase):
         self.assertEqual(_symbols_from_args(single), ("MSFT",))
         self.assertEqual(single.slot_assignment, "stable")
         self.assertEqual(single.action_decoder, "factorized")
+        self.assertEqual(single.factorized_ppo_objective, "joint")
         self.assertEqual(single.burn_in_steps, 8)
         self.assertFalse(single.allow_collateralized_option_shorts)
         self.assertEqual(single.portfolio_valuation, "liquidation")
@@ -329,6 +331,15 @@ class TrainerTests(TestCase):
             "factorization": "independent_masked_rows",
             "initial_hold_bias": 5.0,
             "hard_order_cap": None,
+            "likelihood": "exact_joint_product",
+            "ppo_surrogate": "joint_clipped_ratio",
+        })
+        self.assertEqual(sidecar["policy_optimization"], {
+            "action_distribution_likelihood": "exact_factorized_product",
+            "optimization_log_likelihood_aggregation": "joint",
+            "ppo_importance_ratio": "joint",
+            "reinforce_score_function": None,
+            "entropy_reduction": "mean_per_decoder_factor",
         })
         self.assertEqual(
             sidecar["temporal_training"],
@@ -786,6 +797,8 @@ class TrainerTests(TestCase):
             TrainingConfig(discount_reference_seconds=0)
         with self.assertRaisesRegex(ValueError, "start_sampling"):
             TrainingConfig(start_sampling="future_aware")
+        with self.assertRaisesRegex(ValueError, "factorized_ppo_objective"):
+            TrainingConfig(factorized_ppo_objective="marginal")
         with self.assertRaisesRegex(ValueError, "volatility_regime_bins"):
             TrainingConfig(volatility_regime_bins=1)
         with self.assertRaisesRegex(ValueError, "volatility_regime_window"):
@@ -807,6 +820,61 @@ class TrainerTests(TestCase):
                 "worst_ticker_weight",
             ):
                 TrainingConfig(selection_worst_ticker_weight=invalid)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_dimensionwise_objective_is_explicit_factorized_ppo_ablation(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset(seed=83)
+        base = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+        )
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=2,
+            factorized_ppo_objective="dimensionwise",
+            seed=83,
+        )
+
+        model, metrics = train_actor_critic(env, base, training)
+
+        self.assertEqual(metrics[0]["importance_ratio_count"], 3)
+        self.assertEqual(
+            metrics[0]["factorized_ppo_objective"],
+            "dimensionwise",
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "dimensionwise.pt"
+            save_checkpoint(path, model, env, base, training, metrics)
+            _, manifest = load_checkpoint(path)
+        self.assertEqual(
+            manifest["action_policy"]["ppo_surrogate"],
+            "dimensionwise_clipped_ratios",
+        )
+        self.assertEqual(
+            manifest["policy_optimization"]["ppo_importance_ratio"],
+            "dimensionwise_ablation",
+        )
+        self.assertEqual(
+            manifest["policy_optimization"][
+                "optimization_log_likelihood_aggregation"
+            ],
+            "dimensionwise_ablation",
+        )
+        for invalid_config, invalid_model in (
+            (replace(training, algorithm="reinforce"), base),
+            (training, replace(base, action_decoder="single_leg")),
+        ):
+            with self.subTest(
+                algorithm=invalid_config.algorithm,
+                decoder=invalid_model.action_decoder,
+            ), self.assertRaisesRegex(ValueError, "requires"):
+                train_actor_critic(env, invalid_model, invalid_config)
 
     def test_selection_score_combines_declared_validation_risks(self):
         report = SimpleNamespace(
@@ -1164,6 +1232,23 @@ class TrainerTests(TestCase):
                             metrics[0]["action_likelihood_factors"],
                             1 if action_decoder == "single_leg" else 3,
                         )
+                        self.assertEqual(
+                            metrics[0]["importance_ratio_count"],
+                            1 if algorithm == "ppo" else 0,
+                        )
+                        self.assertEqual(
+                            metrics[0]["score_function_likelihood_count"],
+                            1 if algorithm == "reinforce" else 0,
+                        )
+                        self.assertEqual(
+                            metrics[0]["factorized_ppo_objective"],
+                            (
+                                "joint"
+                                if algorithm == "ppo"
+                                and action_decoder == "factorized"
+                                else "exact_joint"
+                            ),
+                        )
                         self.assertEqual(metrics[0]["invalid_actions"], 0)
                         if action_decoder == "single_leg":
                             self.assertLessEqual(
@@ -1206,6 +1291,10 @@ class TrainerTests(TestCase):
         self.assertEqual(manifest["algorithm"], "stateful_single_leg_joint_reinforce_baseline")
         self.assertEqual(manifest["action_policy"]["maximum_orders_per_step"], 1)
         self.assertEqual(manifest["action_policy"]["likelihood"], "exact_joint_categorical")
+        self.assertEqual(
+            manifest["policy_optimization"]["reinforce_score_function"],
+            "joint_log_likelihood",
+        )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_checkpoint_with_incompatible_feature_transform(self):

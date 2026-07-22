@@ -57,7 +57,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v28"
+    "research-demo.universe-walk-forward.v29"
 )
 
 
@@ -427,6 +427,16 @@ def run_universe_walk_forward_training(
                     if candidate.start_sampling is None
                     else candidate.start_sampling
                 ),
+                factorized_ppo_objective=(
+                    candidate.factorized_ppo_objective
+                    if candidate.factorized_ppo_objective is not None
+                    else (
+                        fold_training.factorized_ppo_objective
+                        if candidate.algorithm == "ppo"
+                        and candidate.action_decoder == "factorized"
+                        else "joint"
+                    )
+                ),
             )
             for seed_offset in walk_forward_config.training_seed_offsets:
                 candidate_training = replace(
@@ -530,6 +540,10 @@ def run_universe_walk_forward_training(
                         candidate,
                         start_sampling=None,
                     ).identifier,
+                    "factorized_objective_reference_model_id": replace(
+                        candidate,
+                        factorized_ppo_objective=None,
+                    ).identifier,
                 })
         grouped_runs = []
         for candidate in model_specs:
@@ -610,6 +624,12 @@ def run_universe_walk_forward_training(
                 "requested_start_sampling": run[
                     "training_config"
                 ].start_sampling,
+                "effective_factorized_ppo_objective": run[
+                    "training_config"
+                ].factorized_ppo_objective
+                if run["model_spec"].algorithm == "ppo"
+                and run["model_spec"].action_decoder == "factorized"
+                else None,
                 "parameter_count": run["parameter_count"],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
@@ -694,6 +714,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_burn_in": None,
                 "validation_score_lift_vs_stratified_starts": None,
                 "validation_reward_lift_vs_stratified_starts": None,
+                "validation_score_lift_vs_joint_factorized_objective": None,
+                "validation_reward_lift_vs_joint_factorized_objective": None,
                 "selection": {
                     "scope": selected["evaluation_scope"],
                     "episode": selected["episode"],
@@ -818,6 +840,24 @@ def run_universe_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["start_sampling_reference_model_id"]
+                    ]
+                )
+            factorized_reference = validation_scores.get(
+                run["factorized_objective_reference_model_id"]
+            )
+            if (
+                run["model_spec"].factorized_ppo_objective == "dimensionwise"
+                and factorized_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_joint_factorized_objective"
+                ] = aggregate_score - factorized_reference
+                result[
+                    "validation_reward_lift_vs_joint_factorized_objective"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["factorized_objective_reference_model_id"]
                     ]
                 )
             candidate_results.append(result)
@@ -950,6 +990,7 @@ def run_universe_walk_forward_training(
                     ),
                 },
                 "tie_break": [
+                    "dimensionwise_factorized_objective_ablation",
                     "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
@@ -1110,6 +1151,7 @@ def main() -> None:
                     args.selection_worst_ticker_weight
                 ),
                 entropy_coefficient=args.entropy_coefficient,
+                factorized_ppo_objective=args.factorized_ppo_objective,
                 auxiliary_coefficient=args.auxiliary_coefficient,
                 auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),
                 algorithm=args.algorithm,

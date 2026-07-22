@@ -28,7 +28,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v41"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v42"
 
 
 @dataclass(frozen=True)
@@ -59,6 +59,7 @@ class TrainingConfig:
     selection_patience: int | None = 3
     selection_min_delta: float = 0.0
     algorithm: str = "ppo"
+    factorized_ppo_objective: str = "joint"
     selection_drawdown_penalty: float = 0.0
     selection_downside_penalty: float = 0.0
     selection_turnover_penalty: float = 0.0
@@ -157,6 +158,10 @@ class TrainingConfig:
             raise ValueError("selection_min_delta must be finite and non-negative")
         if self.algorithm not in {"ppo", "reinforce"}:
             raise ValueError("algorithm must be ppo or reinforce")
+        if self.factorized_ppo_objective not in {"joint", "dimensionwise"}:
+            raise ValueError(
+                "factorized_ppo_objective must be joint or dimensionwise"
+            )
         selection_penalties = (
             self.selection_drawdown_penalty,
             self.selection_downside_penalty,
@@ -755,6 +760,24 @@ def train_actor_critic(
         )
     )
 
+    if (
+        config.factorized_ppo_objective == "dimensionwise"
+        and (
+            config.algorithm != "ppo"
+            or recurrent_config.action_decoder != "factorized"
+        )
+    ):
+        raise ValueError(
+            "dimensionwise factorized PPO objective requires the factorized "
+            "decoder and PPO"
+        )
+    likelihood_aggregation = (
+        "components"
+        if config.algorithm == "ppo"
+        and recurrent_config.action_decoder == "factorized"
+        and config.factorized_ppo_objective == "dimensionwise"
+        else "joint"
+    )
     model = build_recurrent_actor_critic(recurrent_config)
     # PPO likelihood ratios require the same network behavior during rollout
     # and updates. Eval mode disables optional recurrent dropout but keeps grads.
@@ -860,7 +883,11 @@ def train_actor_critic(
             actions.append(action.squeeze(0))
             rewards.append(float(reward))
             old_log_probabilities.append(
-                model.action_log_probabilities(logits, action).squeeze(0)
+                model.action_log_probabilities(
+                    logits,
+                    action,
+                    aggregation=likelihood_aggregation,
+                ).squeeze(0)
             )
             old_values.append(value.squeeze(0))
             invalid_actions += int(info["invalid_action_count"])
@@ -1036,6 +1063,7 @@ def train_actor_critic(
                 new_log_probs = model.action_log_probabilities(
                     logits,
                     actions_tensor[batch],
+                    aggregation=likelihood_aggregation,
                 )
                 log_ratio = new_log_probs - old_log_probs_tensor[batch]
                 ratio = log_ratio.exp()
@@ -1320,6 +1348,18 @@ def train_actor_critic(
                     if recurrent_config.action_decoder == "single_leg"
                     else episode_env.action_shape[0]
                 ),
+                "importance_ratio_count": int(
+                    old_log_probs_tensor.shape[-1]
+                ) if config.algorithm == "ppo" else 0,
+                "score_function_likelihood_count": int(
+                    old_log_probs_tensor.shape[-1]
+                ) if config.algorithm == "reinforce" else 0,
+                "factorized_ppo_objective": (
+                    config.factorized_ppo_objective
+                    if config.algorithm == "ppo"
+                    and recurrent_config.action_decoder == "factorized"
+                    else "exact_joint"
+                ),
                 "optimizer_updates": len(update_metrics),
                 "ppo_updates": (
                     len(update_metrics) if config.algorithm == "ppo" else 0
@@ -1401,8 +1441,48 @@ def checkpoint_manifest(
                 "factorization": "independent_masked_rows",
                 "initial_hold_bias": recurrent_config.initial_hold_bias,
                 "hard_order_cap": None,
+                "likelihood": "exact_joint_product",
+                "ppo_surrogate": (
+                    (
+                        "joint_clipped_ratio"
+                        if training_config.factorized_ppo_objective == "joint"
+                        else "dimensionwise_clipped_ratios"
+                    )
+                    if training_config.algorithm == "ppo"
+                    else None
+                ),
             }
         ),
+        "policy_optimization": {
+            "action_distribution_likelihood": (
+                "exact_joint_categorical"
+                if recurrent_config.action_decoder == "single_leg"
+                else "exact_factorized_product"
+            ),
+            "optimization_log_likelihood_aggregation": (
+                "dimensionwise_ablation"
+                if training_config.algorithm == "ppo"
+                and recurrent_config.action_decoder == "factorized"
+                and training_config.factorized_ppo_objective == "dimensionwise"
+                else "joint"
+            ),
+            "ppo_importance_ratio": (
+                (
+                    "joint"
+                    if recurrent_config.action_decoder == "single_leg"
+                    or training_config.factorized_ppo_objective == "joint"
+                    else "dimensionwise_ablation"
+                )
+                if training_config.algorithm == "ppo"
+                else None
+            ),
+            "reinforce_score_function": (
+                "joint_log_likelihood"
+                if training_config.algorithm == "reinforce"
+                else None
+            ),
+            "entropy_reduction": "mean_per_decoder_factor",
+        },
         "temporal_training": {
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
@@ -1659,6 +1739,15 @@ def _parser() -> argparse.ArgumentParser:
         default=16,
     )
     parser.add_argument("--ppo-epochs", type=int, default=4)
+    parser.add_argument(
+        "--factorized-ppo-objective",
+        choices=("joint", "dimensionwise"),
+        default="joint",
+        help=(
+            "clip the exact joint factorized-action ratio, or retain the "
+            "legacy per-dimension clipping research ablation"
+        ),
+    )
     parser.add_argument("--minibatch-size", type=int, default=64)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -1821,6 +1910,7 @@ def main() -> None:
         clip_ratio=args.clip_ratio,
         target_kl=args.target_kl,
         entropy_coefficient=args.entropy_coefficient,
+        factorized_ppo_objective=args.factorized_ppo_objective,
         auxiliary_coefficient=args.auxiliary_coefficient,
         auxiliary_horizons=auxiliary_horizons,
         evaluation_interval=args.evaluation_interval,

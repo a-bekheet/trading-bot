@@ -55,7 +55,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v44"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v45"
 
 
 @dataclass(frozen=True)
@@ -186,6 +186,7 @@ class ModelSpec:
     time_aware_discounting: bool | None = None
     burn_in_steps: int | None = None
     start_sampling: str | None = None
+    factorized_ppo_objective: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid", "mixture"}:
@@ -258,6 +259,21 @@ class ModelSpec:
             raise ValueError(
                 "model start_sampling must be uniform, "
                 "volatility_stratified, or None"
+            )
+        if self.factorized_ppo_objective not in {
+            None,
+            "joint",
+            "dimensionwise",
+        }:
+            raise ValueError(
+                "model factorized_ppo_objective must be joint, "
+                "dimensionwise, or None"
+            )
+        if self.factorized_ppo_objective == "dimensionwise" and (
+            self.algorithm != "ppo" or self.action_decoder != "factorized"
+        ):
+            raise ValueError(
+                "dimensionwise objective requires factorized PPO"
             )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
@@ -486,6 +502,11 @@ def _select_seed_robust_group(
         eligible,
         key=lambda group: (
             -group["aggregate"]["robust_training_seed_validation_score"],
+            int(
+                group["representative"][
+                    "model_spec"
+                ].factorized_ppo_objective == "dimensionwise"
+            ),
             max(
                 run["inference_latency"]["median_microseconds"]
                 for run in group["replicates"]
@@ -599,6 +620,16 @@ def run_walk_forward_training(
                     fold_training.start_sampling
                     if candidate.start_sampling is None
                     else candidate.start_sampling
+                ),
+                factorized_ppo_objective=(
+                    candidate.factorized_ppo_objective
+                    if candidate.factorized_ppo_objective is not None
+                    else (
+                        fold_training.factorized_ppo_objective
+                        if candidate.algorithm == "ppo"
+                        and candidate.action_decoder == "factorized"
+                        else "joint"
+                    )
                 ),
             )
             for seed_offset in walk_forward_config.training_seed_offsets:
@@ -722,6 +753,10 @@ def run_walk_forward_training(
                         candidate,
                         start_sampling=None,
                     ).identifier,
+                    "factorized_objective_reference_model_id": replace(
+                        candidate,
+                        factorized_ppo_objective=None,
+                    ).identifier,
                 })
 
         grouped_runs = []
@@ -780,6 +815,12 @@ def run_walk_forward_training(
                 "requested_start_sampling": run[
                     "training_config"
                 ].start_sampling,
+                "effective_factorized_ppo_objective": run[
+                    "training_config"
+                ].factorized_ppo_objective
+                if run["model_spec"].algorithm == "ppo"
+                and run["model_spec"].action_decoder == "factorized"
+                else None,
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": group["latency_eligible"],
@@ -864,6 +905,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_burn_in": None,
                 "validation_reward_lift_vs_stratified_starts": None,
                 "validation_score_lift_vs_stratified_starts": None,
+                "validation_reward_lift_vs_joint_factorized_objective": None,
+                "validation_score_lift_vs_joint_factorized_objective": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -995,6 +1038,24 @@ def run_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["start_sampling_reference_model_id"]
+                    ]
+                )
+            factorized_reference = validation_scores.get(
+                run["factorized_objective_reference_model_id"]
+            )
+            if (
+                run["model_spec"].factorized_ppo_objective == "dimensionwise"
+                and factorized_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_joint_factorized_objective"
+                ] = aggregate_score - factorized_reference
+                result[
+                    "validation_reward_lift_vs_joint_factorized_objective"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["factorized_objective_reference_model_id"]
                     ]
                 )
         model = winning_run["model"]
@@ -1198,6 +1259,7 @@ def run_walk_forward_training(
                     ),
                 },
                 "tie_break": [
+                    "dimensionwise_factorized_objective_ablation",
                     "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
@@ -1452,6 +1514,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument(
+        "--factorized-ppo-objective",
+        choices=("joint", "dimensionwise"),
+        default="joint",
+        help=(
+            "use the exact joint action ratio or the legacy per-dimension "
+            "clipped PPO research objective"
+        ),
+    )
+    parser.add_argument(
         "--auxiliary-coefficient",
         type=float,
         default=0.0,
@@ -1499,6 +1570,14 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "add matched uniform-start candidates for volatility-stratified "
             "training"
+        ),
+    )
+    parser.add_argument(
+        "--factorized-objective-ablation",
+        action="store_true",
+        help=(
+            "add matched legacy dimension-wise PPO candidates for every "
+            "factorized PPO candidate"
         ),
     )
     parser.add_argument("--slot-count", type=int, default=32)
@@ -1677,6 +1756,26 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             replace(spec, start_sampling="uniform")
             for spec in full_specs
         )
+    if args.factorized_objective_ablation:
+        if args.factorized_ppo_objective != "joint":
+            raise ValueError(
+                "--factorized-objective-ablation requires "
+                "--factorized-ppo-objective joint"
+            )
+        references = tuple(
+            spec
+            for spec in full_specs
+            if spec.algorithm == "ppo" and spec.action_decoder == "factorized"
+        )
+        if not references:
+            raise ValueError(
+                "--factorized-objective-ablation requires a factorized PPO "
+                "candidate"
+            )
+        specs.extend(
+            replace(spec, factorized_ppo_objective="dimensionwise")
+            for spec in references
+        )
     return _normalize_model_specs(specs)
 
 
@@ -1721,6 +1820,7 @@ def main() -> None:
                     args.selection_worst_ticker_weight
                 ),
                 entropy_coefficient=args.entropy_coefficient,
+                factorized_ppo_objective=args.factorized_ppo_objective,
                 auxiliary_coefficient=args.auxiliary_coefficient,
                 auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),
                 algorithm=args.algorithm,

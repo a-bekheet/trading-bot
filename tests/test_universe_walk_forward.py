@@ -112,6 +112,12 @@ class UniverseWalkForwardTests(TestCase):
                 auxiliary_coefficient=0.0,
                 auxiliary_horizons=(1, 2),
             ),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
+                factorized_ppo_objective="dimensionwise",
+            ),
         )
         with TemporaryDirectory() as directory:
             output_dir = Path(directory)
@@ -280,6 +286,21 @@ class UniverseWalkForwardTests(TestCase):
         self.assertIsNotNone(
             discount_ablation[
                 "validation_score_lift_vs_time_aware_discounting"
+            ]
+        )
+        objective_ablation = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["model"]["factorized_ppo_objective"]
+            == "dimensionwise"
+        )
+        self.assertEqual(
+            objective_ablation["effective_factorized_ppo_objective"],
+            "dimensionwise",
+        )
+        self.assertIsNotNone(
+            objective_ablation[
+                "validation_score_lift_vs_joint_factorized_objective"
             ]
         )
         self.assertEqual(len(manifest["training_environments"]), 2)

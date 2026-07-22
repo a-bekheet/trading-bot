@@ -622,6 +622,41 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.57 corrects the default factorized PPO objective to use the likelihood of
+the complete action vector. Because the row policies are conditionally
+independent, the exact joint log likelihood is the sum of their masked
+categorical log likelihoods; PPO now forms and clips one importance ratio from
+that sum. REINFORCE likewise uses the joint score function. The single-leg
+decoder was already an exact joint categorical and retains that behavior.
+
+The earlier per-row clipped surrogate remains available as the explicit
+`dimensionwise` research ablation through
+`--factorized-objective-ablation`. Single-ticker and shared-universe artifacts
+report the effective objective and its validation-only lift against the joint
+default. An exact validation-score tie retains the joint objective before
+latency comparison because the objectives do not alter inference operations.
+Probability-identity and gradient tests cover the product/sum
+relationship, and every GRU, LSTM, hybrid, and gated-mixture learner now records
+one PPO importance ratio or one REINFORCE score-function likelihood per
+transition under the default. This changes training
+semantics without adding model parameters or inference work; it also reduces
+the stored ratio/surrogate tensor width from 33 to one on the default 32-slot
+environment. In a local CPU tensor-only benchmark with 4,096 transitions and
+33 action rows, the clipped-surrogate kernel measured 44.45 microseconds median
+with the joint ratio versus 287.62 microseconds dimension-wise, while ratio
+storage fell from 135,168 to 4,096 elements. This excludes network forward and
+backward work, so it is not an end-to-end training-speed claim.
+
+A real two-seed GOOG walk-forward smoke gave both objectives zero robust
+validation score and the dimension-wise ablation zero lift. The new tie rule
+retained the joint checkpoint; its two-transition held-out path made no trades
+and returned zero. This verifies objective selection and provenance but is not
+evidence of trading alpha.
+
+Checkpoint, single-ticker walk-forward, and universe walk-forward schemas
+advance to v42, v45, and v29. Feature and environment schemas remain
+`dimensionless.v17` and v22.
+
 v0.56 adds optional volatility-stratified recurrent training starts for PPO and
 REINFORCE across GRU, LSTM, hybrid, mixture, graph, and shared-universe models.
 Sampling uses only fully covered backward-looking realized volatility inside
@@ -1046,6 +1081,7 @@ train-walk-forward \
   --max-median-inference-latency-us 500 \
   --start-sampling volatility_stratified \
   --start-sampling-ablation \
+  --factorized-objective-ablation \
   --ablation surface_wings \
   --ablation volatility_regime
 ```
@@ -1111,6 +1147,16 @@ score and raw-reward lift versus its full-feature counterpart plus active and
 masked input counts.
 Only the validation winner reaches test, preventing feature research from
 becoming repeated holdout peeking.
+
+Factorized PPO defaults to one clipped importance ratio for the complete action
+vector. Add `--factorized-objective-ablation` to train otherwise matched legacy
+`dimensionwise` candidates and report their validation lift. This ablation is
+created only for factorized PPO candidates; single-leg PPO and every REINFORCE
+candidate continue to use an exact joint likelihood. The optional
+`--factorized-ppo-objective dimensionwise` switch exists for declared legacy
+reproduction, not as the recommended training default. An exact validation tie
+retains the joint candidate because this training-only choice has no deployment
+latency tradeoff.
 
 When auxiliary training is enabled, add `--auxiliary-ablation` to create an
 otherwise matched candidate with coefficient zero. Both candidates start from

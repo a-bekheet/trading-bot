@@ -616,13 +616,29 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             )
             return self._decode_joint_actions(sampled) if single_leg else sampled
 
-        def action_log_probabilities(self, logits, actions):
-            """Return exact decoder log probabilities with a stable final axis."""
+        def action_log_probabilities(
+            self,
+            logits,
+            actions,
+            *,
+            aggregation="components",
+        ):
+            """Return exact component or joint decoder log probabilities."""
+            if aggregation not in {"components", "joint"}:
+                raise ValueError(
+                    "action likelihood aggregation must be components or joint"
+                )
             distribution = self._categorical(logits)
             if single_leg:
                 indices = self._joint_action_indices(actions)
-                return distribution.log_prob(indices).unsqueeze(-1)
-            return distribution.log_prob(actions)
+                components = distribution.log_prob(indices).unsqueeze(-1)
+            else:
+                components = distribution.log_prob(actions)
+            return (
+                components.sum(dim=-1, keepdim=True)
+                if aggregation == "joint"
+                else components
+            )
 
         def action_entropies(self, logits):
             """Return decoder entropy with one entry per likelihood factor."""

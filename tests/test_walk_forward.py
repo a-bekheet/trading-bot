@@ -411,6 +411,32 @@ class WalkForwardTrainingTests(TestCase):
         with self.assertRaisesRegex(ValueError, "start_sampling"):
             ModelSpec(start_sampling="future_aware")
 
+    def test_cli_builds_matched_factorized_ppo_objective_ablation(self):
+        args = _parser().parse_args(["--factorized-objective-ablation"])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(len(specs), 2)
+        self.assertIsNone(specs[0].factorized_ppo_objective)
+        self.assertEqual(specs[1].factorized_ppo_objective, "dimensionwise")
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--factorized-ppo-objective", "dimensionwise",
+                "--factorized-objective-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "requires a factorized PPO"):
+            _model_specs_from_args(_parser().parse_args([
+                "--candidate", "flat:gru:reinforce",
+                "--factorized-objective-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "factorized_ppo_objective"):
+            ModelSpec(factorized_ppo_objective="marginal")
+        with self.assertRaisesRegex(ValueError, "requires factorized PPO"):
+            ModelSpec(
+                action_decoder="single_leg",
+                factorized_ppo_objective="dimensionwise",
+            )
+
     def test_cli_builds_matched_auxiliary_loss_ablation(self):
         args = _parser().parse_args([
             "--auxiliary-coefficient",
@@ -743,6 +769,7 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(
             selection["tie_break"],
             [
+                "dimensionwise_factorized_objective_ablation",
                 "worst_training_seed_median_inference_latency",
                 "parameter_count",
                 "active_input_count",
@@ -1040,6 +1067,68 @@ class WalkForwardTrainingTests(TestCase):
                     item["inference_latency"]["median_microseconds"]
                     for item in other["training_seed_replicates"]
                 ),
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_factorized_objective_ablation_reports_validation_only_lift(self):
+        candidates = (
+            ModelSpec(kind="gru", encoder="flat", hidden_size=4),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                factorized_ppo_objective="dimensionwise",
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            summary = run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    min_train_size=3,
+                    validation_size=2,
+                    test_size=2,
+                    test_seeds=(61,),
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=2,
+                ),
+                candidates,
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                    evaluation_interval=1,
+                    seed=41,
+                ),
+                Path(directory),
+                env_kwargs={"slot_count": 2, "starting_cash": 1_000},
+            )
+
+        joint, dimensionwise = summary["folds"][0]["model_selection"][
+            "candidates"
+        ]
+        self.assertEqual(joint["effective_factorized_ppo_objective"], "joint")
+        self.assertEqual(
+            dimensionwise["effective_factorized_ppo_objective"],
+            "dimensionwise",
+        )
+        self.assertAlmostEqual(
+            dimensionwise[
+                "validation_score_lift_vs_joint_factorized_objective"
+            ],
+            dimensionwise["selection"]["validation_selection_score"]
+            - joint["selection"]["validation_selection_score"],
+        )
+        self.assertIsNone(
+            joint["validation_score_lift_vs_joint_factorized_objective"]
+        )
+        if (
+            joint["selection"]["validation_selection_score"]
+            == dimensionwise["selection"]["validation_selection_score"]
+        ):
+            self.assertEqual(
+                summary["folds"][0]["model_selection"]["selected_model_id"],
+                joint["model_id"],
             )
 
     def test_cli_expands_each_architecture_with_requested_ablation(self):

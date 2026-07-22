@@ -333,8 +333,17 @@ be within 0.15 Delta of its target and ATM must be within 0.10 absolute forward
 log-moneyness; otherwise reduce coverage and leave the factor neutral.
 
 The trainer supports stateful PPO and Monte-Carlo REINFORCE with a learned value
-baseline. The default factorized decoder uses per-slot likelihood ratios. The
-optional `single_leg` decoder uses one exact joint categorical over global hold
+baseline. The default factorized decoder multiplies the independent masked-row
+probabilities, equivalently summing their log probabilities, and uses one exact
+joint action likelihood per transition. PPO must clip one ratio formed from
+that joint likelihood; REINFORCE must use the joint log likelihood in its score
+function. Per-row PPO ratios are the named `dimensionwise` research ablation,
+not the default, and must be compared against the joint objective on validation.
+Persist the effective objective, PPO importance-ratio count, REINFORCE
+score-function likelihood count, and validation lift.
+On an exact validation-score tie, retain the joint objective before consulting
+latency because the two objectives do not change the inference graph.
+The optional `single_leg` decoder uses one exact joint categorical over global hold
 plus every feasible row/non-hold-action pair, structurally permitting at most
 one order per snapshot. It is an explicit lower-complexity action-space
 candidate, not post-processing or an inferred execution cap. PPO uses GAE,
@@ -354,7 +363,10 @@ The default entropy coefficient is `1e-4`, calibrated to return-scale rewards.
 Do not hard-cap active rows or post-process sampled actions without deriving the
 matching joint likelihood; that would invalidate PPO ratios. Preserve requested
 option/underlying order counts and action-density metrics in every episode.
-Persist the decoder and number of likelihood factors. `single_leg` must encode
+Persist the decoder, number of likelihood factors, likelihood aggregation,
+importance-ratio count, and score-function likelihood count. Entropy remains
+the mean per decoder factor so its
+coefficient does not scale with the slot count. `single_leg` must encode
 masks before sampling, decode to the existing environment action array, reject
 training actions with multiple non-hold rows, and retain one scalar log
 probability/entropy per step. It cannot express same-snapshot spreads or hedges,

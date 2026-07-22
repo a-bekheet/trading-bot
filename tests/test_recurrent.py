@@ -361,6 +361,48 @@ class RecurrentTests(TestCase):
             )
 
     @skipUnless(torch is not None, "install the optional ml extra")
+    def test_factorized_decoder_joint_likelihood_is_component_product(self):
+        torch.manual_seed(31)
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            2,
+            3,
+            action_slot_count=3,
+            hidden_size=8,
+        ))
+        logits = torch.randn(4, 3, 3, requires_grad=True)
+        actions = torch.tensor([
+            [0, 1, 2],
+            [2, 0, 1],
+            [1, 1, 0],
+            [0, 0, 0],
+        ])
+
+        components = model.action_log_probabilities(logits, actions)
+        joint = model.action_log_probabilities(
+            logits,
+            actions,
+            aggregation="joint",
+        )
+
+        self.assertEqual(tuple(components.shape), (4, 3))
+        self.assertEqual(tuple(joint.shape), (4, 1))
+        torch.testing.assert_close(joint[:, 0], components.sum(dim=-1))
+        torch.testing.assert_close(
+            joint.exp()[:, 0],
+            components.exp().prod(dim=-1),
+        )
+        (-joint.mean()).backward()
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        self.assertGreater(float(logits.grad.abs().sum()), 0.0)
+        with self.assertRaisesRegex(ValueError, "aggregation"):
+            model.action_log_probabilities(
+                logits,
+                actions,
+                aggregation="mean",
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_encoder_masks_padded_contracts(self):
         # Layout: market(2), two contracts with three features, portfolio(3), valid(2).
         config = RecurrentConfig(

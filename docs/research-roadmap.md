@@ -35,6 +35,7 @@ Every candidate must eventually pass:
 
 | Evidence | Useful idea for this repository | Decision |
 | --- | --- | --- |
+| [Dimension-Wise Importance Sampling Weight Clipping for Sample-Efficient Reinforcement Learning (ICML 2019)](https://proceedings.mlr.press/v97/han19b.html) | Per-dimension PPO clipping is a distinct high-dimensional control algorithm intended to trade variance against clipping bias; it is not the likelihood ratio of the complete sampled action. | Make the exact product-policy joint ratio the factorized PPO default and retain dimension-wise clipping only as a named validation ablation. Use the exact joint score function for REINFORCE and record the ratio count in every run. |
 | [SANOS: A Strictly Arbitrage-Free Neural Option Surface (2026)](https://arxiv.org/abs/2601.11209) | Bid/ask spreads belong directly in no-arbitrage constraints; midpoint-only checks can manufacture violations that cannot be traded. | Add causal bid/ask-aware adjacent-strike vertical and convexity diagnostics with explicit coverage. Treat them as state-quality signals and test their marginal value through `static_arbitrage`; do not automatically trade or reward them. |
 | [Volatility Surface Reconstruction using Deep Learning under No-Arbitrage Constraints (2026)](https://arxiv.org/abs/2605.24031) | In a sparse/noisy reconstruction study, coordinate-aware attention and explicit calendar/butterfly penalties reduce reconstruction and consistency errors. Reconstruction accuracy does not imply a profitable trading representation. | Keep the compact masked attention candidate and add observed-strike butterfly diagnostics. Defer reconstructed quotes and calendar constraints until the repository has forward-consistent European-equivalent inputs and enough history for separate reconstruction validation. |
 | [Recurrent Experience Replay in Distributed Reinforcement Learning (ICLR 2019)](https://deepmind.google/research/publications/recurrent-experience-replay-in-distributed-reinforcement-learning/) | Recurrent training on partial sequences must address inaccurate boundary hidden states; a prefix can reconstruct state before loss-bearing transitions. | Random training windows now use a bounded causal no-op prefix, one batched no-gradient recurrent call, explicit metrics, and a validation-only disabled ablation. This is on-policy context reconstruction, not replay. |
@@ -231,6 +232,16 @@ The policy head now has a trainable hold-logit prior and reward-scale entropy
 coefficient. This reduced untrained requested action density on the current
 AAPL surface without imposing a hard order cap or changing PPO likelihoods.
 Episode provenance reports requested option and hedge actions separately.
+
+The factorized decoder now treats its sampled rows as one product-distribution
+action for optimization: component log probabilities are summed before PPO
+forms its importance ratio or REINFORCE applies its score function. The previous
+per-row clipped PPO surrogate remains a declared `dimensionwise` validation
+ablation because the ICML method motivates it as a different bias/variance
+choice. Joint aggregation removes no feasible action, changes no inference
+parameter or operation, and reduces the default 33-wide ratio/surrogate tensors
+to one column. Whether that training correction improves out-of-sample reward
+still requires sufficient market paths and seed-robust validation.
 
 An optional exact single-leg decoder now replaces the 33 independent row
 categoricals with one masked categorical over hold or one row/action pair. It
