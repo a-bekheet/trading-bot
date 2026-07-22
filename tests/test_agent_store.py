@@ -35,6 +35,12 @@ def decision() -> dict:
         "reward": 0.0,
         "cash": 100_000.0,
         "nav": 100_000.0,
+        "decision_cash": 100_000.0,
+        "decision_nav": 100_000.0,
+        "outcome_status": "pending",
+        "outcome_timestamp": None,
+        "outcome_nav": None,
+        "outcome_return": None,
         "invalid_action_count": 0,
     }
 
@@ -45,14 +51,28 @@ class AgentPaperStoreTests(TestCase):
             store = AgentPaperStore(Path(directory) / "agents.db")
             first = store.commit_cycle(deployment(), [decision()])
             second = store.commit_cycle(deployment(), [decision()])
+            finalized = store.commit_cycle(
+                deployment(),
+                [],
+                [{
+                    "snapshot_timestamp": decision()["snapshot_timestamp"],
+                    "outcome_timestamp": "2026-07-22T14:15:00+00:00",
+                    "outcome_nav": 100_250.0,
+                    "outcome_return": 0.0025,
+                }],
+            )
             decisions = store.decisions(deployment_id="deployment-1")
 
         self.assertEqual(first["decision_count"], 1)
         self.assertEqual(second["decision_count"], 1)
         self.assertEqual(second["execution_count"], 0)
+        self.assertEqual(finalized["finalized_decision_count"], 1)
+        self.assertEqual(finalized["pending_decision_count"], 0)
         self.assertEqual(decisions[0]["research_orders"], [1, 0])
         self.assertEqual(decisions[0]["sandbox_orders"], [0, 0])
         self.assertFalse(decisions[0]["activated"])
+        self.assertEqual(decisions[0]["outcome_status"], "finalized")
+        self.assertEqual(decisions[0]["outcome_return"], 0.0025)
 
     def test_separate_checkpoints_have_isolated_deployments(self):
         with TemporaryDirectory() as directory:

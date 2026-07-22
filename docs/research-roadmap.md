@@ -505,6 +505,27 @@ the Agent Lab shows current runtime state, paper equity, proposals, and fills.
 This is tangible paper operation, not live brokerage or evidence of alpha; old
 checkpoint schemas and pre-v0.84 noneligible cutoffs deliberately fail closed.
 
+The v0.86 online-accounting layer separates a tangible decision from a known
+economic outcome. Every proposal stores its pre-trade NAV. The newest action
+remains pending because no future market state exists; when the next real
+eligible snapshot arrives, the same atomic cycle finalizes its account return
+as next-mark NAV divided by decision NAV minus one. Batched catch-up decisions
+whose next observations already exist finalize immediately. The Agent Lab now
+reports pending/finalized counts, outcome hit rate, online maximum drawdown, and
+an equity curve containing only causal next marks. This prevents a duplicated
+terminal frame or same-snapshot execution cost from being presented as a
+forward result, while retaining current paper equity and the raw RL reward for
+audit.
+
+The v0.86 interface pass separates operation from diagnosis. Overview provides
+a compact market/runtime/training health read, Agent Desk focuses on one saved
+policy and its real online outcomes, Trade surfaces the simulated order ticket
+before the full Greek-enriched chain, and Portfolio combines positions with the
+fill audit trail. Arena readiness, candidate fleets, feature ablations, and raw
+held-out provenance remain available under Research through progressive
+disclosure. This changes discoverability and decision speed only; it does not
+upgrade exploratory evidence or imply alpha.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

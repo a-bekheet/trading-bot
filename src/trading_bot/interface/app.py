@@ -2,6 +2,7 @@
 
 import json
 import math
+from html import escape
 from pathlib import Path
 
 import pandas as pd
@@ -30,6 +31,7 @@ from trading_bot.interface.results import (
     load_arena_watch_status,
     load_paper_agent_watch_status,
     paper_agent_decisions,
+    paper_agent_equity_curve,
     paper_agent_overview,
     promotion_assessment,
     trade_ledger,
@@ -39,27 +41,136 @@ from trading_bot.interface.results import (
 DATA_DIR = Path("data")
 PAPER_DATABASE = DATA_DIR / "paper_portfolio.db"
 
-st.set_page_config(page_title="Options Sandbox", layout="wide")
+st.set_page_config(
+    page_title="Options Agent Desk",
+    page_icon="◈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 st.markdown(
     """
     <style>
-    .stApp {background: #f5f7fb;}
+    :root {
+        --ink: #152033;
+        --muted: #667085;
+        --line: #e4e9f1;
+        --panel: #ffffff;
+        --accent: #3157d5;
+        --positive: #087b60;
+    }
+    .stApp {background: #f6f8fc; color: var(--ink);}
+    .block-container {
+        max-width: 1440px;
+        padding-top: 2rem;
+        padding-bottom: 5rem;
+    }
+    [data-testid="stSidebar"] {
+        background: #111a2e;
+        border-right: 0;
+    }
+    [data-testid="stSidebar"] * {color: #eef3ff;}
+    [data-testid="stSidebar"] [data-baseweb="select"] > div,
+    [data-testid="stSidebar"] [role="radiogroup"] {
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+    }
+    [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div {
+        background: #ffffff;
+    }
+    [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] span {
+        color: #152033 !important;
+    }
+    [data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] * {
+        color: #152033 !important;
+        fill: #152033 !important;
+    }
+    [data-testid="stSidebar"] .stSelectbox [role="group"] {
+        background: #ffffff;
+        border-radius: 10px;
+    }
+    [data-testid="stSidebar"] .stSelectbox input {
+        color: #152033 !important;
+        -webkit-text-fill-color: #152033 !important;
+    }
+    [data-testid="stSidebar"] .stSelectbox button {
+        color: #152033 !important;
+    }
+    [data-testid="stSidebar"] hr {border-color: rgba(255,255,255,.12);}
+    [data-testid="stTabs"] [data-baseweb="tab-list"] {
+        gap: .4rem;
+        border-bottom: 1px solid var(--line);
+    }
+    [data-testid="stTabs"] button {
+        border-radius: 9px 9px 0 0;
+        padding-left: 1rem;
+        padding-right: 1rem;
+        font-weight: 650;
+    }
     [data-testid="stMetric"] {
-        background: white;
-        border: 1px solid #e6e9f0;
-        border-radius: 14px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
         padding: 14px 16px;
-        box-shadow: 0 4px 18px rgba(24, 33, 56, 0.04);
+        box-shadow: 0 6px 24px rgba(20, 31, 54, 0.045);
     }
     .agent-hero {
-        padding: 24px 28px;
-        border-radius: 20px;
-        background: linear-gradient(125deg, #121b34 0%, #243866 64%, #245b79 100%);
+        padding: 25px 28px;
+        border-radius: 18px;
+        background:
+            radial-gradient(circle at 88% 15%, rgba(79, 209, 197, .2), transparent 24%),
+            linear-gradient(120deg, #111a2e 0%, #263c74 68%, #235e70 100%);
         color: white;
-        margin-bottom: 14px;
+        margin-bottom: 10px;
+        border: 1px solid rgba(255,255,255,.08);
+        box-shadow: 0 16px 45px rgba(21, 32, 51, .14);
     }
-    .agent-hero h1 {font-size: 2rem; margin: 0 0 6px 0;}
-    .agent-hero p {margin: 0; color: #dce6ff;}
+    .agent-hero .eyebrow {
+        color: #93dfd4;
+        font-size: .72rem;
+        font-weight: 750;
+        letter-spacing: .12em;
+        margin-bottom: 8px;
+    }
+    .agent-hero h1 {font-size: 2rem; line-height: 1.1; margin: 0 0 7px 0;}
+    .agent-hero p {margin: 0; color: #dce6ff; max-width: 680px;}
+    .section-kicker {
+        color: #3157d5;
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .11em;
+        margin: 1rem 0 .25rem;
+    }
+    .workspace-card {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 18px 20px;
+        min-height: 100%;
+        box-shadow: 0 6px 24px rgba(20,31,54,.04);
+    }
+    .workspace-card h3 {margin: 0 0 5px; font-size: 1.05rem;}
+    .workspace-card p {color: var(--muted); margin: 0; font-size: .9rem;}
+    .status-row {display:flex; align-items:center; gap:8px; margin:7px 0;}
+    .status-dot {width:8px; height:8px; border-radius:50%; background:#98a2b3;}
+    .status-dot.good {background:#12a27d; box-shadow:0 0 0 4px #e5f7f2;}
+    .status-dot.warn {background:#e6a700; box-shadow:0 0 0 4px #fff5d6;}
+    .status-dot.bad {background:#d94b59; box-shadow:0 0 0 4px #fdecef;}
+    .desk-banner {
+        display:flex; justify-content:space-between; gap:20px; align-items:center;
+        background:linear-gradient(105deg,#fff,#f0f4ff);
+        border:1px solid #dce4f6; border-radius:14px; padding:18px 20px;
+        margin:.25rem 0 1rem;
+    }
+    .desk-banner h2 {font-size:1.35rem; margin:0 0 4px;}
+    .desk-banner p {margin:0; color:var(--muted);}
+    .badge {
+        display:inline-block; padding:5px 10px; border-radius:999px;
+        font-size:.75rem; font-weight:750; white-space:nowrap;
+        background:#e9eefb; color:#23345f;
+    }
+    .badge.good {background:#e3f6f0; color:#06745a;}
+    .badge.warn {background:#fff3d2; color:#8b6200;}
+    .badge.bad {background:#fde8eb; color:#a82e3a;}
     .scope-pill {
         display: inline-block;
         padding: 4px 10px;
@@ -70,15 +181,23 @@ st.markdown(
         font-weight: 650;
         margin-right: 6px;
     }
+    div[data-testid="stDataFrame"] {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    .stAlert {border-radius: 12px;}
+    h1, h2, h3 {letter-spacing: -.025em;}
     </style>
     <div class="agent-hero">
-      <h1>Options Agent Research Lab</h1>
-      <p>Train, compare, inspect, and paper-test recurrent options agents.</p>
+      <div class="eyebrow">OPTIONS INTELLIGENCE · PAPER EXECUTION</div>
+      <h1>Agent Trading Desk</h1>
+      <p>Monitor trained policies, inspect decisions, and test options execution from one workspace.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
-st.caption("RESEARCH DEMO · PAPER TRADING ONLY · NO LIVE BROKER CONNECTION")
+st.caption("PAPER TRADING ONLY · NO LIVE BROKER CONNECTION")
 
 tickers = available_tickers(DATA_DIR)
 if not tickers:
@@ -86,7 +205,10 @@ if not tickers:
     st.stop()
 
 broker = PaperBroker(PAPER_DATABASE)
-st.sidebar.header("Research workspace")
+st.sidebar.markdown("## Agent Desk")
+st.sidebar.caption("PAPER ENVIRONMENT")
+st.sidebar.divider()
+st.sidebar.markdown("#### Market context")
 symbol = st.sidebar.selectbox("Ticker", tickers)
 option_type = st.sidebar.radio("Option type", ("call", "put"), horizontal=True)
 snapshot = load_latest_snapshot(DATA_DIR, symbol)
@@ -95,25 +217,296 @@ session = market_session_status(snapshot)
 freshness = market_data_freshness_status(snapshot)
 execution_enabled = bool(session["trading_enabled"] and freshness["trading_enabled"])
 
-agent_tab, market_tab, portfolio_tab, history_tab = st.tabs(
+runs = discover_agent_runs(DATA_DIR)
+watch_status = load_arena_watch_status(DATA_DIR)
+arena_manifests = discover_agent_arena_manifests(DATA_DIR)
+readiness = (
+    arena_readiness_overview({"preflight": watch_status.get("readiness", [])})
+    if watch_status
+    else arena_readiness_overview(arena_manifests[0])
+    if arena_manifests
+    else pd.DataFrame()
+)
+paper_agents = paper_agent_overview(DATA_DIR)
+paper_decisions = paper_agent_decisions(DATA_DIR)
+paper_equity = paper_agent_equity_curve(DATA_DIR)
+paper_watch = load_paper_agent_watch_status(DATA_DIR)
+roster = agent_roster(runs) if runs else pd.DataFrame()
+
+overview_tab, desk_tab, market_tab, portfolio_tab, research_tab = st.tabs(
     (
-        "Agent Results",
-        "Market & Paper Order",
-        "Paper Portfolio",
-        "Trade History",
+        "Overview",
+        "Agent Desk",
+        "Trade",
+        "Portfolio",
+        "Research",
     )
 )
 
-with agent_tab:
-    runs = discover_agent_runs(DATA_DIR)
-    watch_status = load_arena_watch_status(DATA_DIR)
-    arena_manifests = discover_agent_arena_manifests(DATA_DIR)
-    readiness = (
-        arena_readiness_overview({"preflight": watch_status.get("readiness", [])})
-        if watch_status
-        else arena_readiness_overview(arena_manifests[0])
-        if arena_manifests
-        else pd.DataFrame()
+with overview_tab:
+    first = snapshot.iloc[0]
+    account = broker.account()
+    active_count = (
+        int((paper_agents["Runtime"] == "Active").sum())
+        if not paper_agents.empty
+        else 0
+    )
+    deployment_count = len(paper_agents)
+    finalized_count = (
+        int(paper_agents["Finalized outcomes"].sum())
+        if not paper_agents.empty
+        else 0
+    )
+    fleet_return = (
+        float(paper_agents["Paper return"].median())
+        if not paper_agents.empty
+        and paper_agents["Paper return"].notna().any()
+        else 0.0
+    )
+
+    st.markdown('<div class="section-kicker">OPERATING OVERVIEW</div>', unsafe_allow_html=True)
+    st.markdown(f"## {symbol} workspace")
+    st.caption(
+        "A fast read of market eligibility, paper-agent health, and measured outcomes. "
+        "Use Agent Desk for a policy-level view."
+    )
+    headline = st.columns(4)
+    headline[0].metric("Underlying", f"${float(first['underlyingPrice']):,.2f}")
+    headline[1].metric("Paper cash", f"${float(account['cash']) / 1_000:,.1f}K")
+    headline[2].metric("Agents online", f"{active_count}/{deployment_count}")
+    headline[3].metric(
+        "Fleet return",
+        f"{fleet_return:.2%}",
+        help=f"Based on {finalized_count} finalized online outcomes.",
+    )
+
+    market_state = str(session["provider_state"])
+    market_good = bool(session["trading_enabled"])
+    freshness_good = bool(freshness["trading_enabled"])
+    runtime_state = str((paper_watch or {}).get("status", "not started"))
+    runtime_good = runtime_state in {"active", "complete", "up_to_date", "ok"}
+    runtime_warn = runtime_state in {"waiting", "not started"}
+    training_state = str((watch_status or {}).get("status", "not started"))
+    training_good = training_state in {"complete", "up_to_date"}
+    training_warn = training_state in {"waiting", "not started", "running"}
+    quote_age = (
+        f"{float(freshness['age_seconds']):.0f}s old"
+        if freshness["coverage"]
+        else "age unavailable"
+    )
+    status_columns = st.columns(3)
+    with status_columns[0]:
+        st.markdown(
+            f"""<div class="workspace-card"><h3>Market data</h3>
+            <div class="status-row"><span class="status-dot {'good' if market_good and freshness_good else 'warn'}"></span>
+            <strong>{escape(market_state)}</strong></div>
+            <p>{escape(quote_age)} · {len(filtered):,} {option_type} contracts</p></div>""",
+            unsafe_allow_html=True,
+        )
+    with status_columns[1]:
+        status_class = "good" if runtime_good else "warn" if runtime_warn else "bad"
+        st.markdown(
+            f"""<div class="workspace-card"><h3>Paper agents</h3>
+            <div class="status-row"><span class="status-dot {status_class}"></span>
+            <strong>{escape(runtime_state.replace('_', ' ').title())}</strong></div>
+            <p>{active_count} active deployments · fail-closed execution</p></div>""",
+            unsafe_allow_html=True,
+        )
+    with status_columns[2]:
+        status_class = "good" if training_good else "warn" if training_warn else "bad"
+        ready_count = int((readiness["Ready"] == "Yes").sum()) if not readiness.empty else 0
+        st.markdown(
+            f"""<div class="workspace-card"><h3>Training arena</h3>
+            <div class="status-row"><span class="status-dot {status_class}"></span>
+            <strong>{escape(training_state.replace('_', ' ').title())}</strong></div>
+            <p>{ready_count}/{len(readiness)} tickers evidence-ready</p></div>""",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="section-kicker">LIVE RESULTS</div>', unsafe_allow_html=True)
+    result_column, action_column = st.columns((2, 1), gap="large")
+    with result_column:
+        st.markdown("### Paper equity")
+        ticker_equity = (
+            paper_equity[paper_equity["Ticker"] == symbol]
+            if not paper_equity.empty
+            else pd.DataFrame()
+        )
+        if ticker_equity.empty:
+            st.info(
+                f"{symbol} has no finalized online outcome yet. The first decision "
+                "remains pending until the next eligible market snapshot."
+            )
+        else:
+            st.line_chart(
+                ticker_equity.set_index("Timestamp")["NAV"],
+                y_label="Paper NAV",
+                height=275,
+            )
+    with action_column:
+        st.markdown("### What needs attention")
+        if not freshness_good:
+            st.warning("The selected quote is stale. New paper orders are disabled.")
+        elif not market_good:
+            st.info("The provider marks the market outside its regular session.")
+        elif active_count < deployment_count:
+            st.warning(
+                f"{deployment_count - active_count} paper deployment(s) are guarded or "
+                "incompatible. Inspect Agent Desk before interpreting fleet results."
+            )
+        else:
+            st.success("Market and paper-agent runtime are ready for eligible decisions.")
+        st.caption(
+            f"Latest collection: {first['collectedAt']}\n\n"
+            f"Training heartbeat: {(watch_status or {}).get('last_heartbeat_at', 'not started')}"
+        )
+
+    if not paper_agents.empty:
+        st.markdown("### Fleet at a glance")
+        overview_columns = [
+            "Ticker",
+            "Runtime",
+            "Activation",
+            "Decisions",
+            "Finalized outcomes",
+            "Pending outcomes",
+            "Paper return",
+            "Last decision",
+        ]
+        st.dataframe(
+            paper_agents[overview_columns],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Paper return": st.column_config.NumberColumn(format="percent"),
+            },
+        )
+
+with desk_tab:
+    st.markdown('<div class="section-kicker">POLICY WORKSPACE</div>', unsafe_allow_html=True)
+    if roster.empty:
+        st.markdown("## Agent Desk")
+        st.info(
+            "No trained policy artifacts are available yet. Open Research for the "
+            "walk-forward training command and evidence requirements."
+        )
+    else:
+        roster_tickers = tuple(roster["Ticker"].astype(str))
+        default_ticker = roster_tickers.index(symbol) if symbol in roster_tickers else 0
+        desk_ticker = st.selectbox(
+            "Agent",
+            roster_tickers,
+            index=default_ticker,
+            key="agent_desk_ticker",
+            label_visibility="collapsed",
+        )
+        agent = roster[roster["Ticker"] == desk_ticker].iloc[0]
+        live_rows = paper_agents[paper_agents["Ticker"] == desk_ticker]
+        live = live_rows.iloc[0] if not live_rows.empty else None
+        state = str(agent["State"])
+        badge_class = "good" if state == "Paper active" else "warn"
+        st.markdown(
+            f"""<div class="desk-banner"><div><h2>{escape(desk_ticker)} · {escape(str(agent['Research policy']))}</h2>
+            <p>{escape(str(agent['Architecture']))} · {escape(str(agent['Algorithm']))} · {escape(str(agent['Action policy']))}</p></div>
+            <span class="badge {badge_class}">{escape(state)}</span></div>""",
+            unsafe_allow_html=True,
+        )
+
+        desk_metrics = st.columns(4)
+        desk_metrics[0].metric("Held-out return", f"{float(agent['Held-out return']):.2%}")
+        desk_metrics[1].metric(
+            "Online return",
+            f"{float(live['Paper return']):.2%}"
+            if live is not None and pd.notna(live["Paper return"])
+            else "Pending",
+        )
+        desk_metrics[2].metric(
+            "Outcomes",
+            int(live["Finalized outcomes"]) if live is not None else 0,
+            delta=(
+                f"{int(live['Pending outcomes'])} pending"
+                if live is not None
+                else "runtime not started"
+            ),
+            delta_color="off",
+        )
+        desk_metrics[3].metric(
+            "Inference", f"{float(agent['Median latency (us)']):.1f} µs"
+        )
+
+        chart_column, rationale_column = st.columns((2, 1), gap="large")
+        with chart_column:
+            st.markdown("### Online paper equity")
+            selected_equity = (
+                paper_equity[paper_equity["Ticker"] == desk_ticker]
+                if not paper_equity.empty
+                else pd.DataFrame()
+            )
+            if selected_equity.empty:
+                st.info("No finalized online path yet. This is a measured zero, not a hidden backtest.")
+            else:
+                st.line_chart(
+                    selected_equity.set_index("Timestamp")["NAV"],
+                    y_label="Paper NAV",
+                    height=285,
+                )
+        with rationale_column:
+            st.markdown("### Execution gate")
+            edge = float(agent["Validation edge vs no-op (bp)"])
+            if state == "Paper active":
+                st.success(f"Activated after a {edge:.2f} bp validation edge over no-op.")
+            else:
+                st.warning(
+                    f"Guarded: validation edge is {edge:.2f} bp. The policy is visible, "
+                    "but the runtime substitutes HOLD."
+                )
+            if live is not None and str(live["Runtime"]) == "Error":
+                st.error(str(live["Message"]))
+
+        st.markdown("### Recent decisions")
+        live_decisions = (
+            paper_decisions[paper_decisions["Ticker"] == desk_ticker]
+            if not paper_decisions.empty
+            else pd.DataFrame()
+        )
+        if live_decisions.empty:
+            st.info("No eligible live decision has been recorded for this deployment.")
+        else:
+            decision_columns = [
+                "Timestamp",
+                "Proposed action",
+                "Executed action",
+                "Outcome status",
+                "Outcome return",
+                "NAV",
+            ]
+            st.dataframe(
+                live_decisions[decision_columns].head(12),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Outcome return": st.column_config.NumberColumn(format="percent"),
+                    "NAV": st.column_config.NumberColumn(format="$%.2f"),
+                },
+            )
+        with st.expander("Model identity and checkpoint"):
+            identity = {
+                "agent_id": agent["Agent ID"],
+                "temporal_core": agent["Temporal core"],
+                "topology": agent["Topology"],
+                "feature_set": agent["Feature set"],
+                "training_seeds": int(agent["Training seeds"]),
+                "checkpoint": agent["Checkpoint"],
+                "experiment": agent["Experiment"],
+            }
+            st.json(identity)
+
+with research_tab:
+    st.markdown('<div class="section-kicker">RESEARCH & DIAGNOSTICS</div>', unsafe_allow_html=True)
+    st.markdown("## Training evidence")
+    st.caption(
+        "Detailed readiness, model selection, feature ablations, and held-out "
+        "provenance live here so they do not crowd the operating workflow."
     )
     if watch_status:
         automation_columns = st.columns(4)
@@ -184,6 +577,7 @@ with agent_tab:
             st.dataframe(readiness, width="stretch", hide_index=True)
     paper_agents = paper_agent_overview(DATA_DIR)
     paper_decisions = paper_agent_decisions(DATA_DIR)
+    paper_equity = paper_agent_equity_curve(DATA_DIR)
     paper_watch = load_paper_agent_watch_status(DATA_DIR)
     st.subheader("Running paper-agent loop")
     st.caption(
@@ -217,11 +611,11 @@ with agent_tab:
             int((paper_agents["Runtime"] == "Active").sum()),
         )
         runtime_metrics[2].metric(
-            "Guarded",
-            int((paper_agents["Activation"] == "Guarded").sum()),
+            "Live decisions", int(paper_agents["Decisions"].sum())
         )
         runtime_metrics[3].metric(
-            "Live decisions", int(paper_agents["Decisions"].sum())
+            "Finalized outcomes",
+            int(paper_agents["Finalized outcomes"].sum()),
         )
         runtime_metrics[4].metric(
             "Paper fills", int(paper_agents["Executions"].sum())
@@ -238,8 +632,31 @@ with agent_tab:
                 "Cash": st.column_config.NumberColumn(format="$%.2f"),
                 "Equity": st.column_config.NumberColumn(format="$%.2f"),
                 "Paper return": st.column_config.NumberColumn(format="percent"),
+                "Outcome hit rate": st.column_config.NumberColumn(
+                    format="percent"
+                ),
+                "Online max drawdown": st.column_config.NumberColumn(
+                    format="percent"
+                ),
             },
         )
+        if not paper_equity.empty:
+            equity_ticker = st.selectbox(
+                "Paper-agent equity path",
+                tuple(sorted(paper_equity["Ticker"].unique())),
+                key="paper_agent_equity_ticker",
+            )
+            selected_equity = paper_equity[
+                paper_equity["Ticker"] == equity_ticker
+            ]
+            st.line_chart(
+                selected_equity.set_index("Timestamp")["NAV"],
+                y_label="Paper NAV",
+            )
+            st.caption(
+                "The curve advances only when the next real eligible snapshot "
+                "finalizes a decision outcome; the newest action remains pending."
+            )
         with st.expander("Live paper-agent decision ledger"):
             if paper_decisions.empty:
                 st.info(
@@ -255,6 +672,15 @@ with agent_tab:
                         "Reward": st.column_config.NumberColumn(format="%.6f"),
                         "Cash": st.column_config.NumberColumn(format="$%.2f"),
                         "NAV": st.column_config.NumberColumn(format="$%.2f"),
+                        "Decision NAV": st.column_config.NumberColumn(
+                            format="$%.2f"
+                        ),
+                        "Outcome NAV": st.column_config.NumberColumn(
+                            format="$%.2f"
+                        ),
+                        "Outcome return": st.column_config.NumberColumn(
+                            format="percent"
+                        ),
                     },
                 )
     if not runs:
@@ -760,66 +1186,68 @@ with agent_tab:
             )
 
 with market_tab:
+    st.markdown('<div class="section-kicker">OPTIONS EXECUTION</div>', unsafe_allow_html=True)
+    st.markdown(f"## Trade {symbol} {option_type}s")
+    st.caption(
+        "Build a simulated order from the latest eligible chain. Nothing here "
+        "connects to a live broker."
+    )
     first = snapshot.iloc[0]
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Underlying", f"${first['underlyingPrice']:,.2f}")
     col2.metric("Expiration", first["expiration"])
-    col3.metric("Risk-free rate", f"{first['riskFreeRate']:.3%}")
-    col4.metric("Contracts", len(filtered))
-    col5.metric("Market session", session["provider_state"])
-    col6.metric(
-        "Underlying quote age",
+    col3.metric("Contracts", len(filtered))
+    col4.metric(
+        "Quote age",
         (f"{freshness['age_seconds']:.0f}s" if freshness["coverage"] else "unknown"),
     )
-    st.caption(f"Collected at {first['collectedAt']} · Greeks: Black-Scholes-Merton")
+    st.caption(
+        f"{session['provider_state']} session · risk-free rate "
+        f"{float(first['riskFreeRate']):.3%} · collected {first['collectedAt']}"
+    )
 
-    table_columns = [
-        "contractSymbol",
-        "strike",
-        "lastPrice",
-        "bid",
-        "ask",
-        "volume",
-        "openInterest",
-        "impliedVolatility",
-        "delta",
-        "gamma",
-        "theta",
-        "vega",
-    ]
-    st.dataframe(filtered[table_columns], width="stretch", hide_index=True)
-
-    st.subheader("Paper order")
+    st.markdown("### Order ticket")
     if not session["trading_enabled"]:
         st.warning(
-            "Paper orders are disabled because the provider marks this "
-            "snapshot as outside the regular market session."
+            "Orders are disabled because the provider marks this snapshot "
+            "outside the regular market session."
         )
     elif not freshness["trading_enabled"]:
         st.warning(
-            "Paper orders are disabled because the provider's underlying "
-            "quote timestamp is explicitly stale."
+            "Orders are disabled because the provider's underlying quote is stale."
         )
     elif not session["coverage"] or not freshness["coverage"]:
         st.warning(
-            "Market-session or quote-time provenance is unavailable in this "
-            "legacy snapshot; research-demo orders remain enabled but are not "
-            "execution evidence."
+            "Market-session or quote-time provenance is incomplete. This paper "
+            "order is a UI demonstration, not execution evidence."
         )
-    contract_symbol = st.selectbox(
-        "Contract",
-        filtered["contractSymbol"].tolist(),
-        format_func=lambda contract: (
-            f"{contract} · strike "
-            f"${filtered.loc[filtered['contractSymbol'] == contract, 'strike'].iloc[0]:,.2f}"
-        ),
-    )
+
+    controls, quote_panel = st.columns((3, 2), gap="large")
+    with controls:
+        contract_symbol = st.selectbox(
+            "Contract",
+            filtered["contractSymbol"].tolist(),
+            format_func=lambda contract: (
+                f"{contract} · strike "
+                f"${filtered.loc[filtered['contractSymbol'] == contract, 'strike'].iloc[0]:,.2f}"
+            ),
+        )
+        quantity = int(st.number_input("Contracts", min_value=1, value=1, step=1))
     selected = filtered[filtered["contractSymbol"] == contract_symbol].iloc[0]
-    quantity = int(st.number_input("Contracts", min_value=1, value=1, step=1))
     buy_price = float(selected["ask"])
     sell_price = float(selected["bid"])
-    buy_col, sell_col = st.columns(2)
+    with quote_panel:
+        quote_metrics = st.columns(2)
+        quote_metrics[0].metric("Bid", f"${sell_price:,.2f}")
+        quote_metrics[1].metric("Ask", f"${buy_price:,.2f}")
+        st.caption(
+            f"Strike ${float(selected['strike']):,.2f} · "
+            f"Delta {float(selected['delta']):.3f} · "
+            f"IV {float(selected['impliedVolatility']):.2%} · "
+            f"open interest {int(selected['openInterest']):,}"
+        )
 
+    buy_col, sell_col = st.columns(2)
     order = {
         "contract_symbol": contract_symbol,
         "symbol": symbol,
@@ -858,7 +1286,44 @@ with market_tab:
         except PaperTradeError as error:
             st.error(str(error))
 
+    st.markdown("### Explore the chain")
+    table_columns = [
+        "contractSymbol",
+        "strike",
+        "lastPrice",
+        "bid",
+        "ask",
+        "volume",
+        "openInterest",
+        "impliedVolatility",
+        "delta",
+        "gamma",
+        "theta",
+        "vega",
+    ]
+    with st.expander("Options chain and Greeks", expanded=True):
+        st.dataframe(
+            filtered[table_columns],
+            width="stretch",
+            height=420,
+            hide_index=True,
+            column_config={
+                "strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
+                "lastPrice": st.column_config.NumberColumn("Last", format="$%.2f"),
+                "bid": st.column_config.NumberColumn("Bid", format="$%.2f"),
+                "ask": st.column_config.NumberColumn("Ask", format="$%.2f"),
+                "impliedVolatility": st.column_config.NumberColumn("IV", format="percent"),
+                "delta": st.column_config.NumberColumn("Delta", format="%.3f"),
+                "gamma": st.column_config.NumberColumn("Gamma", format="%.4f"),
+                "theta": st.column_config.NumberColumn("Theta", format="%.3f"),
+                "vega": st.column_config.NumberColumn("Vega", format="%.3f"),
+            },
+        )
+
 with portfolio_tab:
+    st.markdown('<div class="section-kicker">PAPER ACCOUNT</div>', unsafe_allow_html=True)
+    st.markdown("## Portfolio")
+    st.caption("Current marked positions and a complete audit trail of simulated fills.")
     account = broker.account()
     positions = broker.positions()
     quote_frames = [
@@ -883,7 +1348,8 @@ with portfolio_tab:
     else:
         st.dataframe(marked, width="stretch", hide_index=True)
 
-with history_tab:
+with portfolio_tab:
+    st.markdown("### Trade activity")
     trades = broker.trades()
     if trades:
         st.dataframe(pd.DataFrame(trades), width="stretch", hide_index=True)

@@ -20,6 +20,7 @@ from trading_bot.interface.results import (
     load_arena_watch_status,
     load_paper_agent_watch_status,
     paper_agent_decisions,
+    paper_agent_equity_curve,
     paper_agent_overview,
     promotion_assessment,
     trade_ledger,
@@ -130,7 +131,7 @@ class InterfaceResultTests(TestCase):
             path.write_text("{}", encoding="utf-8")
             self.assertIsNone(load_paper_agent_watch_status(data_dir))
             expected = {
-                "schema_version": "research-demo.paper-agent-watch.v1",
+                "schema_version": "research-demo.paper-agent-watch.v2",
                 "status": "running",
             }
             path.write_text(json.dumps(expected), encoding="utf-8")
@@ -173,19 +174,31 @@ class InterfaceResultTests(TestCase):
                     "reward": 0.0,
                     "cash": 100_000.0,
                     "nav": 100_000.0,
+                    "decision_cash": 100_000.0,
+                    "decision_nav": 100_000.0,
+                    "outcome_status": "pending",
+                    "outcome_timestamp": None,
+                    "outcome_nav": None,
+                    "outcome_return": None,
                     "invalid_action_count": 0,
                 }],
             )
 
             overview = paper_agent_overview(data_dir)
             decisions = paper_agent_decisions(data_dir)
+            curve = paper_agent_equity_curve(data_dir)
 
         self.assertEqual(overview.iloc[0]["Topology"], "Surface Gnn")
         self.assertEqual(overview.iloc[0]["Activation"], "Guarded")
         self.assertEqual(overview.iloc[0]["Recurrent steps"], 4)
+        self.assertEqual(overview.iloc[0]["Finalized outcomes"], 0)
+        self.assertEqual(overview.iloc[0]["Pending outcomes"], 1)
         self.assertEqual(decisions.iloc[0]["Research action"], "UNFILLED")
         self.assertEqual(decisions.iloc[0]["Sandbox action"], "HOLD")
         self.assertEqual(decisions.iloc[0]["Executions"], 0)
+        self.assertEqual(decisions.iloc[0]["Outcome status"], "Pending")
+        self.assertEqual(len(curve), 1)
+        self.assertEqual(curve.iloc[0]["Stage"], "First decision")
 
     def test_loads_valid_arena_watch_status_and_ignores_invalid_files(self):
         with TemporaryDirectory() as directory:

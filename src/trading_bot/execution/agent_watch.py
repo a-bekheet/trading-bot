@@ -14,7 +14,7 @@ from typing import Any
 from trading_bot.execution.agent_runtime import run_paper_agents
 
 
-PAPER_AGENT_WATCH_SCHEMA_VERSION = "research-demo.paper-agent-watch.v1"
+PAPER_AGENT_WATCH_SCHEMA_VERSION = "research-demo.paper-agent-watch.v2"
 PAPER_AGENT_WATCH_STATUS_FILENAME = "_paper_agent_watch_status.json"
 
 

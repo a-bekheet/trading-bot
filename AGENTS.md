@@ -79,6 +79,12 @@ Create those packages only when implementing their first real behavior.
 8. `interface.app` displays saved walk-forward agent evidence and the latest
    market snapshot; it never fetches markets. Agent results come only from
    JSON artifacts under `data/agent_runs/` or `data/models/walk-forward/`.
+   Keep the five-task information architecture stable: Overview for operating
+   health, Agent Desk for one policy, Trade for the order ticket and chain,
+   Portfolio for positions and fills, and Research for dense training evidence.
+   Operator tabs should show conclusions and next actions before raw tables;
+   detailed readiness, candidate fleets, ablations, and provenance belong in
+   Research or expanders.
    Candidate rankings are validation-only; only the fixed winner is labeled
    held out. The UI must keep exploratory sample-size and legacy execution-
    provenance warnings visible. It disables paper orders when the provider
@@ -206,6 +212,10 @@ of the manual `PaperBroker` account:
   invented future mark. Earlier decisions processed with a real next snapshot
   use `through_next_eligible_snapshot`. Paper equity, not a provisional reward,
   is the current account result.
+- Store pre-trade decision NAV for every action. Leave the newest economic
+  outcome pending, then atomically finalize it at the next real eligible mark as
+  `outcome_nav / decision_nav - 1`. Never treat the duplicated terminal frame
+  used for current-snapshot execution as a realized forward return.
 - Record research orders even for guarded agents, but replace the executable
   action vector with all-zero HOLD unless the validation gate activated it.
 - Only provider-confirmed regular snapshots with fresh underlying provenance

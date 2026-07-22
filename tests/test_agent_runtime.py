@@ -106,6 +106,16 @@ class AgentRuntimeTests(TestCase):
                 database=database,
                 repo_root=root,
             )
+            extended = regular_dataset(10)
+            pd.concat(
+                [snapshot.frame for snapshot in extended.snapshots],
+                ignore_index=True,
+            ).to_csv(data_dir / "AAPL.csv", index=False)
+            third = run_paper_agents(
+                data_dir=data_dir,
+                database=database,
+                repo_root=root,
+            )
             store = AgentPaperStore(database)
             deployments = store.deployments()
             decisions = store.decisions()
@@ -115,11 +125,15 @@ class AgentRuntimeTests(TestCase):
         self.assertEqual(first["agents"][0]["new_decisions"], 2)
         self.assertEqual(second["agents"][0]["new_decisions"], 0)
         self.assertEqual(second["agents"][0]["decision_count"], 2)
+        self.assertEqual(third["agents"][0]["new_decisions"], 1)
+        self.assertEqual(third["agents"][0]["decision_count"], 3)
+        self.assertEqual(third["agents"][0]["finalized_decision_count"], 2)
+        self.assertEqual(third["agents"][0]["pending_decision_count"], 1)
         self.assertEqual(len(deployments), 1)
-        self.assertEqual(len(decisions), 2)
+        self.assertEqual(len(decisions), 3)
         self.assertEqual(
             len({item["snapshot_timestamp"] for item in decisions}),
-            2,
+            3,
         )
         self.assertEqual(
             {item["reward_horizon"] for item in decisions},
@@ -127,6 +141,21 @@ class AgentRuntimeTests(TestCase):
                 "through_next_eligible_snapshot",
                 "same_snapshot_execution_only",
             },
+        )
+        self.assertEqual(
+            [item["outcome_status"] for item in decisions].count("finalized"),
+            2,
+        )
+        self.assertEqual(
+            [item["outcome_status"] for item in decisions].count("pending"),
+            1,
+        )
+        self.assertTrue(
+            all(
+                item["outcome_return"] is not None
+                for item in decisions
+                if item["outcome_status"] == "finalized"
+            )
         )
         if not deployments[0]["activated"]:
             self.assertTrue(

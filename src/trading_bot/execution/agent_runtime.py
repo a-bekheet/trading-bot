@@ -30,7 +30,10 @@ from trading_bot.training.trainer import (
 )
 
 
-PAPER_AGENT_RUNTIME_SCHEMA_VERSION = "research-demo.paper-agent-runtime.v1"
+PAPER_AGENT_RUNTIME_SCHEMA_VERSION = "research-demo.paper-agent-runtime.v2"
+PAPER_AGENT_DEPLOYMENT_CONTRACT_VERSION = (
+    "research-demo.paper-agent-runtime.v1"
+)
 DEFAULT_AGENT_DATABASE = Path("data/agent_paper.db")
 ENVIRONMENT_OPTION_NAMES = (
     "slot_count",
@@ -310,7 +313,7 @@ def _activation_reason(gate: dict[str, Any]) -> str:
 
 def _deployment_identity(spec: dict[str, Any], checkpoint_sha256: str) -> str:
     digest = hashlib.sha256()
-    digest.update(PAPER_AGENT_RUNTIME_SCHEMA_VERSION.encode())
+    digest.update(PAPER_AGENT_DEPLOYMENT_CONTRACT_VERSION.encode())
     digest.update(b"\0")
     digest.update(spec["agent_id"].encode())
     digest.update(b"\0")
@@ -330,9 +333,13 @@ def _decision(
     sandbox_orders: np.ndarray,
     reward: float,
     reward_horizon: str,
+    decision_observation,
     observation,
     info: dict[str, Any],
+    outcome_finalized: bool,
 ) -> dict[str, Any]:
+    decision_nav = float(decision_observation.portfolio[2])
+    outcome_nav = float(observation.portfolio[2]) if outcome_finalized else None
     return {
         "snapshot_timestamp": timestamp,
         "processed_at": datetime.now(timezone.utc).isoformat(),
@@ -344,6 +351,16 @@ def _decision(
         "reward_horizon": reward_horizon,
         "cash": float(observation.portfolio[0]),
         "nav": float(observation.portfolio[2]),
+        "decision_cash": float(decision_observation.portfolio[0]),
+        "decision_nav": decision_nav,
+        "outcome_status": "finalized" if outcome_finalized else "pending",
+        "outcome_timestamp": observation.timestamp if outcome_finalized else None,
+        "outcome_nav": outcome_nav,
+        "outcome_return": (
+            outcome_nav / decision_nav - 1.0
+            if outcome_nav is not None and decision_nav > 0
+            else None
+        ),
         "invalid_action_count": int(info.get("invalid_action_count", 0)),
     }
 
@@ -395,6 +412,7 @@ def run_selected_agent(
     policy = StreamingRecurrentPolicy(model, sequence_length)
     stored = store.deployment(deployment_id)
     decisions: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
 
     if (
         stored is None
@@ -432,11 +450,28 @@ def run_selected_agent(
         observation, _, _, _, _ = env.step(_zero_action(env))
         if observation.timestamp != dataset.snapshots[new_indices[0]].timestamp:
             raise RuntimeError("paper-agent environment cursor did not advance causally")
+        if stored is not None and stored.get("last_decision_timestamp"):
+            pending = store.pending_decision(deployment_id)
+            if pending is None:
+                raise RuntimeError(
+                    "paper-agent cursor has no matching pending decision"
+                )
+            decision_nav = float(pending["decision_nav"])
+            outcome_nav = float(observation.portfolio[2])
+            if decision_nav <= 0:
+                raise ValueError("pending decision NAV must be positive")
+            outcomes.append({
+                "snapshot_timestamp": pending["snapshot_timestamp"],
+                "outcome_timestamp": observation.timestamp,
+                "outcome_nav": outcome_nav,
+                "outcome_return": outcome_nav / decision_nav - 1.0,
+            })
         for sequence_index, dataset_index in enumerate(new_indices):
             decision_timestamp = observation.timestamp
             if decision_timestamp != dataset.snapshots[dataset_index].timestamp:
                 raise RuntimeError("paper-agent decision cursor is misaligned")
             research_orders = np.asarray(policy(observation), dtype=np.int64)
+            decision_observation = observation
             sandbox_orders = (
                 research_orders.copy()
                 if spec["activated"]
@@ -454,8 +489,10 @@ def run_selected_agent(
                     if sequence_index + 1 < len(new_indices)
                     else "same_snapshot_execution_only"
                 ),
+                decision_observation=decision_observation,
                 observation=next_observation,
                 info=info,
+                outcome_finalized=(sequence_index + 1 < len(new_indices)),
             ))
             observation = next_observation
             expected_next = (
@@ -500,7 +537,7 @@ def run_selected_agent(
         "environment_state": env.snapshot_state(),
         "recurrent_state": recurrent_state_to_dict(policy.snapshot()),
     }
-    persisted = store.commit_cycle(deployment, decisions)
+    persisted = store.commit_cycle(deployment, decisions, outcomes)
     return {
         "agent_id": persisted["agent_id"],
         "deployment_id": deployment_id,
@@ -511,6 +548,8 @@ def run_selected_agent(
         "new_decisions": len(decisions),
         "decision_count": persisted["decision_count"],
         "execution_count": persisted["execution_count"],
+        "finalized_decision_count": persisted["finalized_decision_count"],
+        "pending_decision_count": persisted["pending_decision_count"],
         "last_observation_timestamp": persisted["last_observation_timestamp"],
         "last_decision_timestamp": persisted["last_decision_timestamp"],
     }

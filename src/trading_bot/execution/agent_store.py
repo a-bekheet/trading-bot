@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-AGENT_STORE_SCHEMA_VERSION = "research-demo.paper-agent-store.v1"
+AGENT_STORE_SCHEMA_VERSION = "research-demo.paper-agent-store.v2"
 
 
 def _json(value: Any) -> str:
@@ -60,6 +60,10 @@ class AgentPaperStore:
                     last_nav REAL,
                     decision_count INTEGER NOT NULL CHECK (decision_count >= 0),
                     execution_count INTEGER NOT NULL CHECK (execution_count >= 0),
+                    finalized_decision_count INTEGER NOT NULL DEFAULT 0
+                        CHECK (finalized_decision_count >= 0),
+                    pending_decision_count INTEGER NOT NULL DEFAULT 0
+                        CHECK (pending_decision_count >= 0),
                     environment_state_json TEXT,
                     recurrent_state_json TEXT,
                     UNIQUE(agent_id, checkpoint_sha256)
@@ -78,6 +82,13 @@ class AgentPaperStore:
                     reward_horizon TEXT NOT NULL DEFAULT 'unknown',
                     cash REAL NOT NULL,
                     nav REAL NOT NULL,
+                    decision_cash REAL,
+                    decision_nav REAL,
+                    outcome_status TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (outcome_status IN ('unknown', 'pending', 'finalized')),
+                    outcome_timestamp TEXT,
+                    outcome_nav REAL,
+                    outcome_return REAL,
                     invalid_action_count INTEGER NOT NULL,
                     UNIQUE(deployment_id, snapshot_timestamp)
                 );
@@ -92,10 +103,17 @@ class AgentPaperStore:
                     "PRAGMA table_info(agent_deployments)"
                 ).fetchall()
             }
-            for name in ("last_cash", "last_nav"):
+            deployment_migrations = {
+                "last_cash": "REAL",
+                "last_nav": "REAL",
+                "finalized_decision_count": "INTEGER NOT NULL DEFAULT 0",
+                "pending_decision_count": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, declaration in deployment_migrations.items():
                 if name not in columns:
                     connection.execute(
-                        f"ALTER TABLE agent_deployments ADD COLUMN {name} REAL"
+                        f"ALTER TABLE agent_deployments ADD COLUMN "
+                        f"{name} {declaration}"
                     )
             decision_columns = {
                 row["name"]
@@ -103,11 +121,21 @@ class AgentPaperStore:
                     "PRAGMA table_info(agent_decisions)"
                 ).fetchall()
             }
-            if "reward_horizon" not in decision_columns:
-                connection.execute(
-                    "ALTER TABLE agent_decisions ADD COLUMN reward_horizon "
-                    "TEXT NOT NULL DEFAULT 'unknown'"
-                )
+            decision_migrations = {
+                "reward_horizon": "TEXT NOT NULL DEFAULT 'unknown'",
+                "decision_cash": "REAL",
+                "decision_nav": "REAL",
+                "outcome_status": "TEXT NOT NULL DEFAULT 'unknown'",
+                "outcome_timestamp": "TEXT",
+                "outcome_nav": "REAL",
+                "outcome_return": "REAL",
+            }
+            for name, declaration in decision_migrations.items():
+                if name not in decision_columns:
+                    connection.execute(
+                        f"ALTER TABLE agent_decisions ADD COLUMN "
+                        f"{name} {declaration}"
+                    )
 
     def deployment(self, deployment_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -146,10 +174,23 @@ class AgentPaperStore:
                 ).fetchall()
         return [self._decode_decision(row) for row in rows]
 
+    def pending_decision(self, deployment_id: str) -> dict[str, Any] | None:
+        """Return the sole newest action awaiting a real next observation."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM agent_decisions WHERE deployment_id = ? "
+                "AND outcome_status = 'pending' ORDER BY id DESC LIMIT 2",
+                (deployment_id,),
+            ).fetchall()
+        if len(rows) > 1:
+            raise RuntimeError("deployment has multiple pending decisions")
+        return self._decode_decision(rows[0]) if rows else None
+
     def commit_cycle(
         self,
         deployment: dict[str, Any],
         decisions: Sequence[dict[str, Any]],
+        outcomes: Sequence[dict[str, Any]] = (),
     ) -> dict[str, Any]:
         """Atomically store the newest cursor and every new decision."""
         required = {
@@ -178,10 +219,12 @@ class AgentPaperStore:
                     activation_reason, status, message, started_at, updated_at,
                     last_observation_timestamp, last_decision_timestamp,
                     last_cash, last_nav, decision_count, execution_count,
+                    finalized_decision_count, pending_decision_count,
                     environment_state_json,
                     recurrent_state_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?)
                 ON CONFLICT(deployment_id) DO UPDATE SET
+                    schema_version = excluded.schema_version,
                     activated = excluded.activated,
                     activation_reason = excluded.activation_reason,
                     status = excluded.status,
@@ -224,8 +267,10 @@ class AgentPaperStore:
                         deployment_id, snapshot_timestamp, processed_at,
                         activated, research_orders_json, sandbox_orders_json,
                         executions_json, reward, reward_horizon, cash, nav,
+                        decision_cash, decision_nav, outcome_status,
+                        outcome_timestamp, outcome_nav, outcome_return,
                         invalid_action_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         deployment["deployment_id"],
@@ -239,9 +284,46 @@ class AgentPaperStore:
                         str(decision.get("reward_horizon", "unknown")),
                         float(decision["cash"]),
                         float(decision["nav"]),
+                        float(decision["decision_cash"]),
+                        float(decision["decision_nav"]),
+                        str(decision["outcome_status"]),
+                        decision.get("outcome_timestamp"),
+                        (
+                            float(decision["outcome_nav"])
+                            if decision.get("outcome_nav") is not None
+                            else None
+                        ),
+                        (
+                            float(decision["outcome_return"])
+                            if decision.get("outcome_return") is not None
+                            else None
+                        ),
                         int(decision["invalid_action_count"]),
                     ),
                 )
+            for outcome in outcomes:
+                cursor = connection.execute(
+                    """
+                    UPDATE agent_decisions SET
+                        outcome_status = 'finalized',
+                        outcome_timestamp = ?,
+                        outcome_nav = ?,
+                        outcome_return = ?
+                    WHERE deployment_id = ? AND snapshot_timestamp = ?
+                        AND outcome_status = 'pending'
+                    """,
+                    (
+                        outcome["outcome_timestamp"],
+                        float(outcome["outcome_nav"]),
+                        float(outcome["outcome_return"]),
+                        deployment["deployment_id"],
+                        outcome["snapshot_timestamp"],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        "paper-agent outcome did not match one pending decision"
+                    )
             connection.execute(
                 """
                 UPDATE agent_deployments SET
@@ -253,6 +335,16 @@ class AgentPaperStore:
                         SELECT COALESCE(SUM(json_array_length(executions_json)), 0)
                         FROM agent_decisions
                         WHERE deployment_id = agent_deployments.deployment_id
+                    ),
+                    finalized_decision_count = (
+                        SELECT COUNT(*) FROM agent_decisions
+                        WHERE deployment_id = agent_deployments.deployment_id
+                            AND outcome_status = 'finalized'
+                    ),
+                    pending_decision_count = (
+                        SELECT COUNT(*) FROM agent_decisions
+                        WHERE deployment_id = agent_deployments.deployment_id
+                            AND outcome_status = 'pending'
                     )
                 WHERE deployment_id = ?
                 """,

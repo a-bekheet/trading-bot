@@ -73,29 +73,35 @@ snapshot.
 streamlit run src/trading_bot/interface/app.py
 ```
 
-The first tab is an agent-results workspace. It discovers saved walk-forward
-runs under `data/agent_runs/` and presents the newest selected policy for every
-ticker as a persisted agent with a stable ID, checkpoint, recurrent core,
-flat/GNN topology, activation state, latency, held-out return, and latest action.
-Its decision tape retains HOLD decisions as well as fills and shows the learned
-research action beside the action actually permitted by the sandbox guard. The
-complete flat and surface-GNN GRU/LSTM/mixture challenger fleet remains
-inspectable below the roster. Candidates are ranked on validation, and only the
-fixed winner is opened on the held-out slice. A conservative promotion gate
-requires positive held-out and doubled-cost returns, improvement over no-op with
-statistical support, adequate history, regular-session provenance, and no
-invalid actions.
+The interface is organized around five focused jobs. **Overview** is the compact
+operating dashboard for market eligibility, service health, measured outcomes,
+and fleet status. **Agent Desk** gives one ticker and one selected policy the
+full screen: model identity, activation gate, inference latency, online equity,
+and recent decisions. **Trade** puts a paper order ticket before the full option
+chain, while **Portfolio** combines marked positions and fill history. Dense
+walk-forward evidence, arena readiness, candidate rankings, GNN comparisons,
+feature ablations, and provenance live under **Research** rather than crowding
+the operating views.
 
-The same tab also shows a persistent paper-agent loop. Each selected checkpoint
+Saved runs under `data/agent_runs/` still expose the newest selected policy for
+every ticker with a stable ID, checkpoint, recurrent core, flat/GNN topology,
+activation state, latency, held-out return, and latest action. Candidate
+rankings remain validation-only; only the fixed winner is opened on the
+held-out slice. A conservative promotion gate requires positive held-out and
+doubled-cost returns, improvement over no-op with statistical support, adequate
+history, regular-session provenance, and no invalid actions.
+
+The workspace also shows a persistent paper-agent loop. Each selected checkpoint
 gets an isolated account, exact checkpoint hash, recurrent hidden-state cursor,
 and idempotent decision ledger in `data/agent_paper.db`. The loop records the
 model's proposed orders on each new regular, fresh, executable post-evaluation
 snapshot. A winner that did not clear the validation activation gate is still
-visible, but its actual sandbox order is forced to HOLD.
+visible, but its actual sandbox order is forced to HOLD. Each newest decision
+stays pending until a real next eligible observation finalizes its return; the
+interface plots only those causal account marks and reports online drawdown and
+outcome hit rate separately from research-test evidence.
 
-The remaining tabs let you choose a ticker, inspect its latest call or put
-snapshot, and submit fake option orders. Paper buys fill at the saved ask and
-paper sells fill at the saved bid.
+Paper buys fill at the saved ask and paper sells fill at the saved bid.
 
 Run the reproducible five-ticker recurrent-agent arena used by the interface:
 
@@ -212,9 +218,11 @@ Automated policies do not share this manual account. Their separate
 recurrent cursor, and unique per-snapshot decision. This avoids double fills
 after a restart and prevents one ticker or checkpoint from mutating another
 agent's capital. The newest decision labels its reward as same-snapshot
-execution-only until a later eligible mark exists; current paper equity is the
-account result. It remains simulated execution only; no code path connects the
-agent store to a live broker.
+execution-only and its economic outcome as pending until a later eligible mark
+exists. Finalized online return is measured from pre-trade decision NAV to that
+next account mark, including simulated spread and fees. Current paper equity is
+the account result. It remains simulated execution only; no code path connects
+the agent store to a live broker.
 
 ## Project structure
 

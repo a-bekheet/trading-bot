@@ -39,27 +39,60 @@ def load_paper_agent_watch_status(data_dir: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _current_paper_deployments(
+    store: AgentPaperStore,
+) -> list[dict[str, Any]]:
+    current = []
+    seen_symbols: set[str] = set()
+    for deployment in store.deployments():
+        symbol = str(deployment.get("symbol", "")).upper()
+        if not symbol or symbol in seen_symbols:
+            continue
+        current.append(deployment)
+        seen_symbols.add(symbol)
+    return current
+
+
+def _online_max_drawdown(values: Sequence[float]) -> float:
+    peak = float("-inf")
+    maximum = 0.0
+    for value in values:
+        if not pd.notna(value) or value <= 0:
+            continue
+        peak = max(peak, value)
+        maximum = max(maximum, (peak - value) / peak)
+    return maximum
+
+
 def paper_agent_overview(data_dir: Path) -> pd.DataFrame:
     """Project isolated live paper deployments without importing Torch."""
     database = data_dir / AGENT_PAPER_DATABASE_FILENAME
     if not database.is_file():
         return pd.DataFrame()
     records = []
-    deployments = AgentPaperStore(database).deployments()
-    current = []
-    seen_symbols: set[str] = set()
-    for deployment in deployments:
-        symbol = str(deployment.get("symbol", "")).upper()
-        if not symbol or symbol in seen_symbols:
-            continue
-        current.append(deployment)
-        seen_symbols.add(symbol)
+    store = AgentPaperStore(database)
+    current = _current_paper_deployments(store)
     for deployment in current:
         environment = deployment.get("environment_state") or {}
         contract = environment.get("environment_contract") or {}
         recurrent = deployment.get("recurrent_state") or {}
         initial_cash = _number(contract.get("starting_cash"))
         nav = _number(deployment.get("last_nav"))
+        decisions = list(reversed(store.decisions(
+            deployment_id=str(deployment["deployment_id"]),
+            limit=100_000,
+        )))
+        finalized = [
+            item for item in decisions if item.get("outcome_status") == "finalized"
+        ]
+        outcome_returns = [
+            float(item["outcome_return"])
+            for item in finalized
+            if item.get("outcome_return") is not None
+        ]
+        equity_points = (
+            [float(decisions[0]["decision_nav"])] if decisions else []
+        ) + [float(item["outcome_nav"]) for item in finalized]
         records.append({
             "Agent ID": deployment.get("agent_id", "unknown"),
             "Ticker": deployment.get("symbol", "unknown"),
@@ -69,6 +102,15 @@ def paper_agent_overview(data_dir: Path) -> pd.DataFrame:
             ),
             "Topology": _humanize(str(deployment.get("topology", "unknown"))),
             "Decisions": int(deployment.get("decision_count", 0)),
+            "Finalized outcomes": int(
+                deployment.get("finalized_decision_count", len(finalized))
+            ),
+            "Pending outcomes": int(
+                deployment.get(
+                    "pending_decision_count",
+                    sum(item.get("outcome_status") == "pending" for item in decisions),
+                )
+            ),
             "Executions": int(deployment.get("execution_count", 0)),
             "Recurrent steps": int(recurrent.get("steps", 0)),
             "Positions": len(environment.get("positions") or {}),
@@ -79,6 +121,12 @@ def paper_agent_overview(data_dir: Path) -> pd.DataFrame:
                 if initial_cash > 0 and pd.notna(nav)
                 else float("nan")
             ),
+            "Outcome hit rate": (
+                sum(value > 0 for value in outcome_returns) / len(outcome_returns)
+                if outcome_returns
+                else float("nan")
+            ),
+            "Online max drawdown": _online_max_drawdown(equity_points),
             "Last observation": deployment.get("last_observation_timestamp"),
             "Last decision": deployment.get("last_decision_timestamp"),
             "Message": deployment.get("message", ""),
@@ -89,6 +137,43 @@ def paper_agent_overview(data_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def paper_agent_equity_curve(data_dir: Path) -> pd.DataFrame:
+    """Return only causally finalized next-observation account marks."""
+    database = data_dir / AGENT_PAPER_DATABASE_FILENAME
+    if not database.is_file():
+        return pd.DataFrame()
+    store = AgentPaperStore(database)
+    records = []
+    for deployment in _current_paper_deployments(store):
+        decisions = list(reversed(store.decisions(
+            deployment_id=str(deployment["deployment_id"]),
+            limit=100_000,
+        )))
+        if not decisions:
+            continue
+        records.append({
+            "Timestamp": decisions[0]["snapshot_timestamp"],
+            "Ticker": deployment["symbol"],
+            "NAV": _number(decisions[0].get("decision_nav")),
+            "Stage": "First decision",
+        })
+        records.extend(
+            {
+                "Timestamp": decision["outcome_timestamp"],
+                "Ticker": deployment["symbol"],
+                "NAV": _number(decision.get("outcome_nav")),
+                "Stage": "Finalized next mark",
+            }
+            for decision in decisions
+            if decision.get("outcome_status") == "finalized"
+        )
+    frame = pd.DataFrame(records)
+    if not frame.empty:
+        frame["Timestamp"] = pd.to_datetime(frame["Timestamp"], utc=True)
+        frame = frame.sort_values(["Ticker", "Timestamp"]).reset_index(drop=True)
+    return frame
+
+
 def paper_agent_decisions(data_dir: Path, limit: int = 500) -> pd.DataFrame:
     """Project proposed versus actually sandboxed orders and fills."""
     database = data_dir / AGENT_PAPER_DATABASE_FILENAME
@@ -96,13 +181,8 @@ def paper_agent_decisions(data_dir: Path, limit: int = 500) -> pd.DataFrame:
         return pd.DataFrame()
     store = AgentPaperStore(database)
     deployment_by_id = {}
-    seen_symbols: set[str] = set()
-    for item in store.deployments():
-        symbol = str(item.get("symbol", "")).upper()
-        if not symbol or symbol in seen_symbols:
-            continue
+    for item in _current_paper_deployments(store):
         deployment_by_id[item["deployment_id"]] = item
-        seen_symbols.add(symbol)
     records = []
     for decision in store.decisions(limit=limit):
         deployment = deployment_by_id.get(decision["deployment_id"])
@@ -133,6 +213,13 @@ def paper_agent_decisions(data_dir: Path, limit: int = 500) -> pd.DataFrame:
             "Reward horizon": _humanize(
                 str(decision.get("reward_horizon", "unknown"))
             ),
+            "Decision NAV": _number(decision.get("decision_nav")),
+            "Outcome status": _humanize(
+                str(decision.get("outcome_status", "unknown"))
+            ),
+            "Outcome timestamp": decision.get("outcome_timestamp"),
+            "Outcome NAV": _number(decision.get("outcome_nav")),
+            "Outcome return": _number(decision.get("outcome_return")),
             "Cash": _number(decision.get("cash")),
             "NAV": _number(decision.get("nav")),
             "Processed": decision.get("processed_at"),
@@ -141,6 +228,9 @@ def paper_agent_decisions(data_dir: Path, limit: int = 500) -> pd.DataFrame:
     if not frame.empty:
         frame["Timestamp"] = pd.to_datetime(frame["Timestamp"], utc=True)
         frame["Processed"] = pd.to_datetime(frame["Processed"], utc=True)
+        frame["Outcome timestamp"] = pd.to_datetime(
+            frame["Outcome timestamp"], utc=True
+        )
     return frame
 
 
