@@ -27,7 +27,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v37"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v38"
 
 
 @dataclass(frozen=True)

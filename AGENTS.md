@@ -488,8 +488,12 @@ one deterministic CSV path must accept exactly one held-out seed: changing the
 seed label does not create a new path or an independent observation. Multiple
 training seeds must produce independently trained checkpoints before they can
 measure learned-policy variability; never replace that experiment with repeated
-evaluation of one checkpoint. Persist the actual path count, seed repetitions,
-and bootstrap independence unit in every fold. The default minimum
+evaluation of one checkpoint. Training-seed offsets must be predeclared. Rank an
+architecture by its configured mean/worst/dispersion aggregate, require every
+replicate to satisfy the latency ceiling, and deploy the run closest to the median
+validation score rather than cherry-picking the best seed. Persist every seed
+score, the representative rule, actual path count, seed repetitions, and
+bootstrap independence unit in every fold. The default minimum
 is 20 transitions; shorter paths must report `insufficient_history` and null
 intervals. Bootstrap results are post-selection evidence only and may never
 affect features, hyperparameters, early stopping, or checkpoint choice.

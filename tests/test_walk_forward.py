@@ -27,6 +27,8 @@ from trading_bot.training.walk_forward import (
     WalkForwardConfig,
     _model_specs_from_args,
     _parser,
+    _select_seed_robust_group,
+    _training_seed_aggregate,
     _walk_forward_config_from_args,
     resolve_recurrent_config,
     run_walk_forward_training,
@@ -96,6 +98,76 @@ def short_volatility_walk_forward_dataset() -> SnapshotDataset:
 
 
 class WalkForwardTrainingTests(TestCase):
+    def test_training_seed_aggregate_penalizes_worst_case_and_dispersion(self):
+        config = WalkForwardConfig(
+            3,
+            2,
+            2,
+            training_seed_offsets=(0, 10, 20),
+            training_seed_worst_weight=0.25,
+            training_seed_dispersion_penalty=0.5,
+        )
+        runs = [
+            {
+                "training_seed": seed,
+                "validation_selection_score": score,
+                "validation_total_reward": reward,
+                "optimizer_updates": updates,
+            }
+            for seed, score, reward, updates in (
+                (7, 1.0, 2.0, 3),
+                (17, 0.0, 1.0, 2),
+                (27, -2.0, -1.0, 1),
+            )
+        ]
+
+        aggregate = _training_seed_aggregate(runs, config)
+
+        self.assertEqual(aggregate["training_seed_count"], 3)
+        self.assertEqual(aggregate["training_seeds"], [7, 17, 27])
+        self.assertEqual(aggregate["representative_training_seed"], 17)
+        self.assertIs(aggregate["representative_run"], runs[1])
+        self.assertLess(
+            aggregate["robust_training_seed_validation_score"],
+            aggregate["validation_selection_score_mean"],
+        )
+
+    def test_training_seed_offsets_must_be_unique_non_negative_integers(self):
+        for offsets in ((), (0, 0), (False,), (-1,)):
+            with self.subTest(offsets=offsets), self.assertRaisesRegex(
+                ValueError,
+                "unique non-negative integers",
+            ):
+                WalkForwardConfig(3, 2, 2, training_seed_offsets=offsets)
+
+    def test_seed_robust_selection_does_not_choose_best_single_run(self):
+        spec = ModelSpec(hidden_size=4)
+
+        def group(model_id, robust_score, representative_score):
+            representative = {
+                "model_id": model_id,
+                "model_spec": spec,
+                "parameter_count": 100,
+                "active_input_count": 10,
+                "optimizer_updates": 2,
+                "validation_selection_score": representative_score,
+            }
+            return {
+                "representative": representative,
+                "aggregate": {
+                    "robust_training_seed_validation_score": robust_score,
+                },
+                "replicates": [representative],
+                "latency_eligible": True,
+            }
+
+        unstable = group("unstable", -1.0, 10.0)
+        stable = group("stable", 1.0, 1.0)
+
+        selected = _select_seed_robust_group((unstable, stable))
+
+        self.assertIs(selected, stable)
+
     def test_deterministic_heldout_rejects_seed_pseudoreplication(self):
         with self.assertRaisesRegex(ValueError, "not independent"):
             WalkForwardConfig(
@@ -104,6 +176,59 @@ class WalkForwardTrainingTests(TestCase):
                 test_size=2,
                 test_seeds=(1, 2),
             )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_runner_trains_seed_replicates_but_deploys_one_checkpoint(self):
+        with TemporaryDirectory() as directory:
+            summary = run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    training_seed_offsets=(0, 100),
+                    test_seeds=(29,),
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=2,
+                ),
+                ModelSpec(hidden_size=4),
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                    seed=11,
+                ),
+                Path(directory),
+                env_kwargs={"slot_count": 1, "starting_cash": 1_000},
+            )
+            fold = summary["folds"][0]
+            candidate = fold["model_selection"]["candidates"][0]
+            checkpoint_files = list(Path(directory).glob("*.pt"))
+            _, manifest = load_checkpoint(checkpoint_files[0])
+
+        self.assertEqual(len(checkpoint_files), 1)
+        self.assertEqual(
+            [
+                replicate["training_seed"]
+                for replicate in candidate["training_seed_replicates"]
+            ],
+            [11, 111],
+        )
+        self.assertEqual(
+            candidate["training_seed_aggregate"]["training_seed_count"],
+            2,
+        )
+        selected_seed = candidate["training_seed_aggregate"][
+            "representative_training_seed"
+        ]
+        self.assertEqual(fold["selection"]["training_seed"], selected_seed)
+        self.assertEqual(manifest["training"]["seed"], selected_seed)
+        self.assertEqual(
+            fold["heldout_evaluation_contract"]["training_seeds"],
+            [11, 111],
+        )
+        self.assertEqual(len(fold["test"]), 1)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_short_volatility_baseline_trades_and_is_cost_stressed(self):
@@ -160,6 +285,10 @@ class WalkForwardTrainingTests(TestCase):
             "--trend-min-coverage", "0.5",
             "--trend-min-abs-log-return", "0.01",
             "--trend-quantity", "2",
+            "--training-seed-offset", "0",
+            "--training-seed-offset", "1000",
+            "--training-seed-worst-weight", "0.4",
+            "--training-seed-dispersion-penalty", "0.6",
             "--reward-drawdown-penalty", "3",
             "--reward-downside-penalty", "4",
         ])
@@ -175,6 +304,9 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(config.trend_min_coverage, 0.5)
         self.assertEqual(config.trend_min_abs_log_return, 0.01)
         self.assertEqual(config.trend_quantity, 2)
+        self.assertEqual(config.training_seed_offsets, (0, 1000))
+        self.assertEqual(config.training_seed_worst_weight, 0.4)
+        self.assertEqual(config.training_seed_dispersion_penalty, 0.6)
         environment = _environment_kwargs_from_args(args)
         self.assertEqual(environment["reward_drawdown_penalty"], 3)
         self.assertEqual(environment["reward_downside_penalty"], 4)
@@ -353,6 +485,9 @@ class WalkForwardTrainingTests(TestCase):
             "path_count": 1,
             "seed_repetitions": 1,
             "test_seed": 31,
+            "training_seed_count": 1,
+            "training_seeds": [17],
+            "selected_training_seed": 17,
             "bootstrap_independence_unit": "arrival_time_block",
         })
         candidate = fold["model_selection"]["candidates"][0]
@@ -562,7 +697,10 @@ class WalkForwardTrainingTests(TestCase):
                 "model_id",
             ],
         )
-        self.assertEqual(selection["criterion"], "validation_selection_score")
+        self.assertEqual(
+            selection["criterion"],
+            "robust_training_seed_validation_score",
+        )
         self.assertEqual(
             selection["score_definition"],
             {
@@ -572,6 +710,8 @@ class WalkForwardTrainingTests(TestCase):
                 "turnover_penalty": 0.0,
                 "cross_ticker_std_penalty": 0.0,
                 "worst_ticker_weight": 0.0,
+                "training_seed_worst_weight": 0.25,
+                "training_seed_dispersion_penalty": 0.25,
             },
         )
         self.assertEqual(selection["selected_model_id"], expected["model_id"])
@@ -989,7 +1129,7 @@ class WalkForwardTrainingTests(TestCase):
         self.assertFalse(results["lstm"]["deployment_eligible"])
         self.assertEqual(
             results["lstm"]["ineligibility_reason"],
-            "median_inference_latency_exceeded",
+            "training_seed_inference_latency_exceeded",
         )
 
     @skipUnless(torch is not None, "install the optional ml extra")

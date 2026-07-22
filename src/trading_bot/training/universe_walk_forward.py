@@ -48,13 +48,15 @@ from trading_bot.training.walk_forward import (
     _normalize_model_specs,
     _parser as single_parser,
     _selected_metric,
+    _select_seed_robust_group,
+    _training_seed_aggregate,
     _walk_forward_config_from_args,
     resolve_recurrent_config,
 )
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v24"
+    "research-demo.universe-walk-forward.v25"
 )
 
 
@@ -400,7 +402,7 @@ def run_universe_walk_forward_training(
                 resolved = resolve_recurrent_config(candidate, train_envs[0])
                 resolved_configs[candidate.identifier] = resolved
             recurrent_config, parameter_count = resolved
-            candidate_training = replace(
+            candidate_training_base = replace(
                 fold_training,
                 algorithm=candidate.algorithm,
                 auxiliary_horizons=candidate.auxiliary_horizons,
@@ -420,94 +422,130 @@ def run_universe_walk_forward_training(
                     else candidate.burn_in_steps
                 ),
             )
-            model, metrics = train_actor_critic(
-                train_envs,
-                recurrent_config,
-                candidate_training,
-                selection_env=validation_envs,
-            )
-            actual_count = sum(
-                parameter.numel() for parameter in model.parameters()
-            )
-            if actual_count != parameter_count:
-                raise RuntimeError(
-                    "trained model parameter count does not match its "
-                    "resolved configuration"
+            for seed_offset in walk_forward_config.training_seed_offsets:
+                candidate_training = replace(
+                    candidate_training_base,
+                    seed=candidate_training_base.seed + seed_offset,
                 )
-            inference_latency = _universe_latency(
-                model,
-                train_envs,
-                candidate_training,
+                model, metrics = train_actor_critic(
+                    train_envs,
+                    recurrent_config,
+                    candidate_training,
+                    selection_env=validation_envs,
+                )
+                actual_count = sum(
+                    parameter.numel() for parameter in model.parameters()
+                )
+                if actual_count != parameter_count:
+                    raise RuntimeError(
+                        "trained model parameter count does not match its "
+                        "resolved configuration"
+                    )
+                inference_latency = _universe_latency(
+                    model,
+                    train_envs,
+                    candidate_training,
+                    walk_forward_config,
+                )
+                latency_eligible = (
+                    walk_forward_config.max_median_inference_latency_us is None
+                    or inference_latency["median_microseconds"]
+                    <= walk_forward_config.max_median_inference_latency_us
+                )
+                selected = _selected_metric(metrics)
+                slot_changed_count = sum(
+                    item["slot_changed_count"] for item in metrics
+                )
+                slot_comparable_count = sum(
+                    item["slot_comparable_count"] for item in metrics
+                )
+                candidate_runs.append({
+                    "model_id": candidate.identifier,
+                    "replicate_id": (
+                        f"{candidate.identifier}-seed-{candidate_training.seed}"
+                    ),
+                    "training_seed": candidate_training.seed,
+                    "model_spec": candidate,
+                    "recurrent_config": recurrent_config,
+                    "model": model,
+                    "metrics": metrics,
+                    "training_config": candidate_training,
+                    "parameter_count": parameter_count,
+                    "inference_latency": inference_latency,
+                    "latency_eligible": latency_eligible,
+                    "masked_input_count": len(
+                        recurrent_config.masked_input_indices
+                    ),
+                    "active_input_count": (
+                        recurrent_config.input_size
+                        - len(recurrent_config.masked_input_indices)
+                    ),
+                    "optimizer_updates": sum(
+                        item["optimizer_updates"] for item in metrics
+                    ),
+                    "slot_changed_count": slot_changed_count,
+                    "slot_comparable_count": slot_comparable_count,
+                    "slot_churn_rate": (
+                        slot_changed_count / slot_comparable_count
+                        if slot_comparable_count
+                        else 0.0
+                    ),
+                    "selected": selected,
+                    "validation_selection_score": float(
+                        selected["evaluation_selection_score"]
+                    ),
+                    "validation_total_reward": float(
+                        selected["evaluation_total_reward"]
+                    ),
+                    "full_model_id": replace(
+                        candidate,
+                        disabled_feature_groups=(),
+                    ).identifier,
+                    "auxiliary_reference_model_id": replace(
+                        candidate,
+                        auxiliary_coefficient=None,
+                    ).identifier,
+                    "auxiliary_horizon_reference_model_id": replace(
+                        candidate,
+                        auxiliary_horizons=fold_training.auxiliary_horizons,
+                    ).identifier,
+                    "discount_reference_model_id": replace(
+                        candidate,
+                        time_aware_discounting=None,
+                    ).identifier,
+                    "burn_in_reference_model_id": replace(
+                        candidate,
+                        burn_in_steps=None,
+                    ).identifier,
+                })
+        grouped_runs = []
+        for candidate in model_specs:
+            replicates = [
+                run
+                for run in candidate_runs
+                if run["model_id"] == candidate.identifier
+            ]
+            aggregate = _training_seed_aggregate(
+                replicates,
                 walk_forward_config,
             )
-            latency_eligible = (
-                walk_forward_config.max_median_inference_latency_us is None
-                or inference_latency["median_microseconds"]
-                <= walk_forward_config.max_median_inference_latency_us
-            )
-            selected = _selected_metric(metrics)
-            slot_changed_count = sum(
-                item["slot_changed_count"] for item in metrics
-            )
-            slot_comparable_count = sum(
-                item["slot_comparable_count"] for item in metrics
-            )
-            candidate_runs.append({
-                "model_id": candidate.identifier,
-                "model_spec": candidate,
-                "recurrent_config": recurrent_config,
-                "model": model,
-                "metrics": metrics,
-                "training_config": candidate_training,
-                "parameter_count": parameter_count,
-                "inference_latency": inference_latency,
-                "latency_eligible": latency_eligible,
-                "masked_input_count": len(
-                    recurrent_config.masked_input_indices
+            representative = aggregate.pop("representative_run")
+            grouped_runs.append({
+                "representative": representative,
+                "aggregate": aggregate,
+                "replicates": replicates,
+                "latency_eligible": all(
+                    run["latency_eligible"] for run in replicates
                 ),
-                "active_input_count": (
-                    recurrent_config.input_size
-                    - len(recurrent_config.masked_input_indices)
-                ),
-                "optimizer_updates": sum(
-                    item["optimizer_updates"] for item in metrics
-                ),
-                "slot_changed_count": slot_changed_count,
-                "slot_comparable_count": slot_comparable_count,
-                "slot_churn_rate": (
-                    slot_changed_count / slot_comparable_count
-                    if slot_comparable_count
-                    else 0.0
-                ),
-                "selected": selected,
-                "full_model_id": replace(
-                    candidate,
-                    disabled_feature_groups=(),
-                ).identifier,
-                "auxiliary_reference_model_id": replace(
-                    candidate,
-                    auxiliary_coefficient=None,
-                ).identifier,
-                "auxiliary_horizon_reference_model_id": replace(
-                    candidate,
-                    auxiliary_horizons=fold_training.auxiliary_horizons,
-                ).identifier,
-                "discount_reference_model_id": replace(
-                    candidate,
-                    time_aware_discounting=None,
-                ).identifier,
-                "burn_in_reference_model_id": replace(
-                    candidate,
-                    burn_in_steps=None,
-                ).identifier,
             })
-        eligible_runs = [
-            run for run in candidate_runs if run["latency_eligible"]
+        eligible_groups = [
+            group for group in grouped_runs if group["latency_eligible"]
         ]
-        if not eligible_runs:
+        if not eligible_groups:
             observed = ", ".join(
-                f"{run['model_id']}={run['inference_latency']['median_microseconds']:.3f}us"
-                for run in candidate_runs
+                f"{group['representative']['model_id']}="
+                f"{max(run['inference_latency']['median_microseconds'] for run in group['replicates']):.3f}us"
+                for group in grouped_runs
             )
             raise ValueError(
                 "no universe model candidate satisfies "
@@ -515,33 +553,30 @@ def run_universe_walk_forward_training(
                 f"{walk_forward_config.max_median_inference_latency_us}; "
                 f"observed {observed}"
             )
-        winning_run = min(
-            eligible_runs,
-            key=lambda run: (
-                -float(run["selected"]["evaluation_selection_score"]),
-                run["parameter_count"],
-                run["active_input_count"],
-                run["optimizer_updates"],
-                int(run["model_spec"].burn_in_steps == 0),
-                int(run["model_spec"].time_aware_discounting is False),
-                run["model_id"],
-            ),
-        )
+        winning_group = _select_seed_robust_group(eligible_groups)
+        winning_run = winning_group["representative"]
         candidate_results = []
         validation_scores = {
-            run["model_id"]: float(
-                run["selected"]["evaluation_selection_score"]
-            )
-            for run in candidate_runs
+            group["representative"]["model_id"]: group["aggregate"][
+                "robust_training_seed_validation_score"
+            ]
+            for group in grouped_runs
         }
         validation_rewards = {
-            run["model_id"]: float(
-                run["selected"]["evaluation_total_reward"]
-            )
-            for run in candidate_runs
+            group["representative"]["model_id"]: group["aggregate"][
+                "validation_total_reward_mean"
+            ]
+            for group in grouped_runs
         }
-        for run in candidate_runs:
+        for group in grouped_runs:
+            run = group["representative"]
             selected = run["selected"]
+            aggregate_score = group["aggregate"][
+                "robust_training_seed_validation_score"
+            ]
+            aggregate_reward = group["aggregate"][
+                "validation_total_reward_mean"
+            ]
             full_score = validation_scores.get(run["full_model_id"])
             result = {
                 "model_id": run["model_id"],
@@ -568,21 +603,66 @@ def run_universe_walk_forward_training(
                 ),
                 "active_input_count": run["active_input_count"],
                 "masked_input_count": run["masked_input_count"],
-                "optimizer_updates": run["optimizer_updates"],
-                "slot_changed_count": run["slot_changed_count"],
-                "slot_comparable_count": run["slot_comparable_count"],
-                "slot_churn_rate": run["slot_churn_rate"],
-                "episodes_completed": len(run["metrics"]),
-                "stopped_early": bool(
-                    run["metrics"][-1]["early_stop_selection"]
+                "optimizer_updates": sum(
+                    replicate["optimizer_updates"]
+                    for replicate in group["replicates"]
+                ),
+                "slot_changed_count": sum(
+                    replicate["slot_changed_count"]
+                    for replicate in group["replicates"]
+                ),
+                "slot_comparable_count": sum(
+                    replicate["slot_comparable_count"]
+                    for replicate in group["replicates"]
+                ),
+                "slot_churn_rate": (
+                    sum(
+                        replicate["slot_changed_count"]
+                        for replicate in group["replicates"]
+                    )
+                    / sum(
+                        replicate["slot_comparable_count"]
+                        for replicate in group["replicates"]
+                    )
+                    if sum(
+                        replicate["slot_comparable_count"]
+                        for replicate in group["replicates"]
+                    )
+                    else 0.0
+                ),
+                "episodes_completed": sum(
+                    len(replicate["metrics"])
+                    for replicate in group["replicates"]
+                ),
+                "stopped_early": any(
+                    bool(replicate["metrics"][-1]["early_stop_selection"])
+                    for replicate in group["replicates"]
                 ),
                 "inference_latency": run["inference_latency"],
-                "deployment_eligible": run["latency_eligible"],
+                "deployment_eligible": group["latency_eligible"],
                 "ineligibility_reason": (
                     None
-                    if run["latency_eligible"]
-                    else "worst_ticker_median_inference_latency_exceeded"
+                    if group["latency_eligible"]
+                    else "training_seed_inference_latency_exceeded"
                 ),
+                "training_seed_aggregate": group["aggregate"],
+                "training_seed_replicates": [
+                    {
+                        "replicate_id": replicate["replicate_id"],
+                        "training_seed": replicate["training_seed"],
+                        "selected_episode": replicate["selected"]["episode"],
+                        "validation_total_reward": replicate[
+                            "validation_total_reward"
+                        ],
+                        "validation_selection_score": replicate[
+                            "validation_selection_score"
+                        ],
+                        "optimizer_updates": replicate["optimizer_updates"],
+                        "inference_latency": replicate["inference_latency"],
+                        "deployment_eligible": replicate["latency_eligible"],
+                    }
+                    for replicate in group["replicates"]
+                ],
                 "validation_score_lift_vs_full": None,
                 "validation_reward_lift_vs_full": None,
                 "validation_score_lift_vs_auxiliary_enabled": None,
@@ -596,12 +676,19 @@ def run_universe_walk_forward_training(
                 "selection": {
                     "scope": selected["evaluation_scope"],
                     "episode": selected["episode"],
+                    "training_seed": run["training_seed"],
                     "validation_total_reward": selected[
                         "evaluation_total_reward"
                     ],
                     "validation_selection_score": selected[
                         "evaluation_selection_score"
                     ],
+                    "training_seed_mean_validation_reward": group[
+                        "aggregate"
+                    ]["validation_total_reward_mean"],
+                    "robust_training_seed_validation_score": group[
+                        "aggregate"
+                    ]["robust_training_seed_validation_score"],
                     "mean_ticker_selection_score": selected[
                         "evaluation_selection_score_mean"
                     ],
@@ -626,11 +713,10 @@ def run_universe_walk_forward_training(
                 and full_score is not None
             ):
                 result["validation_score_lift_vs_full"] = (
-                    float(selected["evaluation_selection_score"])
-                    - full_score
+                    aggregate_score - full_score
                 )
                 result["validation_reward_lift_vs_full"] = (
-                    float(selected["evaluation_total_reward"])
+                    aggregate_reward
                     - validation_rewards[run["full_model_id"]]
                 )
             auxiliary_reference = validation_scores.get(
@@ -641,11 +727,10 @@ def run_universe_walk_forward_training(
                 and auxiliary_reference is not None
             ):
                 result["validation_score_lift_vs_auxiliary_enabled"] = (
-                    float(selected["evaluation_selection_score"])
-                    - auxiliary_reference
+                    aggregate_score - auxiliary_reference
                 )
                 result["validation_reward_lift_vs_auxiliary_enabled"] = (
-                    float(selected["evaluation_total_reward"])
+                    aggregate_reward
                     - validation_rewards[run["auxiliary_reference_model_id"]]
                 )
             horizon_reference = validation_scores.get(
@@ -657,11 +742,10 @@ def run_universe_walk_forward_training(
                 and horizon_reference is not None
             ):
                 result["validation_score_lift_vs_configured_horizons"] = (
-                    float(selected["evaluation_selection_score"])
-                    - horizon_reference
+                    aggregate_score - horizon_reference
                 )
                 result["validation_reward_lift_vs_configured_horizons"] = (
-                    float(selected["evaluation_total_reward"])
+                    aggregate_reward
                     - validation_rewards[
                         run["auxiliary_horizon_reference_model_id"]
                     ]
@@ -676,13 +760,12 @@ def run_universe_walk_forward_training(
                 result[
                     "validation_score_lift_vs_time_aware_discounting"
                 ] = (
-                    float(selected["evaluation_selection_score"])
-                    - discount_reference
+                    aggregate_score - discount_reference
                 )
                 result[
                     "validation_reward_lift_vs_time_aware_discounting"
                 ] = (
-                    float(selected["evaluation_total_reward"])
+                    aggregate_reward
                     - validation_rewards[run["discount_reference_model_id"]]
                 )
             burn_in_reference = validation_scores.get(
@@ -693,11 +776,10 @@ def run_universe_walk_forward_training(
                 and burn_in_reference is not None
             ):
                 result["validation_score_lift_vs_burn_in"] = (
-                    float(selected["evaluation_selection_score"])
-                    - burn_in_reference
+                    aggregate_score - burn_in_reference
                 )
                 result["validation_reward_lift_vs_burn_in"] = (
-                    float(selected["evaluation_total_reward"])
+                    aggregate_reward
                     - validation_rewards[run["burn_in_reference_model_id"]]
                 )
             candidate_results.append(result)
@@ -707,7 +789,10 @@ def run_universe_walk_forward_training(
         recurrent_config = winning_run["recurrent_config"]
         selected = winning_run["selected"]
         metrics = winning_run["metrics"]
+        winning_seed_aggregate = dict(winning_group["aggregate"])
         candidate_runs.clear()
+        grouped_runs.clear()
+        del winning_group
 
         # The test environments are intentionally created only after the
         # validation aggregate has fixed the shared architecture/checkpoint.
@@ -745,6 +830,14 @@ def run_universe_walk_forward_training(
                 "path_count": len(test_envs),
                 "seed_repetitions_per_path": 1,
                 "test_seed": walk_forward_config.test_seeds[0],
+                "training_seed_count": len(
+                    walk_forward_config.training_seed_offsets
+                ),
+                "training_seeds": [
+                    fold_training.seed + offset
+                    for offset in walk_forward_config.training_seed_offsets
+                ],
+                "selected_training_seed": selected_training.seed,
                 "within_path_bootstrap_independence_unit": (
                     "arrival_time_block"
                 ),
@@ -779,9 +872,15 @@ def run_universe_walk_forward_training(
                 "mean_turnover": selected["evaluation_turnover"],
                 "per_symbol": selected["evaluation_by_symbol"],
                 "model_id": winning_run["model_id"],
+                "training_seed": selected_training.seed,
+                "robust_training_seed_validation_score": (
+                    winning_seed_aggregate[
+                        "robust_training_seed_validation_score"
+                    ]
+                ),
             },
             "model_selection": {
-                "criterion": "validation_selection_score",
+                "criterion": "robust_training_seed_validation_score",
                 "direction": "maximize",
                 "score_definition": {
                     "per_ticker": (
@@ -805,6 +904,12 @@ def run_universe_walk_forward_training(
                     "worst_ticker_weight": (
                         selected_training.selection_worst_ticker_weight
                     ),
+                    "training_seed_worst_weight": (
+                        walk_forward_config.training_seed_worst_weight
+                    ),
+                    "training_seed_dispersion_penalty": (
+                        walk_forward_config.training_seed_dispersion_penalty
+                    ),
                 },
                 "tie_break": [
                     "parameter_count",
@@ -816,6 +921,7 @@ def run_universe_walk_forward_training(
                 ],
                 "latency_constraint": {
                     "metric": "worst_ticker_median_inference_latency_us",
+                    "training_seed_scope": "all_replicates",
                     "maximum": (
                         walk_forward_config.max_median_inference_latency_us
                     ),

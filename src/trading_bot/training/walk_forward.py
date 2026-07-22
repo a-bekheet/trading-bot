@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import statistics
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -51,7 +52,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v40"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v41"
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,9 @@ class WalkForwardConfig:
     embargo: int = 0
     step_size: int | None = None
     max_train_size: int | None = None
+    training_seed_offsets: tuple[int, ...] = (0,)
+    training_seed_worst_weight: float = 0.25
+    training_seed_dispersion_penalty: float = 0.25
     test_seeds: tuple[int, ...] = (20_001,)
     bootstrap_samples: int = 2_000
     bootstrap_block_length: int | None = None
@@ -87,6 +91,30 @@ class WalkForwardConfig:
     def __post_init__(self) -> None:
         if min(self.min_train_size, self.validation_size, self.test_size) < 2:
             raise ValueError("walk-forward partitions require at least two snapshots")
+        if (
+            not self.training_seed_offsets
+            or len(set(self.training_seed_offsets))
+            != len(self.training_seed_offsets)
+            or any(
+                not isinstance(offset, int) or isinstance(offset, bool)
+                for offset in self.training_seed_offsets
+            )
+            or any(offset < 0 for offset in self.training_seed_offsets)
+        ):
+            raise ValueError(
+                "training_seed_offsets must be unique non-negative integers"
+            )
+        if not 0 <= self.training_seed_worst_weight <= 1:
+            raise ValueError(
+                "training_seed_worst_weight must be between zero and one"
+            )
+        if (
+            not math.isfinite(self.training_seed_dispersion_penalty)
+            or self.training_seed_dispersion_penalty < 0
+        ):
+            raise ValueError(
+                "training_seed_dispersion_penalty must be finite and non-negative"
+            )
         if len(self.test_seeds) != 1:
             raise ValueError(
                 "deterministic held-out evaluation requires exactly one seed; "
@@ -355,6 +383,77 @@ def _selected_metric(metrics: list[dict[str, Any]]) -> dict[str, Any]:
     return selected
 
 
+def _training_seed_aggregate(
+    runs: Sequence[dict[str, Any]],
+    config: WalkForwardConfig,
+) -> dict[str, Any]:
+    """Aggregate validation-only seed replicates without cherry-picking one."""
+    if not runs:
+        raise ValueError("at least one training-seed replicate is required")
+    scores = tuple(float(run["validation_selection_score"]) for run in runs)
+    rewards = tuple(float(run["validation_total_reward"]) for run in runs)
+    if not all(math.isfinite(value) for value in (*scores, *rewards)):
+        raise ValueError("training-seed validation metrics must be finite")
+    score_mean = statistics.fmean(scores)
+    score_worst = min(scores)
+    score_std = statistics.pstdev(scores)
+    aggregate_score = (
+        (1.0 - config.training_seed_worst_weight) * score_mean
+        + config.training_seed_worst_weight * score_worst
+        - config.training_seed_dispersion_penalty * score_std
+    )
+    median_score = statistics.median(scores)
+    representative = min(
+        runs,
+        key=lambda run: (
+            abs(float(run["validation_selection_score"]) - median_score),
+            run["optimizer_updates"],
+            run["training_seed"],
+        ),
+    )
+    return {
+        "training_seed_count": len(runs),
+        "training_seeds": [run["training_seed"] for run in runs],
+        "validation_selection_score_mean": score_mean,
+        "validation_selection_score_worst": score_worst,
+        "validation_selection_score_std": score_std,
+        "validation_total_reward_mean": statistics.fmean(rewards),
+        "robust_training_seed_validation_score": aggregate_score,
+        "worst_weight": config.training_seed_worst_weight,
+        "dispersion_penalty": config.training_seed_dispersion_penalty,
+        "representative_rule": "closest_to_median_validation_score",
+        "representative_training_seed": representative["training_seed"],
+        "representative_run": representative,
+    }
+
+
+def _select_seed_robust_group(
+    groups: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Select an eligible architecture from its seed-robust validation score."""
+    eligible = [group for group in groups if group["latency_eligible"]]
+    if not eligible:
+        raise ValueError("at least one latency-eligible candidate is required")
+    return min(
+        eligible,
+        key=lambda group: (
+            -group["aggregate"]["robust_training_seed_validation_score"],
+            group["representative"]["parameter_count"],
+            group["representative"]["active_input_count"],
+            sum(
+                run["optimizer_updates"] for run in group["replicates"]
+            ),
+            int(group["representative"]["model_spec"].burn_in_steps == 0),
+            int(
+                group["representative"][
+                    "model_spec"
+                ].time_aware_discounting is False
+            ),
+            group["representative"]["model_id"],
+        ),
+    )
+
+
 def run_walk_forward_training(
     dataset: SnapshotDataset,
     walk_forward_config: WalkForwardConfig,
@@ -421,7 +520,7 @@ def run_walk_forward_training(
                 resolved = resolve_recurrent_config(candidate, train_env)
                 resolved_configs[candidate.identifier] = resolved
             recurrent_config, resolved_parameter_count = resolved
-            candidate_training = replace(
+            candidate_training_base = replace(
                 fold_training,
                 algorithm=candidate.algorithm,
                 auxiliary_horizons=candidate.auxiliary_horizons,
@@ -441,136 +540,158 @@ def run_walk_forward_training(
                     else candidate.burn_in_steps
                 ),
             )
-            model, metrics = train_actor_critic(
-                train_env,
-                recurrent_config,
-                candidate_training,
-                selection_env=validation_env,
-            )
-            actual_parameter_count = sum(
-                parameter.numel() for parameter in model.parameters()
-            )
-            if actual_parameter_count != resolved_parameter_count:
-                raise RuntimeError(
-                    "trained model parameter count does not match its "
-                    "resolved configuration"
+            for seed_offset in walk_forward_config.training_seed_offsets:
+                candidate_training = replace(
+                    candidate_training_base,
+                    seed=candidate_training_base.seed + seed_offset,
                 )
-            inference_latency = benchmark_recurrent_inference(
-                model,
-                benchmark_observation,
-                candidate_training.sequence_length,
-                warmup_iterations=(
-                    walk_forward_config.latency_warmup_iterations
-                ),
-                measured_iterations=(
-                    walk_forward_config.latency_measured_iterations
-                ),
-            )
-            latency_eligible = (
-                walk_forward_config.max_median_inference_latency_us is None
-                or inference_latency["median_microseconds"]
-                <= walk_forward_config.max_median_inference_latency_us
-            )
-            selected = _selected_metric(metrics)
-            slot_changed_count = sum(
-                item["slot_changed_count"] for item in metrics
-            )
-            slot_comparable_count = sum(
-                item["slot_comparable_count"] for item in metrics
-            )
-            candidate_runs.append({
-                "model_id": candidate.identifier,
-                "model_spec": candidate,
-                "recurrent_config": recurrent_config,
-                "model": model,
-                "metrics": metrics,
-                "training_config": candidate_training,
-                "parameter_count": resolved_parameter_count,
-                "inference_latency": inference_latency,
-                "latency_eligible": latency_eligible,
-                "masked_input_count": len(
-                    recurrent_config.masked_input_indices
-                ),
-                "active_input_count": (
-                    recurrent_config.input_size
-                    - len(recurrent_config.masked_input_indices)
-                ),
-                "selected_episode": selected["episode"],
-                "validation_total_reward": float(
-                    selected["evaluation_total_reward"]
-                ),
-                "validation_selection_score": float(
-                    selected["evaluation_selection_score"]
-                ),
-                "validation_max_drawdown": float(
-                    selected["evaluation_max_drawdown"]
-                ),
-                "validation_downside_deviation": float(
-                    selected["evaluation_downside_deviation"]
-                ),
-                "validation_turnover": float(
-                    selected["evaluation_turnover"]
-                ),
-                "selection_scope": selected["evaluation_scope"],
-                "episodes_completed": len(metrics),
-                "stopped_early": bool(metrics[-1]["early_stop_selection"]),
-                "optimizer_updates": sum(
-                    item["optimizer_updates"] for item in metrics
-                ),
-                "slot_changed_count": slot_changed_count,
-                "slot_comparable_count": slot_comparable_count,
-                "slot_churn_rate": (
-                    slot_changed_count / slot_comparable_count
-                    if slot_comparable_count
-                    else 0.0
-                ),
-                "full_model_id": replace(
-                    candidate,
-                    disabled_feature_groups=(),
-                ).identifier,
-                "auxiliary_reference_model_id": replace(
-                    candidate,
-                    auxiliary_coefficient=None,
-                ).identifier,
-                "auxiliary_horizon_reference_model_id": replace(
-                    candidate,
-                    auxiliary_horizons=fold_training.auxiliary_horizons,
-                ).identifier,
-                "discount_reference_model_id": replace(
-                    candidate,
-                    time_aware_discounting=None,
-                ).identifier,
-                "burn_in_reference_model_id": replace(
-                    candidate,
-                    burn_in_steps=None,
-                ).identifier,
-            })
+                model, metrics = train_actor_critic(
+                    train_env,
+                    recurrent_config,
+                    candidate_training,
+                    selection_env=validation_env,
+                )
+                actual_parameter_count = sum(
+                    parameter.numel() for parameter in model.parameters()
+                )
+                if actual_parameter_count != resolved_parameter_count:
+                    raise RuntimeError(
+                        "trained model parameter count does not match its "
+                        "resolved configuration"
+                    )
+                inference_latency = benchmark_recurrent_inference(
+                    model,
+                    benchmark_observation,
+                    candidate_training.sequence_length,
+                    warmup_iterations=(
+                        walk_forward_config.latency_warmup_iterations
+                    ),
+                    measured_iterations=(
+                        walk_forward_config.latency_measured_iterations
+                    ),
+                )
+                latency_eligible = (
+                    walk_forward_config.max_median_inference_latency_us is None
+                    or inference_latency["median_microseconds"]
+                    <= walk_forward_config.max_median_inference_latency_us
+                )
+                selected = _selected_metric(metrics)
+                slot_changed_count = sum(
+                    item["slot_changed_count"] for item in metrics
+                )
+                slot_comparable_count = sum(
+                    item["slot_comparable_count"] for item in metrics
+                )
+                candidate_runs.append({
+                    "model_id": candidate.identifier,
+                    "replicate_id": (
+                        f"{candidate.identifier}-seed-{candidate_training.seed}"
+                    ),
+                    "training_seed": candidate_training.seed,
+                    "model_spec": candidate,
+                    "recurrent_config": recurrent_config,
+                    "model": model,
+                    "metrics": metrics,
+                    "training_config": candidate_training,
+                    "parameter_count": resolved_parameter_count,
+                    "inference_latency": inference_latency,
+                    "latency_eligible": latency_eligible,
+                    "masked_input_count": len(
+                        recurrent_config.masked_input_indices
+                    ),
+                    "active_input_count": (
+                        recurrent_config.input_size
+                        - len(recurrent_config.masked_input_indices)
+                    ),
+                    "selected_episode": selected["episode"],
+                    "validation_total_reward": float(
+                        selected["evaluation_total_reward"]
+                    ),
+                    "validation_selection_score": float(
+                        selected["evaluation_selection_score"]
+                    ),
+                    "validation_max_drawdown": float(
+                        selected["evaluation_max_drawdown"]
+                    ),
+                    "validation_downside_deviation": float(
+                        selected["evaluation_downside_deviation"]
+                    ),
+                    "validation_turnover": float(
+                        selected["evaluation_turnover"]
+                    ),
+                    "selection_scope": selected["evaluation_scope"],
+                    "episodes_completed": len(metrics),
+                    "stopped_early": bool(
+                        metrics[-1]["early_stop_selection"]
+                    ),
+                    "optimizer_updates": sum(
+                        item["optimizer_updates"] for item in metrics
+                    ),
+                    "slot_changed_count": slot_changed_count,
+                    "slot_comparable_count": slot_comparable_count,
+                    "slot_churn_rate": (
+                        slot_changed_count / slot_comparable_count
+                        if slot_comparable_count
+                        else 0.0
+                    ),
+                    "full_model_id": replace(
+                        candidate,
+                        disabled_feature_groups=(),
+                    ).identifier,
+                    "auxiliary_reference_model_id": replace(
+                        candidate,
+                        auxiliary_coefficient=None,
+                    ).identifier,
+                    "auxiliary_horizon_reference_model_id": replace(
+                        candidate,
+                        auxiliary_horizons=fold_training.auxiliary_horizons,
+                    ).identifier,
+                    "discount_reference_model_id": replace(
+                        candidate,
+                        time_aware_discounting=None,
+                    ).identifier,
+                    "burn_in_reference_model_id": replace(
+                        candidate,
+                        burn_in_steps=None,
+                    ).identifier,
+                })
 
-        eligible_runs = [
-            run for run in candidate_runs if run["latency_eligible"]
-        ]
-        if not eligible_runs:
-            observed = ", ".join(
-                f"{run['model_id']}={run['inference_latency']['median_microseconds']:.3f}us"
+        grouped_runs = []
+        for candidate in model_specs:
+            replicates = [
+                run
                 for run in candidate_runs
+                if run["model_id"] == candidate.identifier
+            ]
+            aggregate = _training_seed_aggregate(
+                replicates,
+                walk_forward_config,
+            )
+            representative = aggregate.pop("representative_run")
+            grouped_runs.append({
+                "representative": representative,
+                "aggregate": aggregate,
+                "replicates": replicates,
+                "latency_eligible": all(
+                    run["latency_eligible"] for run in replicates
+                ),
+            })
+        eligible_groups = [
+            group for group in grouped_runs if group["latency_eligible"]
+        ]
+        if not eligible_groups:
+            observed = ", ".join(
+                f"{group['representative']['model_id']}="
+                f"{max(run['inference_latency']['median_microseconds'] for run in group['replicates']):.3f}us"
+                for group in grouped_runs
             )
             raise ValueError(
                 "no model candidate satisfies max_median_inference_latency_us="
                 f"{walk_forward_config.max_median_inference_latency_us}; "
                 f"observed {observed}"
             )
-        winning_run = min(
-            eligible_runs,
-            key=lambda run: (
-                -run["validation_selection_score"],
-                run["parameter_count"],
-                run["active_input_count"],
-                run["optimizer_updates"],
-                int(run["model_spec"].burn_in_steps == 0),
-                int(run["model_spec"].time_aware_discounting is False),
-                run["model_id"],
-            ),
-        )
+        winning_group = _select_seed_robust_group(eligible_groups)
+        winning_run = winning_group["representative"]
         candidate_results = [
             {
                 "model_id": run["model_id"],
@@ -590,12 +711,30 @@ def run_walk_forward_training(
                 ].burn_in_steps,
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
-                "deployment_eligible": run["latency_eligible"],
+                "deployment_eligible": group["latency_eligible"],
                 "ineligibility_reason": (
                     None
-                    if run["latency_eligible"]
-                    else "median_inference_latency_exceeded"
+                    if group["latency_eligible"]
+                    else "training_seed_inference_latency_exceeded"
                 ),
+                "training_seed_aggregate": group["aggregate"],
+                "training_seed_replicates": [
+                    {
+                        "replicate_id": replicate["replicate_id"],
+                        "training_seed": replicate["training_seed"],
+                        "selected_episode": replicate["selected_episode"],
+                        "validation_total_reward": replicate[
+                            "validation_total_reward"
+                        ],
+                        "validation_selection_score": replicate[
+                            "validation_selection_score"
+                        ],
+                        "optimizer_updates": replicate["optimizer_updates"],
+                        "inference_latency": replicate["inference_latency"],
+                        "deployment_eligible": replicate["latency_eligible"],
+                    }
+                    for replicate in group["replicates"]
+                ],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
                     - run["parameter_count"]
@@ -604,12 +743,41 @@ def run_walk_forward_training(
                 ),
                 "masked_input_count": run["masked_input_count"],
                 "active_input_count": run["active_input_count"],
-                "episodes_completed": run["episodes_completed"],
-                "stopped_early": run["stopped_early"],
-                "optimizer_updates": run["optimizer_updates"],
-                "slot_changed_count": run["slot_changed_count"],
-                "slot_comparable_count": run["slot_comparable_count"],
-                "slot_churn_rate": run["slot_churn_rate"],
+                "episodes_completed": sum(
+                    replicate["episodes_completed"]
+                    for replicate in group["replicates"]
+                ),
+                "stopped_early": any(
+                    replicate["stopped_early"]
+                    for replicate in group["replicates"]
+                ),
+                "optimizer_updates": sum(
+                    replicate["optimizer_updates"]
+                    for replicate in group["replicates"]
+                ),
+                "slot_changed_count": sum(
+                    replicate["slot_changed_count"]
+                    for replicate in group["replicates"]
+                ),
+                "slot_comparable_count": sum(
+                    replicate["slot_comparable_count"]
+                    for replicate in group["replicates"]
+                ),
+                "slot_churn_rate": (
+                    sum(
+                        replicate["slot_changed_count"]
+                        for replicate in group["replicates"]
+                    )
+                    / sum(
+                        replicate["slot_comparable_count"]
+                        for replicate in group["replicates"]
+                    )
+                    if sum(
+                        replicate["slot_comparable_count"]
+                        for replicate in group["replicates"]
+                    )
+                    else 0.0
+                ),
                 "validation_reward_lift_vs_full": None,
                 "validation_score_lift_vs_full": None,
                 "validation_reward_lift_vs_auxiliary_enabled": None,
@@ -623,12 +791,19 @@ def run_walk_forward_training(
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
+                    "training_seed": run["training_seed"],
                     "validation_total_reward": run[
                         "validation_total_reward"
                     ],
                     "validation_selection_score": run[
                         "validation_selection_score"
                     ],
+                    "training_seed_mean_validation_reward": group[
+                        "aggregate"
+                    ]["validation_total_reward_mean"],
+                    "robust_training_seed_validation_score": group[
+                        "aggregate"
+                    ]["robust_training_seed_validation_score"],
                     "max_drawdown": run["validation_max_drawdown"],
                     "downside_deviation": run[
                         "validation_downside_deviation"
@@ -636,24 +811,36 @@ def run_walk_forward_training(
                     "turnover": run["validation_turnover"],
                 },
             }
-            for run in candidate_runs
+            for group in grouped_runs
+            for run in (group["representative"],)
         ]
         validation_scores = {
-            run["model_id"]: run["validation_selection_score"]
-            for run in candidate_runs
+            group["representative"]["model_id"]: group["aggregate"][
+                "robust_training_seed_validation_score"
+            ]
+            for group in grouped_runs
         }
         validation_rewards = {
-            run["model_id"]: run["validation_total_reward"]
-            for run in candidate_runs
+            group["representative"]["model_id"]: group["aggregate"][
+                "validation_total_reward_mean"
+            ]
+            for group in grouped_runs
         }
-        for result, run in zip(candidate_results, candidate_runs, strict=True):
+        for result, group in zip(candidate_results, grouped_runs, strict=True):
+            run = group["representative"]
+            aggregate_score = group["aggregate"][
+                "robust_training_seed_validation_score"
+            ]
+            aggregate_reward = group["aggregate"][
+                "validation_total_reward_mean"
+            ]
             full_score = validation_scores.get(run["full_model_id"])
             if run["model_spec"].disabled_feature_groups and full_score is not None:
                 result["validation_score_lift_vs_full"] = (
-                    run["validation_selection_score"] - full_score
+                    aggregate_score - full_score
                 )
                 result["validation_reward_lift_vs_full"] = (
-                    run["validation_total_reward"]
+                    aggregate_reward
                     - validation_rewards[run["full_model_id"]]
                 )
             auxiliary_reference = validation_scores.get(
@@ -664,10 +851,10 @@ def run_walk_forward_training(
                 and auxiliary_reference is not None
             ):
                 result["validation_score_lift_vs_auxiliary_enabled"] = (
-                    run["validation_selection_score"] - auxiliary_reference
+                    aggregate_score - auxiliary_reference
                 )
                 result["validation_reward_lift_vs_auxiliary_enabled"] = (
-                    run["validation_total_reward"]
+                    aggregate_reward
                     - validation_rewards[run["auxiliary_reference_model_id"]]
                 )
             horizon_reference = validation_scores.get(
@@ -679,10 +866,10 @@ def run_walk_forward_training(
                 and horizon_reference is not None
             ):
                 result["validation_score_lift_vs_configured_horizons"] = (
-                    run["validation_selection_score"] - horizon_reference
+                    aggregate_score - horizon_reference
                 )
                 result["validation_reward_lift_vs_configured_horizons"] = (
-                    run["validation_total_reward"]
+                    aggregate_reward
                     - validation_rewards[
                         run["auxiliary_horizon_reference_model_id"]
                     ]
@@ -696,11 +883,11 @@ def run_walk_forward_training(
             ):
                 result[
                     "validation_score_lift_vs_time_aware_discounting"
-                ] = run["validation_selection_score"] - discount_reference
+                ] = aggregate_score - discount_reference
                 result[
                     "validation_reward_lift_vs_time_aware_discounting"
                 ] = (
-                    run["validation_total_reward"]
+                    aggregate_reward
                     - validation_rewards[run["discount_reference_model_id"]]
                 )
             burn_in_reference = validation_scores.get(
@@ -711,10 +898,10 @@ def run_walk_forward_training(
                 and burn_in_reference is not None
             ):
                 result["validation_score_lift_vs_burn_in"] = (
-                    run["validation_selection_score"] - burn_in_reference
+                    aggregate_score - burn_in_reference
                 )
                 result["validation_reward_lift_vs_burn_in"] = (
-                    run["validation_total_reward"]
+                    aggregate_reward
                     - validation_rewards[run["burn_in_reference_model_id"]]
                 )
         model = winning_run["model"]
@@ -722,7 +909,10 @@ def run_walk_forward_training(
         recurrent_config = winning_run["recurrent_config"]
         selected_training = winning_run["training_config"]
         selected = _selected_metric(metrics)
+        winning_seed_aggregate = dict(winning_group["aggregate"])
         candidate_runs.clear()
+        grouped_runs.clear()
+        del winning_group
 
         # Do not instantiate or evaluate the held-out range until validation
         # has fixed both the architecture and its restored checkpoint.
@@ -852,6 +1042,14 @@ def run_walk_forward_training(
                 "path_count": 1,
                 "seed_repetitions": 1,
                 "test_seed": walk_forward_config.test_seeds[0],
+                "training_seed_count": len(
+                    walk_forward_config.training_seed_offsets
+                ),
+                "training_seeds": [
+                    fold_training.seed + offset
+                    for offset in walk_forward_config.training_seed_offsets
+                ],
+                "selected_training_seed": selected_training.seed,
                 "bootstrap_independence_unit": "arrival_time_block",
             },
             "environment_fingerprints": {
@@ -872,9 +1070,15 @@ def run_walk_forward_training(
                 ],
                 "turnover": selected["evaluation_turnover"],
                 "model_id": winning_run["model_id"],
+                "training_seed": selected_training.seed,
+                "robust_training_seed_validation_score": (
+                    winning_seed_aggregate[
+                        "robust_training_seed_validation_score"
+                    ]
+                ),
             },
             "model_selection": {
-                "criterion": "validation_selection_score",
+                "criterion": "robust_training_seed_validation_score",
                 "direction": "maximize",
                 "score_definition": {
                     "reward": "validation_total_reward",
@@ -893,6 +1097,12 @@ def run_walk_forward_training(
                     "worst_ticker_weight": (
                         selected_training.selection_worst_ticker_weight
                     ),
+                    "training_seed_worst_weight": (
+                        walk_forward_config.training_seed_worst_weight
+                    ),
+                    "training_seed_dispersion_penalty": (
+                        walk_forward_config.training_seed_dispersion_penalty
+                    ),
                 },
                 "tie_break": [
                     "parameter_count",
@@ -904,6 +1114,7 @@ def run_walk_forward_training(
                 ],
                 "eligibility_constraint": {
                     "metric": "median_inference_latency_us",
+                    "training_seed_scope": "all_replicates",
                     "maximum": (
                         walk_forward_config.max_median_inference_latency_us
                     ),
@@ -996,6 +1207,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--embargo", type=int, default=8)
     parser.add_argument("--step-size", type=int)
     parser.add_argument("--max-train-size", type=int)
+    parser.add_argument(
+        "--training-seed-offset",
+        action="append",
+        type=int,
+        help=(
+            "repeat to train independent validation replicates relative to "
+            "--seed; defaults to one offset of zero"
+        ),
+    )
+    parser.add_argument(
+        "--training-seed-worst-weight",
+        type=float,
+        default=0.25,
+    )
+    parser.add_argument(
+        "--training-seed-dispersion-penalty",
+        type=float,
+        default=0.25,
+    )
     parser.add_argument("--bootstrap-samples", type=int, default=2_000)
     parser.add_argument("--bootstrap-block-length", type=int)
     parser.add_argument("--bootstrap-confidence", type=float, default=0.95)
@@ -1202,6 +1432,11 @@ def _walk_forward_config_from_args(
         embargo=args.embargo,
         step_size=args.step_size,
         max_train_size=args.max_train_size,
+        training_seed_offsets=tuple(args.training_seed_offset or (0,)),
+        training_seed_worst_weight=args.training_seed_worst_weight,
+        training_seed_dispersion_penalty=(
+            args.training_seed_dispersion_penalty
+        ),
         bootstrap_samples=args.bootstrap_samples,
         bootstrap_block_length=args.bootstrap_block_length,
         bootstrap_confidence=args.bootstrap_confidence,

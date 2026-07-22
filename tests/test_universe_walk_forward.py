@@ -121,6 +121,7 @@ class UniverseWalkForwardTests(TestCase):
                     min_train_size=3,
                     validation_size=2,
                     test_size=2,
+                    training_seed_offsets=(0, 100),
                     test_seeds=(31,),
                     bootstrap_samples=100,
                     bootstrap_min_observations=2,
@@ -184,6 +185,9 @@ class UniverseWalkForwardTests(TestCase):
             "path_count": 2,
             "seed_repetitions_per_path": 1,
             "test_seed": 31,
+            "training_seed_count": 2,
+            "training_seeds": [17, 117],
+            "selected_training_seed": fold["selection"]["training_seed"],
             "within_path_bootstrap_independence_unit": "arrival_time_block",
             "cross_ticker_summary": "descriptive_not_independent",
         })
@@ -191,6 +195,13 @@ class UniverseWalkForwardTests(TestCase):
             candidate["slot_churn_rate"] == 0.0
             for candidate in fold["model_selection"]["candidates"]
         ))
+        self.assertTrue(all(
+            len(candidate["training_seed_replicates"]) == 2
+            and candidate["training_seed_aggregate"]["training_seeds"]
+            == [17, 117]
+            for candidate in fold["model_selection"]["candidates"]
+        ))
+        self.assertIn(manifest["training"]["seed"], {17, 117})
         self.assertTrue(
             all(
                 evidence["agent"][0]["steps"] == 1

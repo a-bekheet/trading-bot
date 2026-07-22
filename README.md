@@ -582,6 +582,29 @@ snapshot, feature engineering measured 23.55 ms median and 26.51 ms p95, roughly
 variation. The v0.52 one-episode walk-forward smoke completed with zero trades,
 zero held-out return, and one declared deterministic held-out path.
 
+v0.53 adds genuine training-seed replication to both single-ticker and shared
+universe walk-forward selection. Repeat `--training-seed-offset` to train
+independently initialized PPO or REINFORCE GRU/LSTM/hybrid/mixture candidates.
+Each architecture is ranked on validation by a predeclared blend of mean and worst
+seed score minus a seed-dispersion penalty. The deployed checkpoint is the run
+closest to the median validation score, so adding seed robustness does not
+multiply live inference latency or cherry-pick the best seed.
+
+Every candidate now records its seed-level validation score, reward, optimizer
+updates, latency, aggregate score, and representative rule. Every replicate must
+pass the deployment latency ceiling. The held-out contract records all training
+seeds and the selected training seed while still evaluating exactly one
+deterministic policy/path pair. Checkpoint, single-ticker walk-forward, and
+universe walk-forward schemas advance to v38, v41, and v25; environment v20 and
+feature schema `dimensionless.v15` are unchanged.
+
+In a two-seed AAPL integration smoke, seeds 7 and 1007 both scored zero on the
+tiny validation path; the median-representative tie-break selected seed 7. Their
+streaming inference medians were 124.81 and 120.27 microseconds, and the selected
+held-out policy made zero trades with zero return. This verifies independent
+training, aggregation, checkpoint selection, and constant deployment model count;
+it is not evidence of alpha.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
 coverage bit; `dimensionless.v15` log-compresses the interval before it reaches
