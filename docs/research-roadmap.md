@@ -324,6 +324,9 @@ candidate. This corrects objective semantics; it is not evidence of alpha.
   bottleneck was pandas object allocation rather than numerical compute; do not
   trade deterministic first-quote, accounting, or action-mask semantics for a
   synthetic microbenchmark win.
+- Retain the sparse stable-slot and empty-option-portfolio fast paths. Padding
+  alone must not trigger repeated ranking, while newly visible contracts and
+  every held-option settlement must preserve the full deterministic path.
 - Keep the 33-field contract state under `dimensionless.v13` as the current
   model: current per-slot quantity, average entry price, and executable
   unrealized return prevent portfolio-state aliasing, while matched bid/ask and

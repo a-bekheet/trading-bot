@@ -489,6 +489,21 @@ reward and selected Deep Sets through the smaller-parameter tie-break. This is
 integration and latency evidence, not evidence that learned attention adds
 alpha.
 
+v0.49 removes two semantic no-ops from rollout and validation. Stable slot
+assignment now returns immediately when every currently visible contract is
+already assigned, even when the configured surface has unused padded slots. It
+still invokes the full ranker as soon as a new quote appears. Option-expiry
+handling now returns before timestamp parsing only when the option portfolio is
+empty; every held long or short position follows the unchanged settlement path.
+
+On a 260-snapshot, two-contract synthetic surface padded to 32 slots, a complete
+128-step PPO rollout plus full deterministic selection fell from 2.62 seconds
+median to 0.48 seconds (about 82%). Isolated no-op transitions measured 0.282 ms
+with stable assignment versus 3.858 ms when forced through full ranking. On the
+current 84-contract AAPL sample, median no-op transition time improved again
+from 1.63 ms to 1.41 ms. These are same-machine throughput measurements; policy
+inputs, actions, rewards, checkpoints, and evidence for alpha are unchanged.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
 coverage bit; `dimensionless.v13` log-compresses the interval before it reaches

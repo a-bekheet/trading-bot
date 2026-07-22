@@ -641,7 +641,10 @@ class OptionsEnv:
             assigned[index] = rows.get(contract_id)
             used.add(contract_id)
 
-        if all(row is not None for row in assigned):
+        if (
+            all(row is not None for row in assigned)
+            or len(used) >= len(current_rows)
+        ):
             return assigned
 
         candidates = self._ranked_slots(frame, rows)
@@ -1126,6 +1129,8 @@ class OptionsEnv:
         frame: pd.DataFrame,
     ) -> list[dict[str, Any]]:
         """Settle positions at the first observed date after expiration."""
+        if not self._positions:
+            return []
         timestamp = frame.iloc[0].get(
             "collectedAt",
             self.dataset.snapshots[self._index].timestamp,

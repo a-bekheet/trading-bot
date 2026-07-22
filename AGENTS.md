@@ -607,6 +607,12 @@ views through slot assignment, valuation, masks, and fills. Do not reintroduce
 DataFrames in the transition loop. Preserve first-occurrence duplicate-symbol
 semantics and verify both accounting equivalence and full-episode latency after
 changing this path.
+For stable assignment on sparse surfaces, return once every visible unique
+contract is already assigned; padded vacancies are not evidence that ranking is
+needed. A newly visible contract must still trigger ranking before vacancies are
+filled. Expiry settlement may bypass timestamp parsing only when there are no
+option positions; never apply that shortcut to an open long or collateralized
+short lifecycle.
 
 ## Known limitations and next decisions
 

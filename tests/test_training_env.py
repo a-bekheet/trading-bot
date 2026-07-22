@@ -1,4 +1,5 @@
 from unittest import TestCase
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -809,6 +810,72 @@ class OptionsEnvTests(TestCase):
 
         # The current policy-visible slots are cached; only the next state ranks.
         self.assertEqual(calls, 1)
+
+    def test_sparse_stable_slots_skip_ranking_when_every_quote_is_assigned(self):
+        env = OptionsEnv(demo_dataset(), slot_count=32, starting_cash=1_000)
+        before, _ = env.reset()
+        calls = 0
+        original = env._ranked_slots
+
+        def counted_rank(frame, rows=None):
+            nonlocal calls
+            calls += 1
+            return original(frame, rows)
+
+        env._ranked_slots = counted_rank
+        after, _, _, _, _ = env.step(np.zeros(33, dtype=int))
+
+        self.assertEqual(calls, 0)
+        self.assertEqual(after.contract_ids[:2], before.contract_ids[:2])
+        self.assertTrue(all(item is None for item in after.contract_ids[2:]))
+
+    def test_sparse_stable_slots_rank_only_when_a_new_quote_appears(self):
+        source = demo_dataset()
+        dataset = SnapshotDataset(
+            (
+                Snapshot(
+                    source.snapshots[0].timestamp,
+                    source.snapshots[0].frame.iloc[:1].copy(),
+                ),
+                source.snapshots[1],
+            ),
+            source.symbol,
+        )
+        env = OptionsEnv(dataset, slot_count=4, starting_cash=1_000)
+        env.reset()
+        calls = 0
+        original = env._ranked_slots
+
+        def counted_rank(frame, rows=None):
+            nonlocal calls
+            calls += 1
+            return original(frame, rows)
+
+        env._ranked_slots = counted_rank
+        observation, _, _, _, _ = env.step(np.zeros(5, dtype=int))
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(
+            {item for item in observation.contract_ids if item is not None},
+            {
+                "AAPL260821C00330000",
+                "AAPL260821C00335000",
+            },
+        )
+
+    def test_expiry_settlement_skips_timestamp_work_without_positions(self):
+        env = OptionsEnv(demo_dataset(), slot_count=2)
+        env.reset()
+
+        with patch(
+            "trading_bot.training.env.pd.to_datetime",
+            side_effect=AssertionError("timestamp parser should not run"),
+        ):
+            settlements = env._settle_expired_positions(
+                env.dataset.snapshots[1].frame
+            )
+
+        self.assertEqual(settlements, [])
 
     def test_slots_cover_expirations_and_option_types_before_surface_depth(self):
         rows = []
