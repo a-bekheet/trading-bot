@@ -60,6 +60,10 @@ FEATURE_ABLATION_GROUPS = {
         "atmIvMinusRealizedVol4",
         "atmIvMinusRealizedVol16",
     ),
+    "volatility_normalization": (
+        "frontAtmIvZScore16",
+        "volatilityRiskPremiumZScore16",
+    ),
     "data_quality": (
         "executableQuoteCoverage",
         "greekCoverage",

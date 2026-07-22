@@ -9,7 +9,10 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot.market_data.snapshot_identity import material_snapshot_fingerprint
-from trading_bot.training.features import engineer_snapshot
+from trading_bot.training.features import (
+    engineer_snapshot,
+    volatility_regime_observation,
+)
 
 
 REQUIRED_COLUMNS = {
@@ -53,6 +56,7 @@ class SnapshotDataset:
         previous = None
         previous_material_fingerprint = None
         spot_history: list[tuple[pd.Timestamp, float]] = []
+        volatility_history: list[tuple[float | None, float | None]] = []
         for timestamp, group in frame.groupby("collectedAt", sort=True):
             material_fingerprint = material_snapshot_fingerprint(group)
             if material_fingerprint == previous_material_fingerprint:
@@ -63,8 +67,12 @@ class SnapshotDataset:
                 group.reset_index(drop=True),
                 previous,
                 spot_history=spot_history,
+                volatility_history=volatility_history,
             )
             snapshots_list.append(Snapshot(timestamp=timestamp.isoformat(), frame=engineered))
+            volatility_history.append(
+                volatility_regime_observation(engineered)
+            )
             previous = engineered
             previous_material_fingerprint = material_fingerprint
         snapshots = tuple(snapshots_list)

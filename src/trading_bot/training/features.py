@@ -10,6 +10,9 @@ import pandas as pd
 
 
 REALIZED_VOL_WINDOWS = (4, 16)
+VOLATILITY_REGIME_WINDOW = 16
+VOLATILITY_REGIME_MIN_HISTORY = 4
+VOLATILITY_REGIME_ZSCORE_CLIP = 8.0
 FRONT_ATM_LOG_MONEYNESS_TOLERANCE = 0.10
 FRONT_WING_DELTA_TOLERANCE = 0.15
 MARKET_ENGINEERED_FEATURES = (
@@ -42,6 +45,10 @@ MARKET_ENGINEERED_FEATURES = (
     "greekCoverage",
     "atmIvMinusRealizedVol4",
     "atmIvMinusRealizedVol16",
+    "frontAtmIvZScore16",
+    "frontAtmIvZScore16Coverage",
+    "volatilityRiskPremiumZScore16",
+    "volatilityRiskPremiumZScore16Coverage",
 )
 CONTRACT_DYNAMICS_FEATURES = (
     "midPriceLogReturn",
@@ -205,6 +212,87 @@ def snapshot_gap_features(
     if not math.isfinite(elapsed) or elapsed <= 0:
         return neutral
     return {"snapshotGapSeconds": elapsed, "snapshotGapCoverage": 1.0}
+
+
+def volatility_regime_observation(
+    frame: pd.DataFrame,
+) -> tuple[float | None, float | None]:
+    """Extract valid ATM-IV and short-window volatility-premium levels."""
+    if frame.empty:
+        return None, None
+
+    def scalar(name: str) -> float | None:
+        if name not in frame:
+            return None
+        try:
+            value = float(frame[name].iloc[0])
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    front_coverage = scalar("frontAtmIvCoverage")
+    front_atm_iv = scalar("frontAtmIv")
+    if (
+        front_coverage is None
+        or front_coverage <= 0
+        or front_atm_iv is None
+        or front_atm_iv <= 0
+    ):
+        front_atm_iv = None
+
+    realized_coverage = scalar("realizedVol4Coverage")
+    premium = scalar("atmIvMinusRealizedVol4")
+    if (
+        front_atm_iv is None
+        or realized_coverage is None
+        or realized_coverage < 1
+        or premium is None
+    ):
+        premium = None
+    return front_atm_iv, premium
+
+
+def volatility_regime_zscore_features(
+    current: pd.DataFrame,
+    history: Sequence[tuple[float | None, float | None]],
+) -> dict[str, float]:
+    """Normalize current volatility levels against prior-only causal history."""
+    result = {
+        "frontAtmIvZScore16": 0.0,
+        "frontAtmIvZScore16Coverage": 0.0,
+        "volatilityRiskPremiumZScore16": 0.0,
+        "volatilityRiskPremiumZScore16Coverage": 0.0,
+    }
+    current_values = volatility_regime_observation(current)
+    recent = history[-VOLATILITY_REGIME_WINDOW:]
+    for value_index, (value_name, coverage_name) in enumerate((
+        ("frontAtmIvZScore16", "frontAtmIvZScore16Coverage"),
+        (
+            "volatilityRiskPremiumZScore16",
+            "volatilityRiskPremiumZScore16Coverage",
+        ),
+    )):
+        current_value = current_values[value_index]
+        if current_value is None:
+            continue
+        prior = np.asarray([
+            values[value_index]
+            for values in recent
+            if values[value_index] is not None
+        ], dtype=np.float64)
+        result[coverage_name] = len(prior) / VOLATILITY_REGIME_WINDOW
+        if len(prior) < VOLATILITY_REGIME_MIN_HISTORY:
+            continue
+        scale = float(prior.std())
+        if not math.isfinite(scale) or scale <= 1e-12:
+            continue
+        score = (current_value - float(prior.mean())) / scale
+        result[value_name] = float(np.clip(
+            score,
+            -VOLATILITY_REGIME_ZSCORE_CLIP,
+            VOLATILITY_REGIME_ZSCORE_CLIP,
+        ))
+    return result
 
 
 def _surface_features(result: pd.DataFrame) -> None:
@@ -574,6 +662,9 @@ def engineer_snapshot(
     previous: pd.DataFrame | None = None,
     *,
     spot_history: Sequence[tuple[pd.Timestamp, float]] = (),
+    volatility_history: Sequence[
+        tuple[float | None, float | None]
+    ] = (),
 ) -> pd.DataFrame:
     """Add only current or prior-snapshot features; never reads future rows."""
     result = frame.copy()
@@ -609,6 +700,11 @@ def engineer_snapshot(
     _surface_features(result)
     _market_surface_features(result)
     _surface_dynamics_features(result, previous)
+    for name, value in volatility_regime_zscore_features(
+        result,
+        volatility_history,
+    ).items():
+        result[name] = value
     result[list(ENGINEERED_FEATURES)] = result[list(ENGINEERED_FEATURES)].replace(
         [np.inf, -np.inf], np.nan
     ).fillna(0.0)

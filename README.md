@@ -223,7 +223,7 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v12` transform. Prices, strikes, and average entry price are
+`dimensionless.v13` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
@@ -426,9 +426,33 @@ eight streaming calls (2.72x faster, one CPU thread, 1,000 paired iterations).
 This changes training only; deployment inference and the feature schema remain
 unchanged. The benchmark is machine-specific and is not evidence of alpha.
 
+v0.46 adds two compact, ticker-relative volatility-regime signals without
+expanding the contract nodes. `frontAtmIvZScore16` and
+`volatilityRiskPremiumZScore16` compare the current front ATM IV and current
+front-ATM-IV-minus-four-snapshot-realized-volatility against valid values from
+the 16 strictly prior snapshots. Four prior values are required. The
+standardizer never sees the current or future value, extreme scores are clipped to ±8, and
+each signal has separate history coverage. Missing or constant history yields a
+neutral zero rather than a fabricated direction.
+
+Use `--ablation volatility_normalization` to add a matched candidate with only
+the two z-scores masked; their coverage remains visible so missing history is
+not conflated with a zero signal. The `dimensionless.v13` layout has 1,133
+inputs at 32 slots. On the current ten-snapshot AAPL sample, the final ATM-IV
+z-score is 0.894 at 56.25% history coverage; the normalized volatility premium
+is zero at 31.25% coverage because its prior values have no usable dispersion.
+The 10,000-call preprocessing median was 30.38 microseconds versus 30.92 before
+the four fields. Repeated width-128 inference medians were about 119 microseconds
+for flat GRU and 215–218 microseconds for zero-neighbor graph-set GRU, consistent
+with the prior run. These are coverage/integration and machine-latency results,
+not evidence that the features produce alpha. A one-episode flat-mixture smoke
+tied at zero validation score and selected the normalization-masked candidate
+through the active-input tie-break, so the current sample provides no reason to
+promote the new signals.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v12` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v13` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters

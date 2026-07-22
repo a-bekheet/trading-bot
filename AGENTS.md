@@ -231,7 +231,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v12`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v13`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
@@ -318,6 +318,16 @@ masks before sampling, decode to the existing environment action array, reject
 training actions with multiple non-hold rows, and retain one scalar log
 probability/entropy per step. It cannot express same-snapshot spreads or hedges,
 so keep factorized decoding available and select between them on validation.
+ATM-IV and volatility-premium rolling z-scores filter valid values from the 16
+strictly prior snapshots. Require four prior values, use population mean/standard
+deviation, clip to ±8, and emit zero when current coverage is absent or prior
+dispersion is unusable. Persist separate prior-history coverage. Engineer the
+full chronological ticker dataset before splitting so validation/test may use
+only genuinely earlier market context; `subset()` must preserve those causal
+precomputed values. Never refit normalization inside a validation or test slice
+and never let its future rows affect an earlier score. The named
+`volatility_normalization` ablation masks only both z-scores and preserves their
+coverage fields.
 Rollouts and deterministic evaluation must carry the actual GRU/LSTM hidden
 state one snapshot at a time. PPO minibatches are composed from contiguous
 truncated-backpropagation chunks initialized with the old policy's causal

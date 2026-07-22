@@ -37,10 +37,11 @@ Every candidate must eventually pass:
 | --- | --- | --- |
 | [Recurrent Experience Replay in Distributed Reinforcement Learning (ICLR 2019)](https://deepmind.google/research/publications/recurrent-experience-replay-in-distributed-reinforcement-learning/) | Recurrent training on partial sequences must address inaccurate boundary hidden states; a prefix can reconstruct state before loss-bearing transitions. | Random training windows now use a bounded causal no-op prefix, one batched no-gradient recurrent call, explicit metrics, and a validation-only disabled ablation. This is on-policy context reconstruction, not replay. |
 | [AlphaZeroBeta: Deep Reinforcement Learning for Market-Neutral Portfolios (2026)](https://arxiv.org/abs/2607.18001) | A current finance study combines recurrent PPO, transaction-cost-aware objectives, and rolling walk-forward evaluation, but its reported equity-index results do not establish option alpha here. | Keep recurrent PPO in the tournament, require cost stress and walk-forward evidence, and treat market-neutrality controls as a later declared objective rather than importing performance claims. |
+| [Sizing the Risk: Kelly, VIX, and Hybrid Approaches in Put-Writing (2025)](https://arxiv.org/abs/2508.16598) | The preprint treats implied-versus-realized volatility and volatility-regime scaling as interacting inputs for put-writing size, but its SPXW backtest does not establish portability to equity options. | Add bounded prior-only ATM-IV and volatility-premium normalization as two compact state candidates. Keep sizing bounded by collateral and require the named normalization ablation, costs, and held-out folds before retaining either signal. |
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | The collateralized liability foundation now exists. Add CVaR or learned P&L-distribution objectives only after enough independent paths and lifecycle validation exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Causal realized-volatility horizons, walk-forward evaluation, and explicit per-contract position quantity/cost/P&L state implement this lesson. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v12`, compact ATM-IV-minus-realized-volatility and term/dynamics state, stable contract/position identity, Greek budgets, collateral state, and paired moving-block intervals implement the state/risk lesson. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v13`, compact ATM-IV-minus-realized-volatility and term/dynamics state, stable contract/position identity, Greek budgets, collateral state, and paired moving-block intervals implement the state/risk lesson. |
 | [Deep Hedging with Options Using the Implied Volatility Surface (revised 2025)](https://arxiv.org/abs/2504.06208) | Joint return/surface dynamics, multiple hedge instruments, variance-risk-premium state, and transaction costs can create useful state-dependent no-trade regions. | Keep whole-surface factors, option-plus-share actions, and sparse action priors. The collateralized short-put carry baseline now prevents attributing a simple IV-versus-realized rule to RL. |
 | [IV-surface feedback for deep option hedging (revised 2026)](https://arxiv.org/abs/2407.21138) | A compact surface factorization includes ATM level, maturity and moneyness slopes, smile attenuation, smirk, and their dynamics; bounded recurrent hybrids outperform standalone networks in its numerical study. | Executable 25-delta risk-reversal/butterfly, ATM term slope/curvature, and one-snapshot factor changes now have explicit coverage once per market snapshot; test them through named tournament ablations. |
 | [Shortfall-aware RL option hedging (2026)](https://arxiv.org/abs/2601.01709) | Better static IV fit need not produce better dynamic hedging; replication-error and shortfall objectives under costs are separate evidence. | Keep realized path diagnostics primary. The liability surface is implemented; defer shortfall/CVaR training until enough independent paths make tail estimates meaningful. |
@@ -155,6 +156,17 @@ history coverage. PPO training samples seeded bounded windows across the
 training partition instead of replaying only its first regime. Both choices
 improve sample efficiency; their value still requires walk-forward ablation.
 
+Two additional market scalars normalize front ATM IV and the short-window
+implied-minus-realized premium using valid values from 16 strictly prior
+snapshots.
+They require four observations, retain separate coverage, clip extreme scores,
+and preserve precomputed causal history across fold subsets. The named
+`volatility_normalization` candidate masks only these scores. On the current
+ten-snapshot AAPL sample the ATM score is populated, while the premium score is
+neutral because its short prior history has no usable dispersion. That is
+integration evidence, not an alpha result. A matched flat-mixture smoke tied at
+zero validation score and selected the masked candidate by active-input count.
+
 The same backward-only price history now supplies 4/16-snapshot cumulative log
 returns. They reuse the volatility windows and coverage masks, add no per-node
 state, and are signed-log transformed at the policy boundary. The
@@ -217,7 +229,7 @@ inference on both flat and graph-set layouts, so it remains a tournament
 candidate subject to the same latency ceiling rather than replacing GRU or the
 concatenated hybrid.
 
-The `dimensionless.v12` policy transform now batches signed contract columns,
+The `dimensionless.v13` policy transform now batches signed contract columns,
 uses clipping for infinity handling, replaces NaNs in one pass, and assembles
 the float32 vector directly. This reduced local preprocessing median by 37% and
 cut matched batch-one medians across flat and graph-set hybrid/mixture models
@@ -294,7 +306,7 @@ candidate. This corrects objective semantics; it is not evidence of alpha.
 
 ### 3. Improve the state without inflating latency
 
-- Keep the 33-field contract state under `dimensionless.v12` as the current
+- Keep the 33-field contract state under `dimensionless.v13` as the current
   model: current per-slot quantity, average entry price, and executable
   unrealized return prevent portfolio-state aliasing, while matched bid/ask and
   IV dynamics separate observed change from missing history. Test these through

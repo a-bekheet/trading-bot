@@ -348,6 +348,10 @@ class FeatureSequenceTests(TestCase):
         time_indices = feature_ablation_indices(("time_context",), 2)
         trend_indices = feature_ablation_indices(("price_trend",), 2)
         volatility_indices = feature_ablation_indices(("volatility_regime",), 2)
+        normalization_indices = feature_ablation_indices(
+            ("volatility_normalization",),
+            2,
+        )
 
         self.assertEqual(len(wing_indices), 3)
         self.assertEqual(len(quality_indices), 2)
@@ -361,6 +365,21 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertEqual(len(time_indices), 2)
         self.assertEqual(len(trend_indices), 2)
+        self.assertEqual(len(normalization_indices), 2)
+        self.assertEqual(set(normalization_indices), {
+            MARKET_FEATURES.index("frontAtmIvZScore16"),
+            MARKET_FEATURES.index("volatilityRiskPremiumZScore16"),
+        })
+        self.assertNotIn(
+            MARKET_FEATURES.index("frontAtmIvZScore16Coverage"),
+            normalization_indices,
+        )
+        self.assertNotIn(
+            MARKET_FEATURES.index(
+                "volatilityRiskPremiumZScore16Coverage"
+            ),
+            normalization_indices,
+        )
         self.assertEqual(
             len(contract_indices),
             2 * len(FEATURE_ABLATION_GROUPS["derived_contract_surface"]),
@@ -713,7 +732,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v12")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v13")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
@@ -783,6 +802,13 @@ class FeatureSequenceTests(TestCase):
         market[MARKET_FEATURES.index("executableQuoteCoverage")] = 0.8
         market[MARKET_FEATURES.index("greekCoverage")] = 0.75
         market[MARKET_FEATURES.index("atmIvMinusRealizedVol4")] = 0.05
+        market[MARKET_FEATURES.index("frontAtmIvZScore16")] = -1.25
+        market[
+            MARKET_FEATURES.index("frontAtmIvZScore16Coverage")
+        ] = 0.5
+        market[
+            MARKET_FEATURES.index("volatilityRiskPremiumZScore16")
+        ] = 2.5
         observation = Observation(
             "now",
             market,
@@ -819,6 +845,16 @@ class FeatureSequenceTests(TestCase):
         self.assertAlmostEqual(
             vector[MARKET_FEATURES.index("atmIvMinusRealizedVol4")],
             np.log1p(0.05),
+        )
+        self.assertEqual(
+            vector[MARKET_FEATURES.index("frontAtmIvZScore16")],
+            -1.25,
+        )
+        self.assertEqual(
+            vector[
+                MARKET_FEATURES.index("volatilityRiskPremiumZScore16")
+            ],
+            2.5,
         )
         self.assertAlmostEqual(
             vector[MARKET_FEATURES.index("front25DeltaRiskReversal")],
@@ -984,4 +1020,77 @@ class FeatureSequenceTests(TestCase):
         self.assertIn("underlyingLogReturn4", MARKET_FEATURES)
         self.assertIn("underlyingLogReturn16", MARKET_FEATURES)
         self.assertIn("executableQuoteCoverage", MARKET_FEATURES)
+        self.assertIn("frontAtmIvZScore16", MARKET_FEATURES)
+        self.assertNotIn("frontAtmIvZScore16", CONTRACT_FEATURES)
         self.assertTrue(np.isfinite(observation_vector(observation)).all())
+
+    def test_volatility_regime_zscores_use_prior_history_only(self):
+        iv_values = (0.20, 0.22, 0.18, 0.21, 0.30, 0.24, 0.26, 0.23, 0.31, 1.50)
+        rows = []
+        for index, volatility in enumerate(iv_values):
+            rows.append({
+                "collectedAt": pd.Timestamp("2026-07-21T14:00:00Z")
+                + pd.Timedelta(minutes=15 * index),
+                "contractSymbol": "TEST-C",
+                "symbol": "TEST",
+                "expiration": "2026-09-18",
+                "optionType": "call",
+                "strike": 100,
+                "bid": 1.0 + index * 0.01,
+                "ask": 1.2 + index * 0.01,
+                "lastPrice": 1.1 + index * 0.01,
+                "impliedVolatility": volatility,
+                "underlyingPrice": 100 * 1.001**index,
+            })
+
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            pd.DataFrame(rows).to_csv(data_dir / "FULL.csv", index=False)
+            pd.DataFrame(rows[:-1]).to_csv(
+                data_dir / "PREFIX.csv",
+                index=False,
+            )
+            full = SnapshotDataset.from_directory(data_dir, "FULL")
+            prefix = SnapshotDataset.from_directory(data_dir, "PREFIX")
+
+        regime_names = (
+            "frontAtmIvZScore16",
+            "frontAtmIvZScore16Coverage",
+            "volatilityRiskPremiumZScore16",
+            "volatilityRiskPremiumZScore16Coverage",
+        )
+        for index in range(len(prefix)):
+            for name in regime_names:
+                self.assertAlmostEqual(
+                    full.snapshots[index].frame.iloc[0][name],
+                    prefix.snapshots[index].frame.iloc[0][name],
+                )
+
+        fourth = full.snapshots[4].frame.iloc[0]
+        prior_iv = np.asarray(iv_values[:4])
+        self.assertAlmostEqual(
+            fourth["frontAtmIvZScore16"],
+            (iv_values[4] - prior_iv.mean()) / prior_iv.std(),
+        )
+        self.assertEqual(fourth["frontAtmIvZScore16Coverage"], 4 / 16)
+
+        eighth = full.snapshots[8].frame.iloc[0]
+        prior_premium = np.asarray([
+            full.snapshots[index].frame.iloc[0]["atmIvMinusRealizedVol4"]
+            for index in range(4, 8)
+        ])
+        self.assertAlmostEqual(
+            eighth["volatilityRiskPremiumZScore16"],
+            (
+                eighth["atmIvMinusRealizedVol4"]
+                - prior_premium.mean()
+            ) / prior_premium.std(),
+        )
+        self.assertEqual(
+            eighth["volatilityRiskPremiumZScore16Coverage"],
+            4 / 16,
+        )
+        self.assertEqual(
+            full.snapshots[-1].frame.iloc[0]["frontAtmIvZScore16"],
+            8.0,
+        )
