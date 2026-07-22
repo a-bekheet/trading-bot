@@ -32,6 +32,7 @@ from trading_bot.training.trainer import (
     _parser,
     _sample_rollout_bounds,
     _symbols_from_args,
+    _volatility_stratified_start_pools,
     aggregate_selection_scores,
     benchmark_recurrent_inference,
     evaluate_recurrent_policy,
@@ -335,6 +336,15 @@ class TrainerTests(TestCase):
                 "mode": "stateful_tbptt",
                 "chunk_length": 2,
                 "padding": "right_only_ignored",
+                "rollout_start_sampling": {
+                    "requested": "uniform",
+                    "random_start": True,
+                    "volatility_feature": "realizedVol16",
+                    "coverage_requirement": "realizedVol16Coverage >= 1",
+                    "quantile_bins": 3,
+                    "fallback": "uniform_when_strata_unavailable",
+                    "scope": "training_partition_only",
+                },
                 "burn_in": {
                     "maximum_steps": 8,
                     "mode": "causal_no_op_context",
@@ -503,6 +513,7 @@ class TrainerTests(TestCase):
             sequence_length=2,
             max_steps=2,
             random_start=True,
+            start_sampling="volatility_stratified",
             burn_in_steps=3,
             ppo_epochs=1,
             evaluation_interval=5,
@@ -534,6 +545,112 @@ class TrainerTests(TestCase):
             [item["burn_in_start_index"] for item in metrics],
             [start - min(3, start) for start in expected_starts],
         )
+        self.assertTrue(all(
+            item["rollout_start_sampling_effective"] == "uniform"
+            for item in metrics
+        ))
+        self.assertTrue(all(
+            item["rollout_start_sampling_fallback_reason"]
+            == "insufficient_fully_covered_distinct_volatility_starts"
+            for item in metrics
+        ))
+
+    def test_volatility_stratified_start_pools_are_causal_and_balanced(self):
+        source = demo_dataset().snapshots[0].frame
+        snapshots = []
+        for index in range(12):
+            frame = source.copy()
+            timestamp = f"2026-07-21T14:{index:02d}:00+00:00"
+            frame["collectedAt"] = timestamp
+            frame["realizedVol16"] = 0.1 + index * 0.01
+            frame["realizedVol16Coverage"] = 1.0
+            snapshots.append(Snapshot(timestamp, frame))
+        env = OptionsEnv(
+            SnapshotDataset(tuple(snapshots), "AAPL"),
+            slot_count=2,
+        )
+
+        pools = _volatility_stratified_start_pools(env, 2, 16, 3)
+
+        self.assertEqual(pools, ((0, 1, 2, 3), (4, 5, 6), (7, 8, 9)))
+        first_rng = np.random.default_rng(19)
+        second_rng = np.random.default_rng(19)
+        first = [
+            _sample_rollout_bounds(12, 2, True, first_rng, pools)[0]
+            for _ in range(300)
+        ]
+        second = [
+            _sample_rollout_bounds(12, 2, True, second_rng, pools)[0]
+            for _ in range(300)
+        ]
+        self.assertEqual(first, second)
+        counts = [
+            sum(start in pool for start in first)
+            for pool in pools
+        ]
+        self.assertTrue(all(70 <= count <= 130 for count in counts))
+
+        for snapshot in snapshots:
+            snapshot.frame["realizedVol16Coverage"] = 0.0
+        self.assertEqual(
+            _volatility_stratified_start_pools(env, 2, 16, 3),
+            (),
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_training_records_effective_volatility_stratified_starts(self):
+        source = demo_dataset().snapshots[0].frame
+        snapshots = []
+        for index in range(12):
+            frame = source.copy()
+            timestamp = f"2026-07-21T14:{index:02d}:00+00:00"
+            frame["collectedAt"] = timestamp
+            frame["realizedVol16"] = 0.1 + index * 0.01
+            frame["realizedVol16Coverage"] = 1.0
+            snapshots.append(Snapshot(timestamp, frame))
+        env = OptionsEnv(
+            SnapshotDataset(tuple(snapshots), "AAPL"),
+            slot_count=2,
+        )
+        observation, _ = env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=env.action_shape[1],
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+        )
+
+        _, metrics = train_actor_critic(
+            env,
+            recurrent,
+            TrainingConfig(
+                episodes=3,
+                sequence_length=2,
+                max_steps=2,
+                start_sampling="volatility_stratified",
+                volatility_regime_bins=3,
+                ppo_epochs=1,
+                evaluation_interval=3,
+                seed=29,
+            ),
+        )
+
+        self.assertTrue(all(
+            item["rollout_start_sampling_requested"]
+            == "volatility_stratified"
+            for item in metrics
+        ))
+        self.assertTrue(all(
+            item["rollout_start_sampling_effective"]
+            == "volatility_stratified"
+            for item in metrics
+        ))
+        self.assertTrue(all(
+            item["rollout_start_regime_bin_count"] == 3
+            and item["rollout_start_regime_bin"] in {0, 1, 2}
+            for item in metrics
+        ))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_burn_in_batches_causal_context_without_gradients_or_positions(self):
@@ -667,6 +784,17 @@ class TrainerTests(TestCase):
             TrainingConfig(time_aware_discounting=1)
         with self.assertRaisesRegex(ValueError, "discount_reference_seconds"):
             TrainingConfig(discount_reference_seconds=0)
+        with self.assertRaisesRegex(ValueError, "start_sampling"):
+            TrainingConfig(start_sampling="future_aware")
+        with self.assertRaisesRegex(ValueError, "volatility_regime_bins"):
+            TrainingConfig(volatility_regime_bins=1)
+        with self.assertRaisesRegex(ValueError, "volatility_regime_window"):
+            TrainingConfig(volatility_regime_window=8)
+        with self.assertRaisesRegex(ValueError, "requires random_start"):
+            TrainingConfig(
+                random_start=False,
+                start_sampling="volatility_stratified",
+            )
         for invalid in (-1, 1.5, True):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(
                 ValueError,

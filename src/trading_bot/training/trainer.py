@@ -16,6 +16,7 @@ import numpy as np
 
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.evaluation import EpisodeReport, run_episode
+from trading_bot.training.features import REALIZED_VOL_WINDOWS
 from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_actor_critic
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import (
@@ -27,7 +28,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v40"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v41"
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,9 @@ class TrainingConfig:
     seed: int = 7
     max_steps: int | None = 128
     random_start: bool = True
+    start_sampling: str = "uniform"
+    volatility_regime_window: int = 16
+    volatility_regime_bins: int = 3
     evaluation_interval: int = 5
     selection_patience: int | None = 3
     selection_min_delta: float = 0.0
@@ -122,6 +126,26 @@ class TrainingConfig:
             )
         if not isinstance(self.random_start, bool):
             raise ValueError("random_start must be a boolean")
+        if self.start_sampling not in {"uniform", "volatility_stratified"}:
+            raise ValueError(
+                "start_sampling must be uniform or volatility_stratified"
+            )
+        if (
+            self.volatility_regime_window not in REALIZED_VOL_WINDOWS
+        ):
+            raise ValueError(
+                "volatility_regime_window must be an available realized-volatility window"
+            )
+        if (
+            not isinstance(self.volatility_regime_bins, int)
+            or isinstance(self.volatility_regime_bins, bool)
+            or self.volatility_regime_bins < 2
+        ):
+            raise ValueError("volatility_regime_bins must be at least two")
+        if not self.random_start and self.start_sampling != "uniform":
+            raise ValueError(
+                "volatility_stratified start sampling requires random_start"
+            )
         if self.evaluation_interval < 1:
             raise ValueError("evaluation_interval must be positive")
         if self.selection_patience is not None and self.selection_patience < 1:
@@ -490,6 +514,7 @@ def _sample_rollout_bounds(
     max_steps: int | None,
     random_start: bool,
     rng: np.random.Generator,
+    start_pools: tuple[tuple[int, ...], ...] = (),
 ) -> tuple[int, int]:
     """Choose a reproducible causal training segment inside one partition."""
     if dataset_length < 2:
@@ -501,12 +526,76 @@ def _sample_rollout_bounds(
         else min(max_steps, available_steps)
     )
     latest_start = available_steps - rollout_steps
-    start = (
-        int(rng.integers(0, latest_start + 1))
-        if random_start and latest_start > 0
-        else 0
-    )
+    if start_pools:
+        if not random_start or latest_start <= 0:
+            raise ValueError("start pools require a random start range")
+        if any(
+            not pool
+            or any(start < 0 or start > latest_start for start in pool)
+            for pool in start_pools
+        ):
+            raise ValueError("start pools are outside the rollout range")
+        pool = start_pools[int(rng.integers(0, len(start_pools)))]
+        start = int(pool[int(rng.integers(0, len(pool)))])
+    else:
+        start = (
+            int(rng.integers(0, latest_start + 1))
+            if random_start and latest_start > 0
+            else 0
+        )
     return start, rollout_steps
+
+
+def _volatility_stratified_start_pools(
+    env: OptionsEnv,
+    max_steps: int | None,
+    volatility_window: int,
+    bin_count: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Build equal-probability causal realized-volatility start strata."""
+    available_steps = len(env.dataset) - 1
+    rollout_steps = (
+        available_steps
+        if max_steps is None
+        else min(max_steps, available_steps)
+    )
+    latest_start = available_steps - rollout_steps
+    if latest_start <= 0:
+        return ()
+    candidates = []
+    volatility_name = f"realizedVol{volatility_window}"
+    coverage_name = f"{volatility_name}Coverage"
+    for start in range(latest_start + 1):
+        frame = env.dataset.snapshots[start].frame
+        if volatility_name not in frame or coverage_name not in frame:
+            continue
+        try:
+            coverage = float(frame[coverage_name].iat[0])
+            volatility = float(frame[volatility_name].iat[0])
+        except (TypeError, ValueError):
+            continue
+        if (
+            math.isfinite(coverage)
+            and coverage >= 1.0
+            and math.isfinite(volatility)
+            and volatility >= 0.0
+        ):
+            candidates.append((volatility, start))
+    if len(candidates) < bin_count:
+        return ()
+    unique_values = {value for value, _ in candidates}
+    if len(unique_values) < bin_count:
+        return ()
+    candidates.sort()
+    partitions = np.array_split(
+        np.asarray([start for _, start in candidates], dtype=np.int64),
+        bin_count,
+    )
+    return tuple(
+        tuple(int(start) for start in partition)
+        for partition in partitions
+        if len(partition)
+    )
 
 
 def _burn_in_recurrent_context(
@@ -639,6 +728,19 @@ def train_actor_critic(
                     "training environment is shorter than an enabled "
                     "auxiliary horizon"
                 )
+    start_pools_by_environment = tuple(
+        (
+            _volatility_stratified_start_pools(
+                environment,
+                config.max_steps,
+                config.volatility_regime_window,
+                config.volatility_regime_bins,
+            )
+            if config.start_sampling == "volatility_stratified"
+            else ()
+        )
+        for environment in training_envs
+    )
     selection_scope = (
         (
             "in_sample_universe_research_demo"
@@ -673,11 +775,21 @@ def train_actor_critic(
             ).tolist()
         environment_index = environment_order[cycle_position]
         episode_env = training_envs[environment_index]
+        start_pools = start_pools_by_environment[environment_index]
         rollout_start, rollout_step_limit = _sample_rollout_bounds(
             len(episode_env.dataset),
             config.max_steps,
             config.random_start,
             rollout_rng,
+            start_pools,
+        )
+        rollout_start_regime_bin = next(
+            (
+                index
+                for index, pool in enumerate(start_pools)
+                if rollout_start in pool
+            ),
+            None,
         )
         burn_in_steps = min(config.burn_in_steps, rollout_start)
         burn_in_start = rollout_start - burn_in_steps
@@ -1095,6 +1207,20 @@ def train_actor_critic(
                 "steps": steps,
                 "rollout_start_index": rollout_start,
                 "rollout_end_index": rollout_start + steps,
+                "rollout_start_sampling_requested": config.start_sampling,
+                "rollout_start_sampling_effective": (
+                    "volatility_stratified"
+                    if start_pools
+                    else "uniform"
+                ),
+                "rollout_start_sampling_fallback_reason": (
+                    "insufficient_fully_covered_distinct_volatility_starts"
+                    if config.start_sampling == "volatility_stratified"
+                    and not start_pools
+                    else None
+                ),
+                "rollout_start_regime_bin": rollout_start_regime_bin,
+                "rollout_start_regime_bin_count": len(start_pools),
                 "burn_in_start_index": burn_in_start,
                 "burn_in_steps": burn_in_steps,
                 "total_reward": float(sum(rewards)),
@@ -1281,6 +1407,19 @@ def checkpoint_manifest(
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
             "padding": "right_only_ignored",
+            "rollout_start_sampling": {
+                "requested": training_config.start_sampling,
+                "random_start": training_config.random_start,
+                "volatility_feature": (
+                    f"realizedVol{training_config.volatility_regime_window}"
+                ),
+                "coverage_requirement": (
+                    f"realizedVol{training_config.volatility_regime_window}Coverage >= 1"
+                ),
+                "quantile_bins": training_config.volatility_regime_bins,
+                "fallback": "uniform_when_strata_unavailable",
+                "scope": "training_partition_only",
+            },
             "burn_in": {
                 "maximum_steps": training_config.burn_in_steps,
                 "mode": "causal_no_op_context",
@@ -1503,6 +1642,22 @@ def _parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+    parser.add_argument(
+        "--start-sampling",
+        choices=("uniform", "volatility_stratified"),
+        default="uniform",
+        help=(
+            "sample training-window starts uniformly or equally across "
+            "causal realized-volatility strata"
+        ),
+    )
+    parser.add_argument("--volatility-regime-bins", type=int, default=3)
+    parser.add_argument(
+        "--volatility-regime-window",
+        type=int,
+        choices=REALIZED_VOL_WINDOWS,
+        default=16,
+    )
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=64)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
@@ -1654,6 +1809,9 @@ def main() -> None:
         seed=args.seed,
         max_steps=args.max_steps,
         random_start=args.random_start,
+        start_sampling=args.start_sampling,
+        volatility_regime_window=args.volatility_regime_window,
+        volatility_regime_bins=args.volatility_regime_bins,
         ppo_epochs=args.ppo_epochs,
         minibatch_size=args.minibatch_size,
         gamma=args.gamma,

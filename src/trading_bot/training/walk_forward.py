@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import statistics
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -31,6 +32,7 @@ from trading_bot.training.evaluation import (
     run_episode,
     run_episode_trace,
 )
+from trading_bot.training.features import REALIZED_VOL_WINDOWS
 from trading_bot.training.recurrent import (
     RecurrentConfig,
     build_recurrent_actor_critic,
@@ -53,7 +55,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v43"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v44"
 
 
 @dataclass(frozen=True)
@@ -183,6 +185,7 @@ class ModelSpec:
     auxiliary_horizons: tuple[int, ...] = (1,)
     time_aware_discounting: bool | None = None
     burn_in_steps: int | None = None
+    start_sampling: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid", "mixture"}:
@@ -246,6 +249,15 @@ class ModelSpec:
         ):
             raise ValueError(
                 "model burn_in_steps must be a non-negative integer or None"
+            )
+        if self.start_sampling not in {
+            None,
+            "uniform",
+            "volatility_stratified",
+        }:
+            raise ValueError(
+                "model start_sampling must be uniform, "
+                "volatility_stratified, or None"
             )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
@@ -387,6 +399,38 @@ def _selected_metric(metrics: list[dict[str, Any]]) -> dict[str, Any]:
     return selected
 
 
+def _start_sampling_evidence(
+    metrics: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize training-only window-start coverage for one replicate."""
+    effective = Counter(
+        str(item["rollout_start_sampling_effective"])
+        for item in metrics
+    )
+    regime_bins = Counter(
+        int(item["rollout_start_regime_bin"])
+        for item in metrics
+        if item["rollout_start_regime_bin"] is not None
+    )
+    fallbacks = Counter(
+        str(item["rollout_start_sampling_fallback_reason"])
+        for item in metrics
+        if item["rollout_start_sampling_fallback_reason"] is not None
+    )
+    return {
+        "requested": metrics[0]["rollout_start_sampling_requested"],
+        "effective_episode_counts": dict(sorted(effective.items())),
+        "regime_bin_episode_counts": {
+            str(key): value for key, value in sorted(regime_bins.items())
+        },
+        "fallback_episode_counts": dict(sorted(fallbacks.items())),
+        "available_regime_bin_count": max(
+            int(item["rollout_start_regime_bin_count"])
+            for item in metrics
+        ),
+    }
+
+
 def _training_seed_aggregate(
     runs: Sequence[dict[str, Any]],
     config: WalkForwardConfig,
@@ -456,6 +500,10 @@ def _select_seed_robust_group(
                 group["representative"][
                     "model_spec"
                 ].time_aware_discounting is False
+            ),
+            int(
+                group["representative"]["model_spec"].start_sampling
+                == "uniform"
             ),
             group["representative"]["model_id"],
         ),
@@ -547,6 +595,11 @@ def run_walk_forward_training(
                     if candidate.burn_in_steps is None
                     else candidate.burn_in_steps
                 ),
+                start_sampling=(
+                    fold_training.start_sampling
+                    if candidate.start_sampling is None
+                    else candidate.start_sampling
+                ),
             )
             for seed_offset in walk_forward_config.training_seed_offsets:
                 candidate_training = replace(
@@ -600,6 +653,9 @@ def run_walk_forward_training(
                     "recurrent_config": recurrent_config,
                     "model": model,
                     "metrics": metrics,
+                    "start_sampling_evidence": _start_sampling_evidence(
+                        metrics
+                    ),
                     "training_config": candidate_training,
                     "parameter_count": resolved_parameter_count,
                     "inference_latency": inference_latency,
@@ -662,6 +718,10 @@ def run_walk_forward_training(
                         candidate,
                         burn_in_steps=None,
                     ).identifier,
+                    "start_sampling_reference_model_id": replace(
+                        candidate,
+                        start_sampling=None,
+                    ).identifier,
                 })
 
         grouped_runs = []
@@ -717,6 +777,9 @@ def run_walk_forward_training(
                 "effective_burn_in_steps": run[
                     "training_config"
                 ].burn_in_steps,
+                "requested_start_sampling": run[
+                    "training_config"
+                ].start_sampling,
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": group["latency_eligible"],
@@ -740,6 +803,9 @@ def run_walk_forward_training(
                         "optimizer_updates": replicate["optimizer_updates"],
                         "inference_latency": replicate["inference_latency"],
                         "deployment_eligible": replicate["latency_eligible"],
+                        "start_sampling": replicate[
+                            "start_sampling_evidence"
+                        ],
                     }
                     for replicate in group["replicates"]
                 ],
@@ -796,6 +862,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_time_aware_discounting": None,
                 "validation_reward_lift_vs_burn_in": None,
                 "validation_score_lift_vs_burn_in": None,
+                "validation_reward_lift_vs_stratified_starts": None,
+                "validation_score_lift_vs_stratified_starts": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -911,6 +979,23 @@ def run_walk_forward_training(
                 result["validation_reward_lift_vs_burn_in"] = (
                     aggregate_reward
                     - validation_rewards[run["burn_in_reference_model_id"]]
+                )
+            start_sampling_reference = validation_scores.get(
+                run["start_sampling_reference_model_id"]
+            )
+            if (
+                run["model_spec"].start_sampling == "uniform"
+                and fold_training.start_sampling == "volatility_stratified"
+                and start_sampling_reference is not None
+            ):
+                result["validation_score_lift_vs_stratified_starts"] = (
+                    aggregate_score - start_sampling_reference
+                )
+                result["validation_reward_lift_vs_stratified_starts"] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["start_sampling_reference_model_id"]
+                    ]
                 )
         model = winning_run["model"]
         metrics = winning_run["metrics"]
@@ -1119,6 +1204,7 @@ def run_walk_forward_training(
                     "optimizer_updates",
                     "burn_in_ablation",
                     "fixed_step_discount_ablation",
+                    "uniform_start_sampling_ablation",
                     "model_id",
                 ],
                 "eligibility_constraint": {
@@ -1313,6 +1399,22 @@ def _parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+    parser.add_argument(
+        "--start-sampling",
+        choices=("uniform", "volatility_stratified"),
+        default="uniform",
+        help=(
+            "sample training starts uniformly or across causal realized-"
+            "volatility strata; validation and test stay chronological"
+        ),
+    )
+    parser.add_argument("--volatility-regime-bins", type=int, default=3)
+    parser.add_argument(
+        "--volatility-regime-window",
+        type=int,
+        choices=REALIZED_VOL_WINDOWS,
+        default=16,
+    )
     parser.add_argument("--evaluation-interval", type=int, default=5)
     parser.add_argument(
         "--selection-patience",
@@ -1390,6 +1492,14 @@ def _parser() -> argparse.ArgumentParser:
         "--burn-in-ablation",
         action="store_true",
         help="add matched candidates with recurrent burn-in disabled",
+    )
+    parser.add_argument(
+        "--start-sampling-ablation",
+        action="store_true",
+        help=(
+            "add matched uniform-start candidates for volatility-stratified "
+            "training"
+        ),
     )
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument(
@@ -1557,6 +1667,16 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             replace(spec, burn_in_steps=0)
             for spec in full_specs
         )
+    if args.start_sampling_ablation:
+        if args.start_sampling != "volatility_stratified":
+            raise ValueError(
+                "--start-sampling-ablation requires "
+                "--start-sampling volatility_stratified"
+            )
+        specs.extend(
+            replace(spec, start_sampling="uniform")
+            for spec in full_specs
+        )
     return _normalize_model_specs(specs)
 
 
@@ -1579,6 +1699,9 @@ def main() -> None:
                 discount_reference_seconds=args.discount_reference_seconds,
                 max_steps=args.max_steps,
                 random_start=args.random_start,
+                start_sampling=args.start_sampling,
+                volatility_regime_window=args.volatility_regime_window,
+                volatility_regime_bins=args.volatility_regime_bins,
                 evaluation_interval=args.evaluation_interval,
                 selection_patience=(
                     None

@@ -622,6 +622,28 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.56 adds optional volatility-stratified recurrent training starts for PPO and
+REINFORCE across GRU, LSTM, hybrid, mixture, graph, and shared-universe models.
+Sampling uses only fully covered backward-looking realized volatility inside
+the training partition. Every episode records requested/effective sampling,
+the selected regime bin, and available-bin count; checkpoint sidecars and all
+candidate replicates retain aggregate bin evidence. A matched uniform-start
+tournament candidate reports its validation lift, and exact ties retain the
+configured stratified method only after validation, latency, capacity, and
+training-work comparisons.
+
+Synthetic tests exercise three distinct strata and deterministic sampling. The
+current local GOOG integration data has only 15 usable snapshots and identically
+zero covered four-snapshot realized volatility, so the real two-seed smoke
+correctly recorded uniform fallback for both candidates. Both validation scores
+and the selected held-out return were zero with no trades. This exposes the
+current data limitation and validates fallback/artifact plumbing; it does not
+show regime-sampling lift or alpha.
+
+Checkpoint, single-ticker walk-forward, and universe walk-forward schemas
+advance to v41, v44, and v28. Feature and environment schemas remain
+`dimensionless.v17` and v22 because inference state is unchanged.
+
 v0.55 makes state-dependent trading capacity visible to the recurrent policy
 and value estimator without appending the full action mask. Two bounded values
 per option slot summarize the currently feasible buy and sell quantity buckets;
@@ -786,6 +808,17 @@ candidates. `--selection-patience 0` disables this behavior, while
 `--selection-min-delta` requires a meaningful reward increase before resetting
 patience. Each metric row and checkpoint manifest records the stopping state.
 These are machine-specific throughput choices, not alpha results.
+
+For long, non-stationary training partitions, opt into causal regime-balanced
+starts with `--start-sampling volatility_stratified`. The sampler sorts only
+fully covered training-partition starts by `realizedVol16` (or the declared
+`--volatility-regime-window 4`), divides them into a configurable number of
+quantile strata, chooses a stratum uniformly, and then chooses a start within
+it. `--volatility-regime-bins` defaults to three. If there are too few covered
+or distinct values, it records and uses a uniform fallback. Validation and test
+remain complete chronological paths. Add `--start-sampling-ablation` to compare
+an otherwise matched uniform-start candidate using validation only. This changes
+training exposure, not the policy architecture or inference latency.
 
 Add `--encoder graph` to run masked message passing over the option surface,
 `--encoder graph_set` to use a permutation-equivariant fixed-graph set policy,
@@ -1011,6 +1044,8 @@ train-walk-forward \
   --latency-warmup-iterations 10 \
   --latency-measured-iterations 100 \
   --max-median-inference-latency-us 500 \
+  --start-sampling volatility_stratified \
+  --start-sampling-ablation \
   --ablation surface_wings \
   --ablation volatility_regime
 ```

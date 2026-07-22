@@ -390,6 +390,27 @@ class WalkForwardTrainingTests(TestCase):
         with self.assertRaisesRegex(ValueError, "burn_in_steps"):
             ModelSpec(burn_in_steps=True)
 
+    def test_cli_builds_matched_start_sampling_ablation(self):
+        args = _parser().parse_args([
+            "--start-sampling", "volatility_stratified",
+            "--volatility-regime-window", "4",
+            "--volatility-regime-bins", "4",
+            "--start-sampling-ablation",
+        ])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(args.volatility_regime_bins, 4)
+        self.assertEqual(args.volatility_regime_window, 4)
+        self.assertIsNone(specs[0].start_sampling)
+        self.assertEqual(specs[1].start_sampling, "uniform")
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--start-sampling-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "start_sampling"):
+            ModelSpec(start_sampling="future_aware")
+
     def test_cli_builds_matched_auxiliary_loss_ablation(self):
         args = _parser().parse_args([
             "--auxiliary-coefficient",
@@ -728,6 +749,7 @@ class WalkForwardTrainingTests(TestCase):
                 "optimizer_updates",
                 "burn_in_ablation",
                 "fixed_step_discount_ablation",
+                "uniform_start_sampling_ablation",
                 "model_id",
             ],
         )

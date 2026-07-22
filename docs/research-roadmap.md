@@ -39,6 +39,7 @@ Every candidate must eventually pass:
 | [Volatility Surface Reconstruction using Deep Learning under No-Arbitrage Constraints (2026)](https://arxiv.org/abs/2605.24031) | In a sparse/noisy reconstruction study, coordinate-aware attention and explicit calendar/butterfly penalties reduce reconstruction and consistency errors. Reconstruction accuracy does not imply a profitable trading representation. | Keep the compact masked attention candidate and add observed-strike butterfly diagnostics. Defer reconstructed quotes and calendar constraints until the repository has forward-consistent European-equivalent inputs and enough history for separate reconstruction validation. |
 | [Recurrent Experience Replay in Distributed Reinforcement Learning (ICLR 2019)](https://deepmind.google/research/publications/recurrent-experience-replay-in-distributed-reinforcement-learning/) | Recurrent training on partial sequences must address inaccurate boundary hidden states; a prefix can reconstruct state before loss-bearing transitions. | Random training windows now use a bounded causal no-op prefix, one batched no-gradient recurrent call, explicit metrics, and a validation-only disabled ablation. This is on-policy context reconstruction, not replay. |
 | [AlphaZeroBeta: Deep Reinforcement Learning for Market-Neutral Portfolios (2026)](https://arxiv.org/abs/2607.18001) | A current finance study combines recurrent PPO, transaction-cost-aware objectives, and rolling walk-forward evaluation, but its reported equity-index results do not establish option alpha here. | Keep recurrent PPO in the tournament, require cost stress and walk-forward evidence, and treat market-neutrality controls as a later declared objective rather than importing performance claims. |
+| [Adaptive and Regime-Aware RL for Portfolio Optimization (2025)](https://arxiv.org/abs/2509.14385) | The study compares PPO and recurrent policies under latent regime changes and stress, but its portfolio results do not establish that reweighting option trajectories improves hedging. | Add training-only sampling across fully covered causal realized-volatility quantiles, an explicit uniform fallback, and a matched validation ablation. Keep validation/test chronology and weights unchanged. |
 | [Sizing the Risk: Kelly, VIX, and Hybrid Approaches in Put-Writing (2025)](https://arxiv.org/abs/2508.16598) | The preprint treats implied-versus-realized volatility and volatility-regime scaling as interacting inputs for put-writing size, but its SPXW backtest does not establish portability to equity options. | Add bounded prior-only ATM-IV and volatility-premium normalization as two compact state candidates. Keep sizing bounded by collateral and require the named normalization ablation, costs, and held-out folds before retaining either signal. |
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | The collateralized liability foundation now exists. Add CVaR or learned P&L-distribution objectives only after enough independent paths and lifecycle validation exist; the current tiny research demo cannot identify tail risk. |
@@ -171,9 +172,10 @@ improves trading performance.
 
 The market state now includes front-expiry ATM IV and its difference from
 backward-only 4/16-snapshot realized volatility, each paired with the existing
-history coverage. PPO training samples seeded bounded windows across the
-training partition instead of replaying only its first regime. Both choices
-improve sample efficiency; their value still requires walk-forward ablation.
+history coverage. PPO and REINFORCE sample seeded bounded windows across the
+training partition instead of replaying only its prefix and may optionally
+balance fully covered realized-volatility strata. These are sample-efficiency
+hypotheses whose value still requires walk-forward ablation.
 
 Two additional market scalars normalize front ATM IV and the short-window
 implied-minus-realized premium using valid values from 16 strictly prior
@@ -337,6 +339,15 @@ REINFORCE convert their configured per-reference-interval factors to
 unchanged. Each episode records transition-time and effective-factor ranges,
 and walk-forward tournaments can include a matched fixed-step discount
 candidate. This corrects objective semantics; it is not evidence of alpha.
+
+Training windows can now sample uniformly across deterministic quantile strata
+of fully covered backward-only 4- or 16-snapshot realized volatility. The mode
+applies to PPO and REINFORCE with every recurrent/graph family and shared
+universe training, while validation and test remain chronological. Episode,
+checkpoint, and candidate artifacts retain requested/effective mode and bin
+counts; insufficient coverage or distinct values triggers a recorded uniform
+fallback. A matched uniform-start validation candidate is required before
+retaining the reweighting. This is a regime-coverage hypothesis, not alpha.
 
 ## Prioritized implementation sequence
 

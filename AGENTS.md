@@ -379,6 +379,16 @@ Training rollouts default to seeded, uniformly sampled windows of at most 128
 transitions inside the training dataset. Persist each start/end index in episode
 metrics. Random starts may never cross the supplied partition, affect validation
 or test evaluation, or replace the deterministic full-partition selection run.
+Optional `volatility_stratified` starts may use only the declared backward-only
+4- or 16-snapshot realized-volatility feature already computed causally for the
+training partition. Require full coverage, at least one candidate per requested
+bin, and at least as many distinct values as bins. Sort deterministically into
+quantile strata, sample strata uniformly and starts uniformly within a stratum,
+and fall back explicitly to uniform when those conditions fail. Persist the
+requested/effective mode, bin, bin count, and replicate-level counts. Compare a
+matched uniform candidate on validation before retaining stratification; never
+rebalance validation or held-out paths, and never describe a fallback run as
+stratified evidence.
 Before a sampled nonzero start, warm recurrent state on at most the configured
 number of immediately preceding observations. Advance that prefix only with
 hold actions so the zero-position random-window contract remains coherent;

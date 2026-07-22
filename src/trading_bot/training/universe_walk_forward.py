@@ -49,6 +49,7 @@ from trading_bot.training.walk_forward import (
     _parser as single_parser,
     _selected_metric,
     _select_seed_robust_group,
+    _start_sampling_evidence,
     _training_seed_aggregate,
     _walk_forward_config_from_args,
     resolve_recurrent_config,
@@ -56,7 +57,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v27"
+    "research-demo.universe-walk-forward.v28"
 )
 
 
@@ -421,6 +422,11 @@ def run_universe_walk_forward_training(
                     if candidate.burn_in_steps is None
                     else candidate.burn_in_steps
                 ),
+                start_sampling=(
+                    fold_training.start_sampling
+                    if candidate.start_sampling is None
+                    else candidate.start_sampling
+                ),
             )
             for seed_offset in walk_forward_config.training_seed_offsets:
                 candidate_training = replace(
@@ -469,6 +475,9 @@ def run_universe_walk_forward_training(
                     "recurrent_config": recurrent_config,
                     "model": model,
                     "metrics": metrics,
+                    "start_sampling_evidence": _start_sampling_evidence(
+                        metrics
+                    ),
                     "training_config": candidate_training,
                     "parameter_count": parameter_count,
                     "inference_latency": inference_latency,
@@ -516,6 +525,10 @@ def run_universe_walk_forward_training(
                     "burn_in_reference_model_id": replace(
                         candidate,
                         burn_in_steps=None,
+                    ).identifier,
+                    "start_sampling_reference_model_id": replace(
+                        candidate,
+                        start_sampling=None,
                     ).identifier,
                 })
         grouped_runs = []
@@ -594,6 +607,9 @@ def run_universe_walk_forward_training(
                 "effective_burn_in_steps": run[
                     "training_config"
                 ].burn_in_steps,
+                "requested_start_sampling": run[
+                    "training_config"
+                ].start_sampling,
                 "parameter_count": run["parameter_count"],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
@@ -660,6 +676,9 @@ def run_universe_walk_forward_training(
                         "optimizer_updates": replicate["optimizer_updates"],
                         "inference_latency": replicate["inference_latency"],
                         "deployment_eligible": replicate["latency_eligible"],
+                        "start_sampling": replicate[
+                            "start_sampling_evidence"
+                        ],
                     }
                     for replicate in group["replicates"]
                 ],
@@ -673,6 +692,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_time_aware_discounting": None,
                 "validation_score_lift_vs_burn_in": None,
                 "validation_reward_lift_vs_burn_in": None,
+                "validation_score_lift_vs_stratified_starts": None,
+                "validation_reward_lift_vs_stratified_starts": None,
                 "selection": {
                     "scope": selected["evaluation_scope"],
                     "episode": selected["episode"],
@@ -781,6 +802,23 @@ def run_universe_walk_forward_training(
                 result["validation_reward_lift_vs_burn_in"] = (
                     aggregate_reward
                     - validation_rewards[run["burn_in_reference_model_id"]]
+                )
+            start_sampling_reference = validation_scores.get(
+                run["start_sampling_reference_model_id"]
+            )
+            if (
+                run["model_spec"].start_sampling == "uniform"
+                and fold_training.start_sampling == "volatility_stratified"
+                and start_sampling_reference is not None
+            ):
+                result["validation_score_lift_vs_stratified_starts"] = (
+                    aggregate_score - start_sampling_reference
+                )
+                result["validation_reward_lift_vs_stratified_starts"] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["start_sampling_reference_model_id"]
+                    ]
                 )
             candidate_results.append(result)
 
@@ -918,6 +956,7 @@ def run_universe_walk_forward_training(
                     "optimizer_updates",
                     "burn_in_ablation",
                     "fixed_step_discount_ablation",
+                    "uniform_start_sampling_ablation",
                     "model_id",
                 ],
                 "latency_constraint": {
@@ -1045,6 +1084,9 @@ def main() -> None:
                 discount_reference_seconds=args.discount_reference_seconds,
                 max_steps=args.max_steps,
                 random_start=args.random_start,
+                start_sampling=args.start_sampling,
+                volatility_regime_window=args.volatility_regime_window,
+                volatility_regime_bins=args.volatility_regime_bins,
                 evaluation_interval=args.evaluation_interval,
                 selection_patience=(
                     None
