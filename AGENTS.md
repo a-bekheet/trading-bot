@@ -207,7 +207,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v10`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v11`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
 is expressed in years, held quantity and unrealized return are signed-log
@@ -217,6 +217,15 @@ must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
 finite-value tests, and a checkpoint-schema bump; old weights must never be
 silently loaded against a changed feature layout.
+
+Per-contract dynamics must match `contractSymbol` against the immediately prior
+snapshot. Mid-quote return and relative-spread change require positive,
+non-crossed bid/ask quotes at both endpoints; IV change also requires positive
+IV at both endpoints. Missing or invalid history must produce zero change and a
+zero coverage bit. Do not make these quote-derived signals depend on last-trade
+price, and do not substitute unsigned volume or model-derived Delta changes for
+signed order flow. Keep the five fields in the named `contract_dynamics`
+ablation so their per-slot cost and lift remain measurable.
 
 Market-level term-structure slope/curvature must use executable near-ATM points
 from the current snapshot only. Surface-change features may subtract only the

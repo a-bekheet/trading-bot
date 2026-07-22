@@ -7,6 +7,7 @@ import pandas as pd
 
 from trading_bot.training.dataset import SnapshotDataset
 from trading_bot.training.features import (
+    CONTRACT_DYNAMICS_FEATURES,
     ENGINEERED_FEATURES,
     MARKET_ENGINEERED_FEATURES,
     engineer_snapshot,
@@ -238,6 +239,10 @@ class FeatureSequenceTests(TestCase):
         dynamics_indices = feature_ablation_indices(("surface_dynamics",), 2)
         identity_indices = feature_ablation_indices(("slot_identity",), 2)
         position_indices = feature_ablation_indices(("position_state",), 2)
+        contract_dynamics_indices = feature_ablation_indices(
+            ("contract_dynamics",),
+            2,
+        )
         time_indices = feature_ablation_indices(("time_context",), 2)
         trend_indices = feature_ablation_indices(("price_trend",), 2)
         volatility_indices = feature_ablation_indices(("volatility_regime",), 2)
@@ -248,6 +253,10 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(len(dynamics_indices), 7)
         self.assertEqual(len(identity_indices), 2)
         self.assertEqual(len(position_indices), 6)
+        self.assertEqual(
+            len(contract_dynamics_indices),
+            2 * len(CONTRACT_DYNAMICS_FEATURES),
+        )
         self.assertEqual(len(time_indices), 2)
         self.assertEqual(len(trend_indices), 2)
         self.assertEqual(
@@ -260,6 +269,8 @@ class FeatureSequenceTests(TestCase):
         self.assertFalse(set(trend_indices) & set(time_indices))
         self.assertFalse(set(trend_indices) & set(term_indices))
         self.assertFalse(set(position_indices) & set(identity_indices))
+        self.assertFalse(set(contract_dynamics_indices) & set(position_indices))
+        self.assertFalse(set(contract_dynamics_indices) & set(contract_indices))
         for window in (4, 16):
             coverage_index = MARKET_FEATURES.index(f"realizedVol{window}Coverage")
             self.assertNotIn(coverage_index, trend_indices)
@@ -294,10 +305,81 @@ class FeatureSequenceTests(TestCase):
 
         self.assertEqual(set(ENGINEERED_FEATURES) - set(engineered.columns), set())
         self.assertAlmostEqual(engineered.iloc[0]["underlyingReturn"], .01)
+        self.assertAlmostEqual(engineered.iloc[0]["midPriceLogReturn"], 0)
+        self.assertAlmostEqual(engineered.iloc[0]["spreadPctChange"], 0)
+        self.assertEqual(engineered.iloc[0]["quoteChangeCoverage"], 1)
         self.assertAlmostEqual(engineered.iloc[0]["ivChange"], .05)
+        self.assertEqual(engineered.iloc[0]["ivChangeCoverage"], 1)
         self.assertEqual(engineered.iloc[0]["snapshotGapSeconds"], 60)
         self.assertEqual(engineered.iloc[0]["snapshotGapCoverage"], 1)
         self.assertTrue(np.isfinite(engineered[list(ENGINEERED_FEATURES)].to_numpy()).all())
+
+    def test_contract_dynamics_require_matched_executable_quotes(self):
+        previous = pd.DataFrame([
+            {
+                "collectedAt": "2026-07-21T14:00:00Z",
+                "contractSymbol": "C1",
+                "expiration": "2026-08-21",
+                "bid": 1.0,
+                "ask": 1.2,
+                "lastPrice": np.nan,
+                "strike": 100,
+                "underlyingPrice": 100,
+                "impliedVolatility": 0.20,
+            },
+            {
+                "collectedAt": "2026-07-21T14:00:00Z",
+                "contractSymbol": "C3",
+                "expiration": "2026-08-21",
+                "bid": 0.0,
+                "ask": 1.2,
+                "lastPrice": 1.1,
+                "strike": 100,
+                "underlyingPrice": 100,
+                "impliedVolatility": 0.20,
+            },
+        ])
+        current = pd.DataFrame([
+            {
+                **previous.iloc[0].to_dict(),
+                "collectedAt": "2026-07-21T14:01:00Z",
+                "bid": 1.2,
+                "ask": 1.4,
+                "impliedVolatility": 0.25,
+            },
+            {
+                **previous.iloc[0].to_dict(),
+                "collectedAt": "2026-07-21T14:01:00Z",
+                "contractSymbol": "C2",
+            },
+            {
+                **previous.iloc[1].to_dict(),
+                "collectedAt": "2026-07-21T14:01:00Z",
+                "bid": 1.2,
+                "ask": 1.4,
+                "impliedVolatility": 0.25,
+            },
+        ])
+
+        engineered = engineer_snapshot(current, previous).set_index(
+            "contractSymbol"
+        )
+
+        self.assertAlmostEqual(
+            engineered.loc["C1", "midPriceLogReturn"],
+            np.log(1.3 / 1.1),
+        )
+        self.assertAlmostEqual(
+            engineered.loc["C1", "spreadPctChange"],
+            0.2 / 1.3 - 0.2 / 1.1,
+        )
+        self.assertEqual(engineered.loc["C1", "quoteChangeCoverage"], 1)
+        self.assertAlmostEqual(engineered.loc["C1", "ivChange"], 0.05)
+        self.assertEqual(engineered.loc["C1", "ivChangeCoverage"], 1)
+        np.testing.assert_allclose(
+            engineered.loc[["C2", "C3"], CONTRACT_DYNAMICS_FEATURES],
+            0.0,
+        )
 
     def test_snapshot_gap_requires_a_valid_positive_causal_interval(self):
         current = pd.DataFrame({"collectedAt": ["2026-07-21T14:15:00Z"]})
@@ -470,6 +552,11 @@ class FeatureSequenceTests(TestCase):
                 "volumeLog": 5,
                 "openInterestLog": 6,
                 "quoteAgeSeconds": 60,
+                "midPriceLogReturn": 0.02,
+                "spreadPctChange": -0.03,
+                "quoteChangeCoverage": 1,
+                "ivChange": 0.04,
+                "ivChangeCoverage": 1,
                 "positionQuantity": 2,
                 "positionAveragePrice": 1.2 * scale,
                 "positionUnrealizedReturn": 0.25,
@@ -506,7 +593,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v10")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v11")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

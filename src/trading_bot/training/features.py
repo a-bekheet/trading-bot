@@ -43,13 +43,95 @@ MARKET_ENGINEERED_FEATURES = (
     "atmIvMinusRealizedVol4",
     "atmIvMinusRealizedVol16",
 )
+CONTRACT_DYNAMICS_FEATURES = (
+    "midPriceLogReturn",
+    "spreadPctChange",
+    "quoteChangeCoverage",
+    "ivChange",
+    "ivChangeCoverage",
+)
 ENGINEERED_FEATURES = (
     "midPrice", "spread", "spreadPct", "logMoneyness", "dteDays",
-    "volumeLog", "openInterestLog", "quoteAgeSeconds", "ivChange",
+    "volumeLog", "openInterestLog", "quoteAgeSeconds",
+    *CONTRACT_DYNAMICS_FEATURES,
     "forwardLogMoneyness", "extrinsicValuePct", "atmIv", "ivSkew",
     "atmTermSlope", "putCallIvSpread", "parityResidual",
     *MARKET_ENGINEERED_FEATURES,
 )
+
+
+def _contract_dynamics_features(
+    result: pd.DataFrame,
+    previous: pd.DataFrame | None,
+) -> None:
+    """Add matched-contract changes with explicit point-in-time coverage."""
+    for name in CONTRACT_DYNAMICS_FEATURES:
+        result[name] = 0.0
+    if previous is None or previous.empty or "contractSymbol" not in previous:
+        return
+
+    prior = previous.drop_duplicates("contractSymbol", keep="first").set_index(
+        "contractSymbol"
+    )
+    aligned_prior = prior.reindex(result["contractSymbol"].to_numpy())
+
+    def numeric_values(frame: pd.DataFrame, name: str) -> np.ndarray:
+        if name not in frame:
+            return np.full(len(result), np.nan, dtype=float)
+        return pd.to_numeric(frame[name], errors="coerce").to_numpy(dtype=float)
+
+    prior_bid = numeric_values(aligned_prior, "bid")
+    prior_ask = numeric_values(aligned_prior, "ask")
+    current_bid = numeric_values(result, "bid")
+    current_ask = numeric_values(result, "ask")
+    current_quote_valid = (
+        np.isfinite(current_bid)
+        & np.isfinite(current_ask)
+        & (current_bid > 0)
+        & (current_ask > 0)
+        & (current_bid <= current_ask)
+    )
+    prior_quote_valid = (
+        np.isfinite(prior_bid)
+        & np.isfinite(prior_ask)
+        & (prior_bid > 0)
+        & (prior_ask > 0)
+        & (prior_bid <= prior_ask)
+    )
+    quote_coverage = current_quote_valid & prior_quote_valid
+    current_mid = (current_bid + current_ask) / 2
+    prior_mid = (prior_bid + prior_ask) / 2
+    current_spread_pct = (current_ask - current_bid) / current_mid
+    prior_spread_pct = (prior_ask - prior_bid) / prior_mid
+    result["quoteChangeCoverage"] = quote_coverage.astype(float)
+    covered_quotes = quote_coverage.astype(bool)
+    mid_price_log_return = np.zeros(len(result), dtype=float)
+    spread_pct_change = np.zeros(len(result), dtype=float)
+    mid_price_log_return[covered_quotes] = np.log(
+        current_mid[covered_quotes] / prior_mid[covered_quotes]
+    )
+    spread_pct_change[covered_quotes] = (
+        current_spread_pct[covered_quotes] - prior_spread_pct[covered_quotes]
+    )
+    result["midPriceLogReturn"] = mid_price_log_return
+    result["spreadPctChange"] = spread_pct_change
+
+    current_iv = numeric_values(result, "impliedVolatility")
+    prior_iv = numeric_values(aligned_prior, "impliedVolatility")
+    iv_coverage = (
+        quote_coverage
+        & np.isfinite(current_iv)
+        & np.isfinite(prior_iv)
+        & (current_iv > 0)
+        & (prior_iv > 0)
+    )
+    result["ivChangeCoverage"] = iv_coverage.astype(float)
+    covered_iv = iv_coverage.astype(bool)
+    iv_change = np.zeros(len(result), dtype=float)
+    iv_change[covered_iv] = (
+        current_iv[covered_iv] - prior_iv[covered_iv]
+    )
+    result["ivChange"] = iv_change
 
 
 def realized_volatility_features(
@@ -515,16 +597,11 @@ def engineer_snapshot(
     result["openInterestLog"] = np.log1p(pd.to_numeric(open_interest, errors="coerce").clip(lower=0)).fillna(0.0)
     result["quoteAgeSeconds"] = ((timestamp - last_trade).dt.total_seconds()).clip(lower=0).fillna(0.0)
     result["underlyingReturn"] = 0.0
-    result["ivChange"] = 0.0
     if previous is not None and not previous.empty:
         previous_spot = float(previous["underlyingPrice"].iloc[0])
         current_spot = float(spot.iloc[0]) if np.isfinite(spot.iloc[0]) else previous_spot
         result["underlyingReturn"] = current_spot / previous_spot - 1 if previous_spot else 0.0
-        prior_iv = previous.set_index("contractSymbol")["impliedVolatility"]
-        result["ivChange"] = (
-            pd.to_numeric(result["impliedVolatility"], errors="coerce")
-            - pd.to_numeric(result["contractSymbol"].map(prior_iv), errors="coerce")
-        ).fillna(0.0)
+    _contract_dynamics_features(result, previous)
     for name, value in snapshot_gap_features(result, previous).items():
         result[name] = value
     for name, value in realized_volatility_features(spot_history).items():

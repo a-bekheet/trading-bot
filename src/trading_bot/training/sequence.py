@@ -7,7 +7,10 @@ from dataclasses import dataclass
 import numpy as np
 
 from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES
-from trading_bot.training.features import REALIZED_VOL_WINDOWS
+from trading_bot.training.features import (
+    CONTRACT_DYNAMICS_FEATURES,
+    REALIZED_VOL_WINDOWS,
+)
 from trading_bot.training.schemas import Observation
 
 
@@ -20,6 +23,7 @@ FEATURE_ABLATION_GROUPS = {
         "positionAveragePrice",
         "positionUnrealizedReturn",
     ),
+    "contract_dynamics": CONTRACT_DYNAMICS_FEATURES,
     "time_context": (
         "snapshotGapSeconds",
         "snapshotGapCoverage",
@@ -123,6 +127,11 @@ _SIGNED_SURFACE_MARKET_FEATURES = (
     "front25DeltaButterflyChange",
     "atmTermStructureSlopeChange",
 )
+_SIGNED_CONTRACT_DYNAMICS_SCALES = {
+    "midPriceLogReturn": 100.0,
+    "spreadPctChange": 10.0,
+    "ivChange": 10.0,
+}
 
 
 def feature_ablation_indices(
@@ -179,6 +188,10 @@ def _dimensionless_components(
     contracts[:, unrealized_index] = (
         np.sign(unrealized) * np.log1p(abs(unrealized))
     )
+    for name, scale in _SIGNED_CONTRACT_DYNAMICS_SCALES.items():
+        index = indices[name]
+        value = contracts[:, index]
+        contracts[:, index] = np.sign(value) * np.log1p(abs(value) * scale)
     # Gamma times a 10% spot move is the approximate corresponding Delta
     # change and remains comparable across differently priced underlyings.
     contracts[:, indices["gamma"]] *= spot_scale * 0.1

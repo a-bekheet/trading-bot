@@ -202,16 +202,26 @@ different holdings can collapse to the same aggregate-Greek observation and the
 value function cannot tell which slot may create future P&L. Use the
 `position_state` ablation to test their marginal value without changing fills or
 sell feasibility.
+Each visible contract also carries a compact prior-snapshot dynamics group:
+mid-quote log return, relative-spread change, IV change, and separate quote/IV
+coverage bits. Changes are available only when the same contract exists in both
+snapshots with positive, non-crossed bid/ask quotes; IV change additionally
+requires positive IV at both endpoints. Missing history is represented as zero
+change with zero coverage, not as an observed flat market. The calculation does
+not use last-trade price, Delta changes, or unsigned volume as a proxy for order
+flow. Use the `contract_dynamics` ablation to test whether this state earns its
+per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v10` transform. Prices, strikes, and average entry price are divided by spot, contract
+`dimensionless.v11` transform. Prices, strikes, and average entry price are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 the underlying position is scaled by its NAV weight, portfolio values become
 ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields and position
 quantity are log-compressed. Unrealized return uses a signed log transform.
 Cumulative log returns use the same signed bounded transform as one-step return.
-The `time_context`, `price_trend`, and `position_state` walk-forward ablations
+Signed contract changes are log-compressed at fixed scales. The `time_context`,
+`price_trend`, `position_state`, and `contract_dynamics` walk-forward ablations
 can mask their inputs without changing model shape.
 Raw volume and
 open interest are omitted because their causal log features contain the useful
@@ -314,7 +324,7 @@ smaller-parameter tie-break.
 
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v10` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v11` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters
@@ -515,6 +525,22 @@ and not a latency optimization. A two-fold, width-eight AAPL integration smoke
 tied at zero validation score and selected the mixture only through the declared
 smaller-parameter tie-break; it establishes training/checkpoint plumbing, not
 predictive benefit.
+
+The v0.40 causal contract-dynamics layout has 33 contract fields and 1,127
+flattened inputs at 32 slots. Relative to v0.39, a width-128 flat hybrid grows
+from 1,073,206 to 1,188,150 parameters, while zero-neighbor `graph_set` grows
+from 216,025 to 216,161 because its contract encoder is shared across slots.
+Local 2,000-iteration streaming medians were 203.00 microseconds for the flat
+hybrid, 209.75 for flat mixture, 241.67 for graph-set hybrid, and 259.88 for
+graph-set mixture. Policy-vector preprocessing measured 47.95 microseconds mean
+over 5,000 calls. Consolidating prior-contract alignment into one lookup cut the
+new dynamics pass from 2.32 to 1.91 ms median on the same 288-row AAPL surface.
+Only 34.1% of rows in the current ten-snapshot AAPL sample had matched executable
+quotes and IV, which is why change values and coverage remain separate. A
+two-fold, tiny-width-eight removal smoke tied at zero validation score and masked
+exactly 20 inputs across four slots; the masked candidate won the declared tie.
+These are machine-specific integration and latency measurements, not evidence
+of predictive benefit or alpha.
 
 The categorical policy head starts with a configurable `5.0` logit bias toward
 hold, while every feasible action remains sampleable and the bias remains fully
