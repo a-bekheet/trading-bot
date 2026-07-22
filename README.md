@@ -144,9 +144,14 @@ contract. Front-expiry ATM IV and its difference from both realized-volatility
 horizons provide a compact volatility-risk-premium regime signal. The same
 snapshot-level vector carries executable front-expiry 25-delta risk reversal
 and butterfly factors, exposing smirk and wing convexity without repeating them
-across graph nodes. ATM/wing, executable-quote, Greek, and realized-volatility
-coverage features distinguish missing surfaces from genuine zero signals. Wing
-selection ignores zero-bid or otherwise unexecutable quotes. The IV-minus-
+across graph nodes. Executable ATM points across expirations now produce a
+market-level term-structure slope and discrete curvature. One-snapshot changes
+in front ATM IV, 25-delta risk reversal/butterfly, and term slope expose surface
+dynamics without asking the recurrent model to reconstruct sparse factors from
+changing contract slots. ATM, wing, term, change, executable-quote, Greek, and
+realized-volatility coverage features distinguish missing surfaces from genuine
+zero signals. Wing and term selection ignore zero-bid or otherwise unexecutable
+quotes. The IV-minus-
 realized signal stays neutral until some causal return history exists. Nearest
 wing contracts must also lie within 0.15 Delta of the 25-delta target, so an
 ATM-only chain cannot masquerade as a complete smile.
@@ -155,7 +160,7 @@ taking deeper strikes. Chronological windows are available through
 `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v5` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v6` transform. Prices and strikes are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 the underlying position is scaled by its NAV weight, portfolio values become
 ratios, DTE is in years, and heavy-tailed age/liquidity fields are compressed.
@@ -163,10 +168,12 @@ Raw volume and
 open interest are omitted because their causal log features contain the useful
 ordering at a much better numerical scale. The transform is fitted on no data,
 so it cannot leak future distribution statistics into a training window.
-On the included 84-contract AAPL snapshot, the complete market-surface and
-quality calculation took about 3.14 ms median per snapshot in a local CPU
-microbenchmark. It runs once during dataset engineering, not on every policy
-step; treat that number as machine-specific engineering evidence.
+On the included 84-contract AAPL snapshot, the expanded full feature-engineering
+pass took about 20.79 ms median and 22.60 ms p95 per snapshot in a local
+100-iteration CPU microbenchmark. Collapsing redundant surface-dynamics column
+writes reduced its median from 23.43 ms. Engineering runs once when loading a
+dataset, not on every policy step; treat these numbers as machine-specific
+evidence, not a production SLA.
 
 Optional recurrent actor-critic models support GRU, LSTM, and parallel hybrid
 GRU+LSTM encoders:
@@ -455,8 +462,9 @@ is no ceiling, so timing does not affect selection unless explicitly requested.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are
-`surface_wings`, `volatility_regime`, `data_quality`, and
-`derived_contract_surface`. Masking happens inside the checkpointed model after
+`surface_wings`, `term_structure`, `surface_dynamics`, `volatility_regime`,
+`data_quality`, and `derived_contract_surface`. Masking happens inside the
+checkpointed model after
 the versioned transform, so training, restored inference, and graph/flat models
 use the same ablation. Artifacts report each ablated candidate's validation
 score and raw-reward lift versus its full-feature counterpart plus active and

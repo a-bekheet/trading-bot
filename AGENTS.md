@@ -175,7 +175,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v5`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v6`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
 is expressed in years, and heavy-tailed fields are compressed and clipped. Raw
@@ -184,6 +184,15 @@ must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
 finite-value tests, and a checkpoint-schema bump; old weights must never be
 silently loaded against a changed feature layout.
+
+Market-level term-structure slope/curvature must use executable near-ATM points
+from the current snapshot only. Surface-change features may subtract only the
+immediately prior engineered snapshot. Persist separate coverage for ATM-level,
+wing, term-slope, term-curvature, and prior/current change availability; a
+missing expiration or wing must never become an unexplained numeric zero.
+Keep these factors once in `MARKET_FEATURES`, not repeated per contract, and
+route `term_structure` and `surface_dynamics` through named walk-forward
+ablations before attributing lift.
 
 Underlying return and 4/16-snapshot realized-volatility estimates are market
 features, not contract features; never duplicate global state across every

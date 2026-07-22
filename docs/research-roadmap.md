@@ -30,8 +30,8 @@ Every candidate must eventually pass:
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | Add CVaR or learned P&L-distribution objectives only after explicit short-option liability episodes and enough independent paths exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Add causal realized-volatility horizons and a formal walk-forward runner. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v5`, compact ATM-IV-minus-realized-volatility state, Greek budgets, and paired moving-block intervals implement the state/risk lesson. |
-| [IV-surface feedback for deep option hedging (revised 2026)](https://arxiv.org/abs/2407.21138) | A compact surface factorization includes ATM level, maturity and moneyness slopes, smile attenuation, and smirk; bounded recurrent hybrids outperform standalone networks in its numerical study. | Add executable 25-delta risk-reversal and butterfly factors with coverage once per market snapshot; test them through the architecture tournament. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v6`, compact ATM-IV-minus-realized-volatility and term/dynamics state, Greek budgets, and paired moving-block intervals implement the state/risk lesson. |
+| [IV-surface feedback for deep option hedging (revised 2026)](https://arxiv.org/abs/2407.21138) | A compact surface factorization includes ATM level, maturity and moneyness slopes, smile attenuation, smirk, and their dynamics; bounded recurrent hybrids outperform standalone networks in its numerical study. | Executable 25-delta risk-reversal/butterfly, ATM term slope/curvature, and one-snapshot factor changes now have explicit coverage once per market snapshot; test them through named tournament ablations. |
 | [Shortfall-aware RL option hedging (2026)](https://arxiv.org/abs/2601.01709) | Better static IV fit need not produce better dynamic hedging; replication-error and shortfall objectives under costs are separate evidence. | Keep realized path diagnostics primary. Defer shortfall/CVaR training until explicit option-liability episodes and enough independent paths exist. |
 | [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Use a sparse trainable hold prior now. Benchmark an autoregressive multi-leg option policy later; never post-process sampled rows in a way that breaks PPO likelihoods. |
 | [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
@@ -165,12 +165,14 @@ a simple underpriced-volatility rule rather than a complete volatility book.
 
 ### 3. Improve the state without inflating latency
 
-- Keep the 25-field `dimensionless.v5` contract state as the minimum model;
+- Keep the 25-field contract state under `dimensionless.v6` as the minimum model;
   volatility-regime state belongs once in the market vector.
 - Extend the implemented realized-volatility state only through ablation-tested
   regime features.
 - Retain the implemented ATM/wing, executable-quote, and Greek coverage instead
   of substituting plausible-looking market values.
+- Ablate the implemented executable ATM term slope/curvature and prior-snapshot
+  ATM, wing, and term-slope changes before retaining them in a paper strategy.
 - Use the implemented walk-forward removal candidates to measure named feature
   groups on validation without exposing every ablation to test; add permutation
   diagnostics only as post-selection sensitivity evidence.

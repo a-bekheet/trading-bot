@@ -17,6 +17,21 @@ FEATURE_ABLATION_GROUPS = {
         "front25DeltaButterfly",
         "front25DeltaCoverage",
     ),
+    "term_structure": (
+        "atmTermStructureSlope",
+        "atmTermStructureCurvature",
+        "atmTermSlopeCoverage",
+        "atmTermCurvatureCoverage",
+    ),
+    "surface_dynamics": (
+        "frontAtmIvChange",
+        "frontAtmIvChangeCoverage",
+        "front25DeltaRiskReversalChange",
+        "front25DeltaButterflyChange",
+        "frontWingChangeCoverage",
+        "atmTermStructureSlopeChange",
+        "atmTermSlopeChangeCoverage",
+    ),
     "volatility_regime": (
         "realizedVol4",
         "realizedVol4Coverage",
@@ -124,6 +139,12 @@ def _dimensionless_components(
         for name in (
             "front25DeltaRiskReversal",
             "front25DeltaButterfly",
+            "atmTermStructureSlope",
+            "atmTermStructureCurvature",
+            "frontAtmIvChange",
+            "front25DeltaRiskReversalChange",
+            "front25DeltaButterflyChange",
+            "atmTermStructureSlopeChange",
         ):
             index = market_indices[name]
             value = market[index]

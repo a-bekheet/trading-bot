@@ -60,7 +60,7 @@ class SnapshotDataset:
                 spot_history=spot_history,
             )
             snapshots_list.append(Snapshot(timestamp=timestamp.isoformat(), frame=engineered))
-            previous = group
+            previous = engineered
         snapshots = tuple(snapshots_list)
         return cls(snapshots, symbol.upper())
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import numpy as np
@@ -22,6 +23,17 @@ MARKET_ENGINEERED_FEATURES = (
     "front25DeltaRiskReversal",
     "front25DeltaButterfly",
     "front25DeltaCoverage",
+    "atmTermStructureSlope",
+    "atmTermStructureCurvature",
+    "atmTermSlopeCoverage",
+    "atmTermCurvatureCoverage",
+    "frontAtmIvChange",
+    "frontAtmIvChangeCoverage",
+    "front25DeltaRiskReversalChange",
+    "front25DeltaButterflyChange",
+    "frontWingChangeCoverage",
+    "atmTermStructureSlopeChange",
+    "atmTermSlopeChangeCoverage",
     "executableQuoteCoverage",
     "greekCoverage",
     "atmIvMinusRealizedVol4",
@@ -190,6 +202,10 @@ def _market_surface_features(result: pd.DataFrame) -> None:
         "front25DeltaRiskReversal",
         "front25DeltaButterfly",
         "front25DeltaCoverage",
+        "atmTermStructureSlope",
+        "atmTermStructureCurvature",
+        "atmTermSlopeCoverage",
+        "atmTermCurvatureCoverage",
         "executableQuoteCoverage",
         "greekCoverage",
         "atmIvMinusRealizedVol4",
@@ -260,6 +276,52 @@ def _market_surface_features(result: pd.DataFrame) -> None:
 
     front_dte = float(surface["dteDays"].min())
     front = surface[np.isclose(surface["dteDays"], front_dte)]
+    term_points = []
+    for _, expiry_rows in surface.groupby("expiration", sort=False):
+        expiry_atm_values = []
+        for side in ("call", "put"):
+            side_rows = expiry_rows[
+                expiry_rows["optionType"].eq(side)
+                & np.isfinite(expiry_rows["forwardLogMoneyness"])
+            ]
+            if side_rows.empty:
+                continue
+            atm_index = side_rows["forwardLogMoneyness"].abs().idxmin()
+            if (
+                abs(float(side_rows.loc[atm_index, "forwardLogMoneyness"]))
+                <= FRONT_ATM_LOG_MONEYNESS_TOLERANCE
+            ):
+                expiry_atm_values.append(float(side_rows.loc[atm_index, "iv"]))
+        if expiry_atm_values:
+            expiry_dte = float(expiry_rows["dteDays"].min())
+            term_points.append((
+                math.sqrt(max(expiry_dte / 365.25, 0.0)),
+                float(np.median(expiry_atm_values)),
+            ))
+    term_points = sorted(set(term_points))
+    result["atmTermSlopeCoverage"] = min(len(term_points) / 2, 1.0)
+    result["atmTermCurvatureCoverage"] = min(len(term_points) / 3, 1.0)
+    if len(term_points) >= 2:
+        term_x = np.asarray([item[0] for item in term_points])
+        term_iv = np.asarray([item[1] for item in term_points])
+        if np.ptp(term_x) > 1e-12:
+            result["atmTermStructureSlope"] = float(
+                np.polyfit(term_x, term_iv, 1)[0]
+            )
+    if len(term_points) >= 3:
+        first = term_points[0]
+        middle = term_points[len(term_points) // 2]
+        last = term_points[-1]
+        left_width = middle[0] - first[0]
+        right_width = last[0] - middle[0]
+        total_width = last[0] - first[0]
+        if min(left_width, right_width, total_width) > 1e-12:
+            left_slope = (middle[1] - first[1]) / left_width
+            right_slope = (last[1] - middle[1]) / right_width
+            result["atmTermStructureCurvature"] = (
+                right_slope - left_slope
+            ) / total_width
+
     atm_values = []
     for side in ("call", "put"):
         side_rows = front[
@@ -313,6 +375,85 @@ def _market_surface_features(result: pd.DataFrame) -> None:
         result[f"atmIvMinusRealizedVol{window}"] = front_atm_iv - realized
 
 
+def _surface_dynamics_features(
+    result: pd.DataFrame,
+    previous: pd.DataFrame | None,
+) -> None:
+    """Add one-snapshot surface-factor changes with prior/current coverage."""
+    values = {
+        "frontAtmIvChange": 0.0,
+        "frontAtmIvChangeCoverage": 0.0,
+        "front25DeltaRiskReversalChange": 0.0,
+        "front25DeltaButterflyChange": 0.0,
+        "frontWingChangeCoverage": 0.0,
+        "atmTermStructureSlopeChange": 0.0,
+        "atmTermSlopeChangeCoverage": 0.0,
+    }
+    if previous is None or previous.empty:
+        result[list(values)] = tuple(values.values())
+        return
+
+    def scalar(frame: pd.DataFrame, name: str) -> float | None:
+        if name not in frame:
+            return None
+        try:
+            value = float(frame[name].iloc[0])
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    current_atm_coverage = scalar(result, "frontAtmIvCoverage")
+    previous_atm_coverage = scalar(previous, "frontAtmIvCoverage")
+    if (
+        current_atm_coverage is not None
+        and previous_atm_coverage is not None
+    ):
+        coverage = min(current_atm_coverage, previous_atm_coverage)
+        values["frontAtmIvChangeCoverage"] = coverage
+        current_atm = scalar(result, "frontAtmIv")
+        previous_atm = scalar(previous, "frontAtmIv")
+        if coverage > 0 and current_atm is not None and previous_atm is not None:
+            values["frontAtmIvChange"] = current_atm - previous_atm
+
+    current_wing_coverage = scalar(result, "front25DeltaCoverage")
+    previous_wing_coverage = scalar(previous, "front25DeltaCoverage")
+    if (
+        current_wing_coverage is not None
+        and previous_wing_coverage is not None
+        and current_wing_coverage >= 1
+        and previous_wing_coverage >= 1
+    ):
+        values["frontWingChangeCoverage"] = 1.0
+        for name in (
+            "front25DeltaRiskReversal",
+            "front25DeltaButterfly",
+        ):
+            current_value = scalar(result, name)
+            previous_value = scalar(previous, name)
+            if current_value is not None and previous_value is not None:
+                values[f"{name}Change"] = current_value - previous_value
+
+    current_term_coverage = scalar(result, "atmTermSlopeCoverage")
+    previous_term_coverage = scalar(previous, "atmTermSlopeCoverage")
+    if (
+        current_term_coverage is not None
+        and previous_term_coverage is not None
+    ):
+        coverage = min(current_term_coverage, previous_term_coverage)
+        values["atmTermSlopeChangeCoverage"] = coverage
+        current_slope = scalar(result, "atmTermStructureSlope")
+        previous_slope = scalar(previous, "atmTermStructureSlope")
+        if (
+            coverage >= 1
+            and current_slope is not None
+            and previous_slope is not None
+        ):
+            values["atmTermStructureSlopeChange"] = (
+                current_slope - previous_slope
+            )
+    result[list(values)] = tuple(values.values())
+
+
 def engineer_snapshot(
     frame: pd.DataFrame,
     previous: pd.DataFrame | None = None,
@@ -355,6 +496,7 @@ def engineer_snapshot(
         result[name] = value
     _surface_features(result)
     _market_surface_features(result)
+    _surface_dynamics_features(result, previous)
     result[list(ENGINEERED_FEATURES)] = result[list(ENGINEERED_FEATURES)].replace(
         [np.inf, -np.inf], np.nan
     ).fillna(0.0)

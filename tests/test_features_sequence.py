@@ -21,6 +21,53 @@ from trading_bot.training.sequence import (
 )
 
 
+def surface_snapshot(
+    timestamp: str,
+    atm_levels: tuple[float, float, float],
+    *,
+    front_call_wing: float,
+    front_put_wing: float,
+) -> pd.DataFrame:
+    rows = []
+    expirations = ("2026-08-21", "2026-10-16", "2027-01-15")
+    for expiration, atm_level in zip(expirations, atm_levels, strict=True):
+        for side, delta, volatility in (
+            ("call", 0.5, atm_level - 0.01),
+            ("put", -0.5, atm_level + 0.01),
+        ):
+            rows.append({
+                "collectedAt": timestamp,
+                "contractSymbol": f"{expiration}-ATM-{side}",
+                "expiration": expiration,
+                "optionType": side,
+                "bid": 1.0,
+                "ask": 1.2,
+                "lastPrice": 1.1,
+                "strike": 100,
+                "underlyingPrice": 100,
+                "riskFreeRate": 0.0,
+                "impliedVolatility": volatility,
+                "delta": delta,
+                "gamma": 0.01,
+                "theta": -0.1,
+                "vega": 0.2,
+            })
+        if expiration == expirations[0]:
+            for side, strike, delta, volatility in (
+                ("call", 110, 0.25, front_call_wing),
+                ("put", 90, -0.25, front_put_wing),
+            ):
+                rows.append({
+                    **rows[-1],
+                    "contractSymbol": f"{expiration}-WING-{side}",
+                    "optionType": side,
+                    "strike": strike,
+                    "delta": delta,
+                    "impliedVolatility": volatility,
+                })
+    return pd.DataFrame(rows)
+
+
 class FeatureSequenceTests(TestCase):
     def test_feature_ablation_groups_map_to_stable_non_overlapping_inputs(self):
         wing_indices = feature_ablation_indices(("surface_wings",), 2)
@@ -29,14 +76,19 @@ class FeatureSequenceTests(TestCase):
             ("derived_contract_surface",),
             2,
         )
+        term_indices = feature_ablation_indices(("term_structure",), 2)
+        dynamics_indices = feature_ablation_indices(("surface_dynamics",), 2)
 
         self.assertEqual(len(wing_indices), 3)
         self.assertEqual(len(quality_indices), 2)
+        self.assertEqual(len(term_indices), 4)
+        self.assertEqual(len(dynamics_indices), 7)
         self.assertEqual(
             len(contract_indices),
             2 * len(FEATURE_ABLATION_GROUPS["derived_contract_surface"]),
         )
         self.assertFalse(set(wing_indices) & set(quality_indices))
+        self.assertFalse(set(term_indices) & set(dynamics_indices))
         self.assertTrue(all(index < len(MARKET_FEATURES) for index in wing_indices))
         self.assertTrue(all(index >= len(MARKET_FEATURES) for index in contract_indices))
         with self.assertRaisesRegex(ValueError, "unknown"):
@@ -121,6 +173,52 @@ class FeatureSequenceTests(TestCase):
         self.assertTrue((engineered["extrinsicValuePct"] >= 0).all())
         self.assertTrue(np.isfinite(engineered[list(ENGINEERED_FEATURES)]).all().all())
 
+    def test_term_structure_and_surface_changes_require_explicit_coverage(self):
+        previous = engineer_snapshot(surface_snapshot(
+            "2026-07-21T14:00:00Z",
+            (0.20, 0.24, 0.31),
+            front_call_wing=0.24,
+            front_put_wing=0.28,
+        ))
+        current = engineer_snapshot(
+            surface_snapshot(
+                "2026-07-21T14:01:00Z",
+                (0.22, 0.255, 0.34),
+                front_call_wing=0.27,
+                front_put_wing=0.33,
+            ),
+            previous,
+        )
+        prior = previous.iloc[0]
+        now = current.iloc[0]
+
+        self.assertEqual(prior["atmTermSlopeCoverage"], 1)
+        self.assertEqual(prior["atmTermCurvatureCoverage"], 1)
+        self.assertNotEqual(prior["atmTermStructureSlope"], 0)
+        self.assertNotEqual(prior["atmTermStructureCurvature"], 0)
+        self.assertEqual(prior["frontAtmIvChangeCoverage"], 0)
+        self.assertEqual(prior["frontWingChangeCoverage"], 0)
+        self.assertEqual(prior["atmTermSlopeChangeCoverage"], 0)
+        self.assertAlmostEqual(now["frontAtmIvChange"], 0.02)
+        self.assertEqual(now["frontAtmIvChangeCoverage"], 1)
+        self.assertAlmostEqual(
+            now["front25DeltaRiskReversalChange"],
+            -0.02,
+        )
+        self.assertAlmostEqual(
+            now["front25DeltaButterflyChange"],
+            0.02,
+        )
+        self.assertEqual(now["frontWingChangeCoverage"], 1)
+        self.assertAlmostEqual(
+            now["atmTermStructureSlopeChange"],
+            now["atmTermStructureSlope"] - prior["atmTermStructureSlope"],
+        )
+        self.assertEqual(now["atmTermSlopeChangeCoverage"], 1)
+        self.assertTrue(
+            np.isfinite(current[list(MARKET_ENGINEERED_FEATURES)]).all().all()
+        )
+
     def test_dimensionless_vector_is_bounded_and_price_scale_invariant(self):
         def make_observation(scale: float) -> Observation:
             contracts = np.zeros((1, len(CONTRACT_FEATURES)), dtype=float)
@@ -173,7 +271,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v5")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v6")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
@@ -188,6 +286,13 @@ class FeatureSequenceTests(TestCase):
         market[MARKET_FEATURES.index("front25DeltaRiskReversal")] = -0.04
         market[MARKET_FEATURES.index("front25DeltaButterfly")] = 0.05
         market[MARKET_FEATURES.index("front25DeltaCoverage")] = 1
+        market[MARKET_FEATURES.index("atmTermStructureSlope")] = 0.2
+        market[MARKET_FEATURES.index("atmTermStructureCurvature")] = -0.1
+        market[MARKET_FEATURES.index("frontAtmIvChange")] = -0.03
+        market[
+            MARKET_FEATURES.index("front25DeltaRiskReversalChange")
+        ] = 0.02
+        market[MARKET_FEATURES.index("atmTermSlopeChangeCoverage")] = 1
         market[MARKET_FEATURES.index("executableQuoteCoverage")] = 0.8
         market[MARKET_FEATURES.index("greekCoverage")] = 0.75
         market[MARKET_FEATURES.index("atmIvMinusRealizedVol4")] = 0.05
@@ -222,6 +327,18 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(
             vector[MARKET_FEATURES.index("front25DeltaCoverage")],
             1,
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("atmTermStructureSlope")],
+            np.log1p(0.2),
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("atmTermStructureCurvature")],
+            -np.log1p(0.1),
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("frontAtmIvChange")],
+            -np.log1p(0.03),
         )
         self.assertAlmostEqual(
             vector[MARKET_FEATURES.index("executableQuoteCoverage")],
