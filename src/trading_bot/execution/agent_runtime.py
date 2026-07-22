@@ -30,7 +30,7 @@ from trading_bot.training.trainer import (
 )
 
 
-PAPER_AGENT_RUNTIME_SCHEMA_VERSION = "research-demo.paper-agent-runtime.v2"
+PAPER_AGENT_RUNTIME_SCHEMA_VERSION = "research-demo.paper-agent-runtime.v3"
 PAPER_AGENT_DEPLOYMENT_CONTRACT_VERSION = (
     "research-demo.paper-agent-runtime.v1"
 )
@@ -337,6 +337,7 @@ def _decision(
     observation,
     info: dict[str, Any],
     outcome_finalized: bool,
+    policy_diagnostics: dict[str, Any],
 ) -> dict[str, Any]:
     decision_nav = float(decision_observation.portfolio[2])
     outcome_nav = float(observation.portfolio[2]) if outcome_finalized else None
@@ -360,6 +361,18 @@ def _decision(
             outcome_nav / decision_nav - 1.0
             if outcome_nav is not None and decision_nav > 0
             else None
+        ),
+        "action_confidence": float(
+            policy_diagnostics["action_confidence"]
+        ),
+        "normalized_action_entropy": float(
+            policy_diagnostics["normalized_action_entropy"]
+        ),
+        "explorable_action_factor_count": int(
+            policy_diagnostics["explorable_action_factor_count"]
+        ),
+        "decision_factor_count": int(
+            policy_diagnostics["decision_factor_count"]
         ),
         "invalid_action_count": int(info.get("invalid_action_count", 0)),
     }
@@ -470,7 +483,10 @@ def run_selected_agent(
             decision_timestamp = observation.timestamp
             if decision_timestamp != dataset.snapshots[dataset_index].timestamp:
                 raise RuntimeError("paper-agent decision cursor is misaligned")
-            research_orders = np.asarray(policy(observation), dtype=np.int64)
+            proposed, policy_diagnostics = policy.act_with_diagnostics(
+                observation
+            )
+            research_orders = np.asarray(proposed, dtype=np.int64)
             decision_observation = observation
             sandbox_orders = (
                 research_orders.copy()
@@ -493,6 +509,7 @@ def run_selected_agent(
                 observation=next_observation,
                 info=info,
                 outcome_finalized=(sequence_index + 1 < len(new_indices)),
+                policy_diagnostics=policy_diagnostics,
             ))
             observation = next_observation
             expected_next = (

@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import json
 import logging
+import math
 import os
 import time
 from contextlib import contextmanager
@@ -400,6 +401,25 @@ def collect_all(
     return result.successes, result.failures
 
 
+def next_cycle_delay(
+    interval: float,
+    cycle_started_monotonic: float,
+    *,
+    current_monotonic: float | None = None,
+) -> float:
+    """Keep collection starts on the requested cadence.
+
+    ``interval`` is a start-to-start period. Subtracting the completed cycle's
+    runtime avoids silently adding the full 50-ticker fetch duration to every
+    observation interval.
+    """
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError("interval must be finite and positive")
+    now = time.monotonic() if current_monotonic is None else current_monotonic
+    elapsed = max(0.0, now - cycle_started_monotonic)
+    return max(0.0, interval - elapsed)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("data"))
@@ -433,6 +453,7 @@ def main() -> int:
     try:
         with collector_lock(args.output_dir):
             while True:
+                cycle_started_monotonic = time.monotonic()
                 result = collect_cycle(
                     args.output_dir,
                     args.ticker_delay,
@@ -450,13 +471,17 @@ def main() -> int:
                 )
                 if args.once:
                     return 1 if result.failures else 0
+                delay = next_cycle_delay(
+                    args.interval,
+                    cycle_started_monotonic,
+                )
                 result.status = "sleeping"
                 result.next_cycle_at = datetime.fromtimestamp(
-                    time.time() + args.interval,
+                    time.time() + delay,
                     tz=timezone.utc,
                 ).isoformat()
                 _write_cycle_status(args.output_dir, result)
-                time.sleep(args.interval)
+                time.sleep(delay)
     except RuntimeError as error:
         logging.error("%s", error)
         return 2

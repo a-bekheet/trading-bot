@@ -72,7 +72,9 @@ Create those packages only when implementing their first real behavior.
 6. `market_data.collector` appends the enriched rows to `data/<TICKER>.csv`
    only when the raw quote/rate surface materially changes. It also holds a
    per-output-directory process lock and atomically updates
-   `data/_collector_status.json` throughout each cycle.
+   `data/_collector_status.json` throughout each cycle. Continuous `--interval`
+   is a start-to-start cadence; subtract cycle runtime before sleeping so the
+   top-50 fetch duration does not silently lower observation frequency.
 7. `market_data.status` validates heartbeat freshness, cycle failures, and
    continuous-process liveness. `market_data.service` manages the optional
    macOS LaunchAgent used for unattended restart-on-failure collection.
@@ -98,6 +100,11 @@ Create those packages only when implementing their first real behavior.
     the checkpoint SHA-256, and substitutes HOLD unless validation activated
     the policy. `agent_watch` invokes it only when data or run artifacts change;
     `agent_service` is the macOS LaunchAgent wrapper.
+    Each real decision also persists action confidence, feasible-action
+    normalized entropy, and explorable factor count. These are policy-shape
+    diagnostics, not calibrated profit probabilities. Activation must clear
+    the no-op margin for both the seed-robust group score and the exact deployed
+    representative checkpoint.
 11. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
    `reset`/`step` API. It is `research_demo` only and must not be used as a
    historical-performance benchmark.

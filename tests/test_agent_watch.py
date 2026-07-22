@@ -37,7 +37,7 @@ class AgentWatchTests(TestCase):
     @patch("trading_bot.execution.agent_watch.run_paper_agents")
     def test_once_writes_auditable_fleet_status(self, run_paper_agents):
         run_paper_agents.return_value = {
-            "schema_version": "research-demo.paper-agent-runtime.v2",
+            "schema_version": "research-demo.paper-agent-runtime.v3",
             "generated_at": "2026-07-22T14:00:00Z",
             "database": "/tmp/agents.db",
             "selected_agent_count": 2,
@@ -65,7 +65,7 @@ class AgentWatchTests(TestCase):
         )
         self.assertEqual(
             status["runtime_schema_version"],
-            "research-demo.paper-agent-runtime.v2",
+            "research-demo.paper-agent-runtime.v3",
         )
         self.assertEqual(status["status"], "running")
         self.assertEqual(status["completed_count"], 2)

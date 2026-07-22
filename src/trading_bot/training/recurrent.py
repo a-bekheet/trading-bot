@@ -898,6 +898,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             action_mask,
             deterministic=False,
             hidden_state=None,
+            return_logits=False,
         ):
             """Sample an action without evaluating critic or auxiliary heads."""
             if deterministic and single_leg and action_mask is not None:
@@ -944,16 +945,25 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 action = self._decode_joint_actions(
                     final_logits.argmax(dim=-1)
                 )
-                return action, hidden
+                return (
+                    (action, hidden, final_logits)
+                    if return_logits
+                    else (action, hidden)
+                )
             logits, hidden = self.policy_sequence(
                 sequence,
                 action_mask,
                 hidden_state,
             )
+            final_logits = logits[:, -1]
             action = self.actions_from_logits(
-                logits[:, -1],
+                final_logits,
                 deterministic=deterministic,
             )
-            return action, hidden
+            return (
+                (action, hidden, final_logits)
+                if return_logits
+                else (action, hidden)
+            )
 
     return ActorCritic()

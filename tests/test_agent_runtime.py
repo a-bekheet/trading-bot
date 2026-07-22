@@ -220,10 +220,19 @@ class AgentRuntimeTests(TestCase):
             env = OptionsEnv(source.engineered(), **env_options)
             observation, _ = env.reset()
             policy = StreamingRecurrentPolicy(model, 2)
-            policy(observation)
+            _, diagnostics = policy.act_with_diagnostics(observation)
             payload = json.loads(json.dumps(recurrent_state_to_dict(policy.snapshot())))
             restored = StreamingRecurrentPolicy(model, 2)
             restored.restore(recurrent_state_from_dict(payload, torch))
 
         self.assertEqual(restored.steps, policy.steps)
         self.assertEqual(restored.last_timestamp, policy.last_timestamp)
+        self.assertGreaterEqual(diagnostics["action_confidence"], 0.0)
+        self.assertLessEqual(diagnostics["action_confidence"], 1.0)
+        self.assertGreaterEqual(diagnostics["normalized_action_entropy"], 0.0)
+        self.assertLessEqual(diagnostics["normalized_action_entropy"], 1.0)
+        self.assertGreater(diagnostics["decision_factor_count"], 0)
+        self.assertLessEqual(
+            diagnostics["explorable_action_factor_count"],
+            diagnostics["decision_factor_count"],
+        )

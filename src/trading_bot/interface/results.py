@@ -93,6 +93,7 @@ def paper_agent_overview(data_dir: Path) -> pd.DataFrame:
         equity_points = (
             [float(decisions[0]["decision_nav"])] if decisions else []
         ) + [float(item["outcome_nav"]) for item in finalized]
+        latest_decision = decisions[-1] if decisions else {}
         records.append({
             "Agent ID": deployment.get("agent_id", "unknown"),
             "Ticker": deployment.get("symbol", "unknown"),
@@ -127,6 +128,12 @@ def paper_agent_overview(data_dir: Path) -> pd.DataFrame:
                 else float("nan")
             ),
             "Online max drawdown": _online_max_drawdown(equity_points),
+            "Latest action confidence": _number(
+                latest_decision.get("action_confidence")
+            ),
+            "Latest action entropy": _number(
+                latest_decision.get("normalized_action_entropy")
+            ),
             "Last observation": deployment.get("last_observation_timestamp"),
             "Last decision": deployment.get("last_decision_timestamp"),
             "Message": deployment.get("message", ""),
@@ -220,6 +227,13 @@ def paper_agent_decisions(data_dir: Path, limit: int = 500) -> pd.DataFrame:
             "Outcome timestamp": decision.get("outcome_timestamp"),
             "Outcome NAV": _number(decision.get("outcome_nav")),
             "Outcome return": _number(decision.get("outcome_return")),
+            "Action confidence": _number(decision.get("action_confidence")),
+            "Action entropy": _number(
+                decision.get("normalized_action_entropy")
+            ),
+            "Explorable factors": int(
+                decision.get("explorable_action_factor_count") or 0
+            ),
             "Cash": _number(decision.get("cash")),
             "NAV": _number(decision.get("nav")),
             "Processed": decision.get("processed_at"),

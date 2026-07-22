@@ -564,7 +564,7 @@ class StreamingRecurrentPolicy:
         policy.restore(self.snapshot())
         return policy
 
-    def __call__(self, observation):
+    def _advance(self, observation, *, with_diagnostics: bool):
         if self.model.training:
             raise RuntimeError(
                 "streaming recurrent policy model entered training mode"
@@ -589,16 +589,63 @@ class StreamingRecurrentPolicy:
             .to(self._device)
         )
         with self._torch.inference_mode():
-            action, hidden_state = self.model.act(
-                sequence,
-                action_mask,
-                deterministic=True,
+            result = self.model.act(
+                sequence, action_mask, deterministic=True,
                 hidden_state=self._hidden_state,
+                return_logits=with_diagnostics,
             )
+        if with_diagnostics:
+            action, hidden_state, logits = result
+        else:
+            action, hidden_state = result
         self._hidden_state = _detach_hidden(hidden_state)
         self._last_timestamp = observation.timestamp
         self._steps += 1
-        return action.squeeze(0).cpu().numpy()
+        encoded_action = action.squeeze(0).cpu().numpy()
+        if not with_diagnostics:
+            return encoded_action
+
+        with self._torch.inference_mode():
+            feasible_counts = self._torch.isfinite(logits).sum(dim=-1)
+            explorable = feasible_counts > 1
+            if bool(explorable.any()):
+                log_probabilities = self._torch.log_softmax(logits, dim=-1)
+                probabilities = log_probabilities.exp()
+                maximum_probabilities = probabilities.max(dim=-1).values
+                confidence = maximum_probabilities[explorable].mean()
+                entropy_terms = self._torch.where(
+                    self._torch.isfinite(log_probabilities),
+                    probabilities * log_probabilities,
+                    self._torch.zeros_like(probabilities),
+                )
+                entropy = -entropy_terms.sum(dim=-1)
+                normalizer = self._torch.log(
+                    feasible_counts[explorable].to(entropy.dtype)
+                )
+                normalized_entropy = (
+                    entropy[explorable] / normalizer
+                ).mean()
+                confidence_value = min(1.0, max(0.0, float(confidence.cpu())))
+                entropy_value = min(
+                    1.0, max(0.0, float(normalized_entropy.cpu()))
+                )
+            else:
+                confidence_value = 1.0
+                entropy_value = 0.0
+        diagnostics = {
+            "action_confidence": confidence_value,
+            "normalized_action_entropy": entropy_value,
+            "explorable_action_factor_count": int(explorable.sum().cpu()),
+            "decision_factor_count": int(explorable.numel()),
+        }
+        return encoded_action, diagnostics
+
+    def __call__(self, observation):
+        return self._advance(observation, with_diagnostics=False)
+
+    def act_with_diagnostics(self, observation):
+        """Advance once and expose uncertainty over feasible actions."""
+        return self._advance(observation, with_diagnostics=True)
 
 
 class BatchedStreamingRecurrentPolicy:

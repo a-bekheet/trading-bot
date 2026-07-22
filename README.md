@@ -67,6 +67,20 @@ closed-market quotes from becoming synthetic RL transitions. A changed rate,
 spot, contract set, quote, or timestamped benchmark observation remains a new
 snapshot.
 
+Continuous collection treats `--interval` as a start-to-start cadence. The
+roughly two-minute top-50 fetch duration is subtracted before sleeping instead
+of being added to every interval. This preserves the requested observation
+spacing while unchanged-surface fingerprinting still prevents duplicate rows.
+
+v0.87 records the deterministic policy's mean maximum probability and
+normalized entropy over action factors that had more than one feasible choice.
+These diagnostics appear beside each online decision in Agent Desk and make a
+collapsed or indecisive policy visible; they are not calibrated probabilities
+of profit and do not independently authorize execution. Sandbox activation now
+also requires both the seed-robust validation score and the exact deployed
+checkpoint's validation score to clear the no-op margin. A strong aggregate can
+therefore no longer activate weak representative weights.
+
 ## Explore data
 
 ```bash

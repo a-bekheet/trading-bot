@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
 
-AGENT_STORE_SCHEMA_VERSION = "research-demo.paper-agent-store.v2"
+AGENT_STORE_SCHEMA_VERSION = "research-demo.paper-agent-store.v3"
 
 
 def _json(value: Any) -> str:
@@ -89,6 +90,10 @@ class AgentPaperStore:
                     outcome_timestamp TEXT,
                     outcome_nav REAL,
                     outcome_return REAL,
+                    action_confidence REAL,
+                    normalized_action_entropy REAL,
+                    explorable_action_factor_count INTEGER,
+                    decision_factor_count INTEGER,
                     invalid_action_count INTEGER NOT NULL,
                     UNIQUE(deployment_id, snapshot_timestamp)
                 );
@@ -129,6 +134,10 @@ class AgentPaperStore:
                 "outcome_timestamp": "TEXT",
                 "outcome_nav": "REAL",
                 "outcome_return": "REAL",
+                "action_confidence": "REAL",
+                "normalized_action_entropy": "REAL",
+                "explorable_action_factor_count": "INTEGER",
+                "decision_factor_count": "INTEGER",
             }
             for name, declaration in decision_migrations.items():
                 if name not in decision_columns:
@@ -261,6 +270,21 @@ class AgentPaperStore:
                 ),
             )
             for decision in decisions:
+                action_confidence = float(decision["action_confidence"])
+                action_entropy = float(decision["normalized_action_entropy"])
+                explorable_factors = int(
+                    decision["explorable_action_factor_count"]
+                )
+                decision_factors = int(decision["decision_factor_count"])
+                if (
+                    not math.isfinite(action_confidence)
+                    or not 0.0 <= action_confidence <= 1.0
+                    or not math.isfinite(action_entropy)
+                    or not 0.0 <= action_entropy <= 1.0
+                    or decision_factors < 1
+                    or not 0 <= explorable_factors <= decision_factors
+                ):
+                    raise ValueError("paper-agent action diagnostics are invalid")
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO agent_decisions (
@@ -269,8 +293,10 @@ class AgentPaperStore:
                         executions_json, reward, reward_horizon, cash, nav,
                         decision_cash, decision_nav, outcome_status,
                         outcome_timestamp, outcome_nav, outcome_return,
+                        action_confidence, normalized_action_entropy,
+                        explorable_action_factor_count, decision_factor_count,
                         invalid_action_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         deployment["deployment_id"],
@@ -298,6 +324,10 @@ class AgentPaperStore:
                             if decision.get("outcome_return") is not None
                             else None
                         ),
+                        action_confidence,
+                        action_entropy,
+                        explorable_factors,
+                        decision_factors,
                         int(decision["invalid_action_count"]),
                     ),
                 )

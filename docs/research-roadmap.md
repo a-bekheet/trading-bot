@@ -526,6 +526,18 @@ held-out provenance remain available under Research through progressive
 disclosure. This changes discoverability and decision speed only; it does not
 upgrade exploratory evidence or imply alpha.
 
+v0.87 adds an uncertainty surface to tangible paper decisions without changing
+their actions. The actor-only forward path optionally returns its already
+computed logits; the runtime stores mean maximum probability and feasible-set
+normalized entropy only across factors where a choice existed. Agent Desk shows
+confidence with an explicit non-calibration warning and the ledger retains both
+metrics for later outcome calibration. The extra softmax is used only when a
+real decision is recorded, while warm-up and latency benchmarks keep the lean
+action-only path. Deployment activation now also requires the exact
+representative checkpoint, not only its seed-robust architecture aggregate, to
+beat no-op on validation. This prevents a stable group score from masking weak
+weights selected for deployment.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

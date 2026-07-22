@@ -180,6 +180,10 @@ class InterfaceResultTests(TestCase):
                     "outcome_timestamp": None,
                     "outcome_nav": None,
                     "outcome_return": None,
+                    "action_confidence": 0.72,
+                    "normalized_action_entropy": 0.41,
+                    "explorable_action_factor_count": 2,
+                    "decision_factor_count": 2,
                     "invalid_action_count": 0,
                 }],
             )
@@ -193,10 +197,14 @@ class InterfaceResultTests(TestCase):
         self.assertEqual(overview.iloc[0]["Recurrent steps"], 4)
         self.assertEqual(overview.iloc[0]["Finalized outcomes"], 0)
         self.assertEqual(overview.iloc[0]["Pending outcomes"], 1)
+        self.assertEqual(overview.iloc[0]["Latest action confidence"], 0.72)
+        self.assertEqual(overview.iloc[0]["Latest action entropy"], 0.41)
         self.assertEqual(decisions.iloc[0]["Research action"], "UNFILLED")
         self.assertEqual(decisions.iloc[0]["Sandbox action"], "HOLD")
         self.assertEqual(decisions.iloc[0]["Executions"], 0)
         self.assertEqual(decisions.iloc[0]["Outcome status"], "Pending")
+        self.assertEqual(decisions.iloc[0]["Action confidence"], 0.72)
+        self.assertEqual(decisions.iloc[0]["Action entropy"], 0.41)
         self.assertEqual(len(curve), 1)
         self.assertEqual(curve.iloc[0]["Stage"], "First decision")
 

@@ -16,6 +16,24 @@ from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
 class CollectorTests(TestCase):
+    def test_collection_interval_is_start_to_start_not_post_cycle_sleep(self):
+        self.assertEqual(
+            collector.next_cycle_delay(
+                300.0,
+                1_000.0,
+                current_monotonic=1_102.5,
+            ),
+            197.5,
+        )
+        self.assertEqual(
+            collector.next_cycle_delay(
+                60.0,
+                1_000.0,
+                current_monotonic=1_102.5,
+            ),
+            0.0,
+        )
+
     def test_top_company_universe_has_50_unique_tickers(self):
         self.assertEqual(len(TOP_50_TICKERS), 50)
         self.assertEqual(len(set(TOP_50_TICKERS)), 50)

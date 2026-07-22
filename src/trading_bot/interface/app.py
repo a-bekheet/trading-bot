@@ -407,7 +407,7 @@ with desk_tab:
         badge_class = "good" if state == "Paper active" else "warn"
         st.markdown(
             f"""<div class="desk-banner"><div><h2>{escape(desk_ticker)} · {escape(str(agent['Research policy']))}</h2>
-            <p>{escape(str(agent['Architecture']))} · {escape(str(agent['Algorithm']))} · {escape(str(agent['Action policy']))}</p></div>
+            <p>{escape(str(agent['Architecture']))} · {escape(str(agent['Algorithm']))} · {escape(str(agent['Action policy']))} · {float(agent['Median latency (us)']):.1f} µs</p></div>
             <span class="badge {badge_class}">{escape(state)}</span></div>""",
             unsafe_allow_html=True,
         )
@@ -431,7 +431,18 @@ with desk_tab:
             delta_color="off",
         )
         desk_metrics[3].metric(
-            "Inference", f"{float(agent['Median latency (us)']):.1f} µs"
+            "Decision confidence",
+            (
+                f"{float(live['Latest action confidence']):.1%}"
+                if live is not None
+                and pd.notna(live["Latest action confidence"])
+                else "Pending"
+            ),
+            help=(
+                "Mean maximum action probability over decision factors with "
+                "more than one feasible action. This is diagnostic, not a "
+                "calibrated probability of profit."
+            ),
         )
 
         chart_column, rationale_column = st.columns((2, 1), gap="large")
@@ -474,8 +485,10 @@ with desk_tab:
         else:
             decision_columns = [
                 "Timestamp",
-                "Proposed action",
-                "Executed action",
+                "Research action",
+                "Sandbox action",
+                "Action confidence",
+                "Action entropy",
                 "Outcome status",
                 "Outcome return",
                 "NAV",
@@ -486,6 +499,12 @@ with desk_tab:
                 hide_index=True,
                 column_config={
                     "Outcome return": st.column_config.NumberColumn(format="percent"),
+                    "Action confidence": st.column_config.NumberColumn(
+                        format="percent"
+                    ),
+                    "Action entropy": st.column_config.NumberColumn(
+                        format="percent"
+                    ),
                     "NAV": st.column_config.NumberColumn(format="$%.2f"),
                 },
             )
@@ -679,6 +698,12 @@ with research_tab:
                             format="$%.2f"
                         ),
                         "Outcome return": st.column_config.NumberColumn(
+                            format="percent"
+                        ),
+                        "Action confidence": st.column_config.NumberColumn(
+                            format="percent"
+                        ),
+                        "Action entropy": st.column_config.NumberColumn(
                             format="percent"
                         ),
                     },

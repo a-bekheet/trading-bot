@@ -774,14 +774,19 @@ def _validation_no_op_activation_gate(
     validation_envs: Sequence[OptionsEnv],
     *,
     selected_score: float,
+    deployment_score: float | None = None,
     minimum_score_advantage: float,
     seed: int,
 ) -> dict[str, Any]:
-    """Require the research winner to beat no-op before sandbox activation."""
+    """Require both seed-robust selection and deployed weights to beat no-op."""
     if not validation_envs:
         raise ValueError("activation gate requires validation environments")
     if not math.isfinite(selected_score):
         raise ValueError("activation selected_score must be finite")
+    if deployment_score is None:
+        deployment_score = selected_score
+    if not math.isfinite(deployment_score):
+        raise ValueError("activation deployment_score must be finite")
     if (
         not math.isfinite(minimum_score_advantage)
         or minimum_score_advantage < 0
@@ -809,16 +814,28 @@ def _validation_no_op_activation_gate(
                 "validation no-op baseline violated zero-risk invariants"
             )
     baseline_score = 0.0
-    score_advantage = float(selected_score - baseline_score)
-    activated = score_advantage > minimum_score_advantage
+    robust_score_advantage = float(selected_score - baseline_score)
+    deployment_score_advantage = float(deployment_score - baseline_score)
+    score_advantage = min(
+        robust_score_advantage,
+        deployment_score_advantage,
+    )
+    activated = (
+        robust_score_advantage > minimum_score_advantage
+        and deployment_score_advantage > minimum_score_advantage
+    )
     return {
         "scope": "validation_only",
         "benchmark": "no_op",
-        "rule": "selected_score_strictly_exceeds_no_op_plus_margin",
+        "rule": "robust_and_deployed_scores_exceed_no_op_plus_margin",
         "minimum_score_advantage": minimum_score_advantage,
-        "selected_agent_score": selected_score,
+        "selected_agent_score": score_advantage + baseline_score,
+        "robust_training_seed_score": selected_score,
+        "deployed_checkpoint_score": deployment_score,
         "no_op_score": baseline_score,
         "score_advantage": score_advantage,
+        "robust_score_advantage": robust_score_advantage,
+        "deployed_checkpoint_score_advantage": deployment_score_advantage,
         "activated": activated,
         "sandbox_policy": "selected_agent" if activated else "no_op",
         "validation_reports": _reports_to_dict(reports),
@@ -1142,6 +1159,7 @@ def run_walk_forward_training(
             selected_score=winning_group["aggregate"][
                 "robust_training_seed_validation_score"
             ],
+            deployment_score=winning_run["validation_selection_score"],
             minimum_score_advantage=(
                 walk_forward_config.activation_min_score_advantage
             ),

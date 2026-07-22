@@ -41,6 +41,10 @@ def decision() -> dict:
         "outcome_timestamp": None,
         "outcome_nav": None,
         "outcome_return": None,
+        "action_confidence": 0.72,
+        "normalized_action_entropy": 0.41,
+        "explorable_action_factor_count": 2,
+        "decision_factor_count": 2,
         "invalid_action_count": 0,
     }
 
@@ -73,6 +77,8 @@ class AgentPaperStoreTests(TestCase):
         self.assertFalse(decisions[0]["activated"])
         self.assertEqual(decisions[0]["outcome_status"], "finalized")
         self.assertEqual(decisions[0]["outcome_return"], 0.0025)
+        self.assertEqual(decisions[0]["action_confidence"], 0.72)
+        self.assertEqual(decisions[0]["normalized_action_entropy"], 0.41)
 
     def test_separate_checkpoints_have_isolated_deployments(self):
         with TemporaryDirectory() as directory:

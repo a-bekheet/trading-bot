@@ -193,12 +193,24 @@ class WalkForwardTrainingTests(TestCase):
             minimum_score_advantage=0.0001,
             seed=7,
         )
+        unstable_checkpoint = _validation_no_op_activation_gate(
+            (environment,),
+            selected_score=0.0002,
+            deployment_score=-0.0001,
+            minimum_score_advantage=0.0001,
+            seed=7,
+        )
 
         self.assertFalse(abstained["activated"])
         self.assertEqual(abstained["sandbox_policy"], "no_op")
         self.assertEqual(abstained["no_op_score"], 0.0)
         self.assertTrue(activated["activated"])
         self.assertEqual(activated["sandbox_policy"], "selected_agent")
+        self.assertFalse(unstable_checkpoint["activated"])
+        self.assertEqual(
+            unstable_checkpoint["score_advantage"],
+            unstable_checkpoint["deployed_checkpoint_score_advantage"],
+        )
 
     def test_seed_robust_selection_does_not_choose_best_single_run(self):
         spec = ModelSpec(hidden_size=4)
