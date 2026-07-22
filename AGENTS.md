@@ -248,6 +248,18 @@ label multi-ticker scopes `in_sample_universe_research_demo` or
 and dispersion penalty. A symbol embedding is not part of the current contract;
 the dimensionless shared policy must remain usable on unseen tickers.
 
+`run_universe_walk_forward_training` is the shared-policy research boundary.
+Apply identical ordinal split indices to each ticker, but additionally require
+global wall-clock separation: maximum train arrival below minimum validation
+arrival and maximum validation arrival below minimum test arrival. Persist
+these four timestamps, every per-symbol partition fingerprint, source length,
+common length, and ignored tail count. Train candidates only on the training
+pool, aggregate only per-symbol validation reports, and instantiate all test
+environments only after architecture, latency eligibility, early stopping, and
+checkpoint restoration are fixed. Evaluate the winner independently per
+ticker; do not pool ticker paths in the moving-block bootstrap. Any aggregate
+held-out universe result must remain labeled descriptive, never inferential.
+
 The graph encoder uses only valid option slots, symmetric nearest-neighbor edges,
 and self edges. Padded contracts must neither send nor receive messages. Keep the
 dense implementation while the slot count is small; require profiling evidence

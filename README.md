@@ -230,7 +230,39 @@ each report and fingerprint. The shared observation remains dimensionless and
 does not add a symbol ID, encouraging transfer rather than memorizing the 50
 training names. The executable `train-demo` selection is still explicitly
 in-sample; use it for integration and representation research, not performance
-claims, until universe walk-forward orchestration is enabled.
+claims.
+
+Use the shared chronological research boundary for model evidence:
+
+```bash
+train-universe-walk-forward \
+  --min-train-size 500 \
+  --validation-size 100 \
+  --test-size 100 \
+  --embargo 8 \
+  --candidate flat:gru:ppo \
+  --candidate graph:hybrid:ppo \
+  --episodes 100 \
+  --selection-cross-ticker-std-penalty 0.25 \
+  --selection-worst-ticker-weight 0.25
+```
+
+The universe runner defaults to the collected top 50; repeat
+`--universe-symbol TICKER` to declare a smaller research subset. It applies the
+same ordinal split to every ticker, then enforces a stronger global boundary:
+the latest training arrival across all symbols must precede the earliest
+validation arrival, and the latest validation arrival must precede the earliest
+test arrival. Dataset lengths, unused tails, exact global timestamps, split
+indices, and train/validation/test fingerprints remain in the artifact.
+
+Every architecture is trained over the isolated training pool and restores its
+best aggregate validation checkpoint. Parameter matching, feature ablations,
+PPO/REINFORCE comparisons, and a worst-ticker latency ceiling remain available.
+Only the validation winner causes test environments to be instantiated. The
+winner is then evaluated separately per ticker against every baseline and cost
+scenario; moving-block comparisons remain within ticker and seed rather than
+pooling symbols as independent observations. The cross-ticker held-out summary
+is explicitly descriptive. One winning shared checkpoint is saved per fold.
 
 Checkpoint and architecture selection can penalize validation-path risk:
 

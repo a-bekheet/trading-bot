@@ -91,6 +91,15 @@ score dispersion or blend mean performance toward the worst ticker. The
 current executable command is in-sample integration evidence; a shared
 walk-forward runner must precede any cross-ticker alpha claim.
 
+That universe walk-forward runner is now executable. It combines independent
+per-ticker chronological splits with a global wall-clock separation check,
+selects one architecture/checkpoint from robust aggregate validation only, and
+opens every held-out ticker only after selection. Test reports, baselines, cost
+stress, and dependence-aware comparisons stay separate by ticker; the universe
+summary is descriptive. Meaningful alpha evidence still requires substantially
+more snapshots than the current integration history and predeclared repeated
+folds.
+
 Selection can now use a declared validation-only reward-minus-risk score with
 separate maximum-drawdown, downside-deviation, and turnover coefficients. The
 score controls early stopping, checkpoint restoration, algorithms,
