@@ -15,6 +15,10 @@ from typing import Any
 
 import numpy as np
 
+from trading_bot.market_data.freshness import (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+)
+from trading_bot.market_data.universe import TOP_50_TICKERS
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.evaluation import EpisodeReport, run_episode
 from trading_bot.training.features import REALIZED_VOL_WINDOWS
@@ -26,10 +30,9 @@ from trading_bot.training.sequence import (
     multi_horizon_auxiliary_targets,
     observation_vector,
 )
-from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v46"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v47"
 CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION = (
     "research-demo.critic-balance-diagnostic.v1"
 )
@@ -2721,6 +2724,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-abs-gamma", type=float)
     parser.add_argument("--max-abs-theta", type=float)
     parser.add_argument("--max-abs-vega", type=float)
+    parser.add_argument(
+        "--max-underlying-quote-age-seconds",
+        type=float,
+        default=DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+    )
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -2757,6 +2765,9 @@ def _environment_kwargs_from_args(
         "max_abs_gamma": args.max_abs_gamma,
         "max_abs_theta": args.max_abs_theta,
         "max_abs_vega": args.max_abs_vega,
+        "max_underlying_quote_age_seconds": (
+            args.max_underlying_quote_age_seconds
+        ),
     }
 
 

@@ -238,12 +238,13 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v18` transform. Prices, strikes, and average entry price are
+`dimensionless.v19` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
 become ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields and
-position quantity are log-compressed. Unrealized return uses a signed log transform.
+position quantity are log-compressed. Provider underlying-quote age uses the
+same fixed gap transform. Unrealized return uses a signed log transform.
 Cumulative log returns use the same signed bounded transform as one-step return.
 Signed contract changes are log-compressed at fixed scales. The `time_context`,
 `price_trend`, `position_state`, `position_lifecycle`, `action_feasibility`, and `contract_dynamics`
@@ -621,6 +622,31 @@ streaming inference medians were 124.81 and 120.27 microseconds, and the selecte
 held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
+
+v0.64 makes underlying price provenance and freshness causal. Yahoo's explicit
+`PRE`, `REGULAR`, and `POST` states now select the matching provider price/time
+pair instead of always attaching `regularMarketPrice` to every session. CSVs
+persist `underlyingPriceSource`, `underlyingQuoteTime`, and
+`underlyingQuoteTimeSource`; a provider timestamp advance is a material market
+event, while capture-time-only repetition is still deduplicated.
+
+The market vector adds `underlyingQuoteAgeSeconds` and
+`underlyingQuoteAgeCoverage`, with a named `data_freshness` ablation and fixed
+log transform. Explicit quote ages above the configurable 1,200-second default
+mask all simulated option and underlying fills while retaining hold and full recurrent
+and critic chronology. Missing legacy provenance has zero coverage and remains
+research-demo tradeable with a warning. The Streamlit sandbox exposes the same
+age and gate. This is a necessary data-quality control, not evidence that Yahoo
+quotes are executable or that the threshold creates alpha.
+
+The design follows recent evidence that reporting latency can reorder market
+events and cause look-ahead errors
+([Battalio et al., 2026](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5907665))
+and option-market evidence that stale quotes distort observed co-movements used
+in pricing and hedging
+([Fahlenbrach and Sandas](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=690722)).
+Environment, feature, checkpoint, single-ticker walk-forward, and universe
+walk-forward schemas advance to v24, `dimensionless.v19`, v47, v51, and v35.
 
 v0.63 makes actor credit assignment aware of whether the policy had a genuine
 choice. Session-forced holds and any other state where every decoder factor is

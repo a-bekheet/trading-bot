@@ -11,6 +11,7 @@ from trading_bot.execution.valuation import mark_positions
 from trading_bot.interface.data import (
     available_tickers,
     load_latest_snapshot,
+    market_data_freshness_status,
     market_session_status,
 )
 
@@ -33,6 +34,10 @@ option_type = st.sidebar.radio("Option type", ("call", "put"), horizontal=True)
 snapshot = load_latest_snapshot(DATA_DIR, symbol)
 filtered = snapshot[snapshot["optionType"] == option_type].sort_values("strike")
 session = market_session_status(snapshot)
+freshness = market_data_freshness_status(snapshot)
+execution_enabled = bool(
+    session["trading_enabled"] and freshness["trading_enabled"]
+)
 
 market_tab, portfolio_tab, history_tab = st.tabs(
     ("Market Data & Paper Order", "Paper Portfolio", "Trade History")
@@ -40,12 +45,20 @@ market_tab, portfolio_tab, history_tab = st.tabs(
 
 with market_tab:
     first = snapshot.iloc[0]
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Underlying", f"${first['underlyingPrice']:,.2f}")
     col2.metric("Expiration", first["expiration"])
     col3.metric("Risk-free rate", f"{first['riskFreeRate']:.3%}")
     col4.metric("Contracts", len(filtered))
     col5.metric("Market session", session["provider_state"])
+    col6.metric(
+        "Underlying quote age",
+        (
+            f"{freshness['age_seconds']:.0f}s"
+            if freshness["coverage"]
+            else "unknown"
+        ),
+    )
     st.caption(
         f"Collected at {first['collectedAt']} · Greeks: Black-Scholes-Merton"
     )
@@ -62,10 +75,16 @@ with market_tab:
             "Paper orders are disabled because the provider marks this "
             "snapshot as outside the regular market session."
         )
-    elif not session["coverage"]:
+    elif not freshness["trading_enabled"]:
         st.warning(
-            "Market-session state is unavailable in this legacy snapshot; "
-            "research-demo orders remain enabled but are not execution evidence."
+            "Paper orders are disabled because the provider's underlying "
+            "quote timestamp is explicitly stale."
+        )
+    elif not session["coverage"] or not freshness["coverage"]:
+        st.warning(
+            "Market-session or quote-time provenance is unavailable in this "
+            "legacy snapshot; research-demo orders remain enabled but are not "
+            "execution evidence."
         )
     contract_symbol = st.selectbox(
         "Contract",
@@ -92,7 +111,7 @@ with market_tab:
     if buy_col.button(
         f"Paper buy at ask ${buy_price:,.2f}",
         disabled=(
-            not session["trading_enabled"]
+            not execution_enabled
             or not math.isfinite(buy_price)
             or buy_price <= 0
         ),
@@ -109,7 +128,7 @@ with market_tab:
     if sell_col.button(
         f"Paper sell at bid ${sell_price:,.2f}",
         disabled=(
-            not session["trading_enabled"]
+            not execution_enabled
             or not math.isfinite(sell_price)
             or sell_price <= 0
         ),

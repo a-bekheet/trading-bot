@@ -30,12 +30,13 @@ CSV_COLUMNS = (
     "collectedAt", "symbol", "expiration", "optionType", "contractSymbol",
     "lastTradeDate", "strike", "lastPrice", "bid", "ask", "change",
     "percentChange", "volume", "openInterest", "impliedVolatility", "inTheMoney",
-    "contractSize", "currency", "underlyingPrice", "marketState", "riskFreeRate",
+    "contractSize", "currency", "underlyingPrice", "underlyingPriceSource",
+    "underlyingQuoteTime", "underlyingQuoteTimeSource", "marketState", "riskFreeRate",
     "riskFreeRateSource", "dividendYield", "timeToExpiryYears", "delta", "gamma",
     "theta", "vega", "greekModel",
 )
 COLLECTOR_STATUS_SCHEMA_VERSION = "collector.status.v1"
-SNAPSHOT_STATE_SCHEMA_VERSION = "collector.snapshot-state.v5"
+SNAPSHOT_STATE_SCHEMA_VERSION = "collector.snapshot-state.v6"
 COLLECTOR_STATUS_FILENAME = "_collector_status.json"
 
 
@@ -228,6 +229,11 @@ def save_snapshot(
             "symbol": symbol,
             "expiration": expiration,
             "underlyingPrice": spot,
+            "underlyingPriceSource": market_snapshot.underlying_price_source,
+            "underlyingQuoteTime": market_snapshot.underlying_quote_time,
+            "underlyingQuoteTimeSource": (
+                market_snapshot.underlying_quote_time_source
+            ),
             "marketState": market_snapshot.market_state,
             "riskFreeRate": risk_free_rate,
             "riskFreeRateSource": RISK_FREE_RATE_SOURCE,

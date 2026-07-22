@@ -14,6 +14,7 @@ from trading_bot.training.features import (
     engineer_snapshot,
     realized_volatility_features,
     snapshot_gap_features,
+    underlying_quote_age_features,
 )
 from trading_bot.training.env import (
     CONTRACT_FEATURES,
@@ -125,6 +126,42 @@ class FeatureSequenceTests(TestCase):
             MARKET_FEATURES.index("regularMarketSession"),
             MARKET_FEATURES.index("marketStateCoverage"),
         ))
+
+    def test_underlying_quote_age_is_causal_and_has_named_ablation(self):
+        frame = surface_snapshot(
+            "2026-07-21T14:00:00Z",
+            (0.2, 0.21, 0.22),
+            front_call_wing=0.23,
+            front_put_wing=0.25,
+        )
+        frame["underlyingQuoteTime"] = "2026-07-21T13:45:00Z"
+        engineered = engineer_snapshot(frame)
+
+        self.assertEqual(
+            tuple(engineered.iloc[0][[
+                "underlyingQuoteAgeSeconds",
+                "underlyingQuoteAgeCoverage",
+            ]]),
+            (900.0, 1.0),
+        )
+        self.assertEqual(
+            underlying_quote_age_features(
+                frame.assign(
+                    underlyingQuoteTime="2026-07-21T14:01:00Z"
+                )
+            ),
+            {
+                "underlyingQuoteAgeSeconds": 0.0,
+                "underlyingQuoteAgeCoverage": 0.0,
+            },
+        )
+        self.assertEqual(
+            feature_ablation_indices(("data_freshness",), 2),
+            (
+                MARKET_FEATURES.index("underlyingQuoteAgeSeconds"),
+                MARKET_FEATURES.index("underlyingQuoteAgeCoverage"),
+            ),
+        )
 
     def test_dataset_drops_consecutive_stale_quote_surfaces(self):
         base = {
@@ -975,7 +1012,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v18")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v19")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
@@ -1027,6 +1064,8 @@ class FeatureSequenceTests(TestCase):
         market[MARKET_FEATURES.index("riskFreeRate")] = 0.04
         market[MARKET_FEATURES.index("snapshotGapSeconds")] = 900
         market[MARKET_FEATURES.index("snapshotGapCoverage")] = 1
+        market[MARKET_FEATURES.index("underlyingQuoteAgeSeconds")] = 1_200
+        market[MARKET_FEATURES.index("underlyingQuoteAgeCoverage")] = 1
         market[MARKET_FEATURES.index("realizedVol4")] = 0.2
         market[MARKET_FEATURES.index("underlyingLogReturn4")] = 0.01
         market[MARKET_FEATURES.index("underlyingLogReturn16")] = -0.02
@@ -1071,6 +1110,10 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(
             vector[MARKET_FEATURES.index("snapshotGapCoverage")],
             1,
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("underlyingQuoteAgeSeconds")],
+            np.log1p(1_200) / 10,
         )
         self.assertAlmostEqual(
             vector[MARKET_FEATURES.index("underlyingLogReturn4")],

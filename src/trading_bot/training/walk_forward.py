@@ -12,6 +12,9 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
+from trading_bot.market_data.freshness import (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+)
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
     ShortVolatilityConfig,
@@ -56,7 +59,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v50"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v51"
 
 
 @dataclass(frozen=True)
@@ -1718,6 +1721,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-abs-gamma", type=float)
     parser.add_argument("--max-abs-theta", type=float)
     parser.add_argument("--max-abs-vega", type=float)
+    parser.add_argument(
+        "--max-underlying-quote-age-seconds",
+        type=float,
+        default=DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+        help=(
+            "mask simulated option and underlying fills when an explicitly "
+            "timestamped provider quote is older than this threshold"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=7)
     return parser
 

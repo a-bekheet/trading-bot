@@ -12,6 +12,12 @@ class ManifestTests(TestCase):
 
         self.assertNotEqual(liquidation.fingerprint, midpoint.fingerprint)
 
+    def test_quote_freshness_guard_is_fingerprinted(self):
+        strict = EnvManifest(max_underlying_quote_age_seconds=300)
+        lenient = EnvManifest(max_underlying_quote_age_seconds=1_200)
+
+        self.assertNotEqual(strict.fingerprint, lenient.fingerprint)
+
     def test_symbol_manifest_ignores_unrelated_ticker_files(self):
         with TemporaryDirectory() as directory:
             data_dir = Path(directory)

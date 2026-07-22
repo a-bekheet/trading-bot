@@ -8,6 +8,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from trading_bot.market_data.freshness import (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+)
 from trading_bot.training.schemas import SCHEMA_VERSION
 
 
@@ -39,6 +42,9 @@ class EnvManifest:
     max_abs_gamma: float | None = None
     max_abs_theta: float | None = None
     max_abs_vega: float | None = None
+    max_underlying_quote_age_seconds: float | None = (
+        DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS
+    )
     seed: int | None = None
     options: dict[str, Any] = field(default_factory=dict)
 

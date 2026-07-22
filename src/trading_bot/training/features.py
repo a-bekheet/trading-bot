@@ -8,6 +8,7 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
+from trading_bot.market_data.freshness import underlying_quote_age
 from trading_bot.market_data.market_state import market_state_features
 
 
@@ -21,6 +22,8 @@ MARKET_ENGINEERED_FEATURES = (
     "underlyingReturn",
     "regularMarketSession",
     "marketStateCoverage",
+    "underlyingQuoteAgeSeconds",
+    "underlyingQuoteAgeCoverage",
     "snapshotGapSeconds",
     "snapshotGapCoverage",
     "realizedVol4",
@@ -331,6 +334,26 @@ def snapshot_gap_features(
     if not math.isfinite(elapsed) or elapsed <= 0:
         return neutral
     return {"snapshotGapSeconds": elapsed, "snapshotGapCoverage": 1.0}
+
+
+def underlying_quote_age_features(frame: pd.DataFrame) -> dict[str, float]:
+    """Expose provider-time freshness with an explicit availability mask."""
+    if frame.empty:
+        age, coverage = 0.0, 0.0
+    else:
+        collected_at = (
+            frame["collectedAt"].iloc[0] if "collectedAt" in frame else None
+        )
+        quote_time = (
+            frame["underlyingQuoteTime"].iloc[0]
+            if "underlyingQuoteTime" in frame
+            else None
+        )
+        age, coverage = underlying_quote_age(collected_at, quote_time)
+    return {
+        "underlyingQuoteAgeSeconds": age,
+        "underlyingQuoteAgeCoverage": coverage,
+    }
 
 
 def volatility_regime_observation(
@@ -814,6 +837,8 @@ def engineer_snapshot(
     )
     result["regularMarketSession"] = regular_market_session
     result["marketStateCoverage"] = market_state_coverage
+    for name, value in underlying_quote_age_features(result).items():
+        result[name] = value
     _contract_dynamics_features(result, previous)
     _executable_arbitrage_features(result)
     for name, value in snapshot_gap_features(result, previous).items():

@@ -50,6 +50,10 @@ FEATURE_ABLATION_GROUPS = {
         "regularMarketSession",
         "marketStateCoverage",
     ),
+    "data_freshness": (
+        "underlyingQuoteAgeSeconds",
+        "underlyingQuoteAgeCoverage",
+    ),
     "price_trend": (
         "underlyingLogReturn4",
         "underlyingLogReturn16",
@@ -264,6 +268,10 @@ def _dimensionless_components(
         )
         gap_index = market_indices["snapshotGapSeconds"]
         market[gap_index] = np.log1p(max(market[gap_index], 0.0)) / 10.0
+        quote_age_index = market_indices["underlyingQuoteAgeSeconds"]
+        market[quote_age_index] = (
+            np.log1p(max(market[quote_age_index], 0.0)) / 10.0
+        )
         for window in REALIZED_VOL_WINDOWS:
             volatility_index = market_indices[f"realizedVol{window}"]
             market[volatility_index] = np.log1p(

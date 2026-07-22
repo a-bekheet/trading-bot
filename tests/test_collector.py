@@ -53,6 +53,9 @@ class CollectorTests(TestCase):
             spot=200.0,
             dividend_yield=0.005,
             market_state="REGULAR",
+            underlying_price_source="regularMarketPrice",
+            underlying_quote_time="2026-07-21T11:59:59+00:00",
+            underlying_quote_time_source="regularMarketTime",
         )
         captured_at = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 
@@ -73,6 +76,14 @@ class CollectorTests(TestCase):
         self.assertEqual(len(saved), 5)
         self.assertEqual(set(saved.iloc[1:]["optionType"]), {"call", "put"})
         self.assertEqual(set(saved.iloc[1:]["marketState"]), {"REGULAR"})
+        self.assertEqual(
+            set(saved.iloc[1:]["underlyingPriceSource"]),
+            {"regularMarketPrice"},
+        )
+        self.assertEqual(
+            set(saved.iloc[1:]["underlyingQuoteTimeSource"]),
+            {"regularMarketTime"},
+        )
         self.assertEqual(
             set(saved.iloc[1:]["expiration"]),
             {"2026-08-21", "2026-09-18"},

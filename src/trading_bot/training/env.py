@@ -10,6 +10,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from trading_bot.market_data.freshness import (
+    DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS,
+    underlying_quote_age,
+)
 from trading_bot.market_data.market_state import (
     market_state_features,
     normalize_market_state,
@@ -139,6 +143,9 @@ class OptionsEnv:
         max_abs_gamma: float | None = None,
         max_abs_theta: float | None = None,
         max_abs_vega: float | None = None,
+        max_underlying_quote_age_seconds: float | None = (
+            DEFAULT_MAX_UNDERLYING_QUOTE_AGE_SECONDS
+        ),
     ):
         if slot_count < 1 or max_quantity < 1:
             raise ValueError("slot_count and max_quantity must be positive")
@@ -175,6 +182,17 @@ class OptionsEnv:
         }
         if any(limit is not None and limit <= 0 for limit in limits.values()):
             raise ValueError("Greek risk limits must be positive when provided")
+        if (
+            max_underlying_quote_age_seconds is not None
+            and (
+                not math.isfinite(max_underlying_quote_age_seconds)
+                or max_underlying_quote_age_seconds <= 0
+            )
+        ):
+            raise ValueError(
+                "max_underlying_quote_age_seconds must be positive and finite "
+                "when provided"
+            )
         if manifest is not None and manifest.schema_version != EnvManifest().schema_version:
             raise ValueError("environment manifest schema is incompatible")
         self.dataset = dataset
@@ -196,6 +214,9 @@ class OptionsEnv:
         self.reward_drawdown_penalty = reward_drawdown_penalty
         self.reward_downside_penalty = reward_downside_penalty
         self.risk_limits = limits
+        self.max_underlying_quote_age_seconds = (
+            max_underlying_quote_age_seconds
+        )
         manifest_values = {
             "symbol": dataset.symbol,
             "slot_count": slot_count,
@@ -219,6 +240,9 @@ class OptionsEnv:
             "max_abs_gamma": max_abs_gamma,
             "max_abs_theta": max_abs_theta,
             "max_abs_vega": max_abs_vega,
+            "max_underlying_quote_age_seconds": (
+                max_underlying_quote_age_seconds
+            ),
         }
         self.manifest = (
             replace(manifest, **manifest_values)
@@ -258,6 +282,7 @@ class OptionsEnv:
                     "reward_downside_penalty",
                     "max_abs_delta", "max_abs_gamma", "max_abs_theta",
                     "max_abs_vega",
+                    "max_underlying_quote_age_seconds",
                 )
                 if key in kwargs
             })
@@ -784,6 +809,39 @@ class OptionsEnv:
         session_tradeable = (
             market_state_coverage < 0.5 or regular_market_session >= 0.5
         )
+        raw_quote_age, raw_quote_age_coverage = underlying_quote_age(
+            first.get("collectedAt"),
+            first.get("underlyingQuoteTime"),
+        )
+        quote_age = float(
+            first.get("underlyingQuoteAgeSeconds", raw_quote_age) or 0.0
+        )
+        quote_age_coverage = float(
+            first.get(
+                "underlyingQuoteAgeCoverage",
+                raw_quote_age_coverage,
+            )
+            or 0.0
+        )
+        if raw_quote_age_coverage >= 0.5:
+            quote_age = raw_quote_age
+            quote_age_coverage = raw_quote_age_coverage
+        if (
+            not math.isfinite(quote_age)
+            or quote_age < 0
+            or not math.isfinite(quote_age_coverage)
+            or quote_age_coverage < 0.5
+        ):
+            quote_age = 0.0
+            quote_age_coverage = 0.0
+        else:
+            quote_age_coverage = 1.0
+        freshness_tradeable = (
+            quote_age_coverage < 0.5
+            or self.max_underlying_quote_age_seconds is None
+            or quote_age <= self.max_underlying_quote_age_seconds
+        )
+        market_tradeable = session_tradeable and freshness_tradeable
         action_mask = np.zeros(self.action_shape, dtype=bool)
         for index, contract in enumerate(slots):
             if contract is None:
@@ -791,7 +849,7 @@ class OptionsEnv:
             if not valid[index]:
                 continue
             action_mask[index, 0] = True
-            if not session_tradeable:
+            if not market_tradeable:
                 continue
             ask = self._execution_price(contract, "buy")
             bid = self._execution_price(contract, "sell")
@@ -880,7 +938,7 @@ class OptionsEnv:
                     )
                 )
             action_mask[underlying_slot, encoded] = (
-                session_tradeable
+                market_tradeable
                 and price > 0
                 and fill_allowed
                 and self._risk_allowed(exposures, greek_change)
@@ -956,6 +1014,20 @@ class OptionsEnv:
                 "fallback": (
                     "legacy_unknown_permits_research_demo_fills"
                     if market_state_coverage < 0.5
+                    else None
+                ),
+            },
+            "market_data_freshness": {
+                "quote_time": first.get("underlyingQuoteTime"),
+                "quote_time_source": first.get("underlyingQuoteTimeSource"),
+                "price_source": first.get("underlyingPriceSource"),
+                "age_seconds": quote_age,
+                "coverage": quote_age_coverage,
+                "max_age_seconds": self.max_underlying_quote_age_seconds,
+                "trading_enabled": freshness_tradeable,
+                "fallback": (
+                    "legacy_unknown_permits_research_demo_fills"
+                    if quote_age_coverage < 0.5
                     else None
                 ),
             },

@@ -91,16 +91,20 @@ dividend yield, and risk-free-rate inputs so any material change is persisted.
 The persisted Greek-model identifier is also material so a deliberate model
 version change can coexist with the older calculation. Provider `marketState`
 is material: a regular-to-closed transition must be stored even when quotes do
-not move. Never infer this field from local clock time, weekdays, or a holiday
-calendar; absent and unrecognized values migrate to the explicit `UNKNOWN`
-fallback.
+not move. Select `underlyingPrice` and `underlyingQuoteTime` as a matching
+provider session pair and persist both source fields; never attach a pre/post
+timestamp to a regular price. A provider quote-time advance is material even
+when price is unchanged. Never infer session state from local clock time,
+weekdays, or a holiday calendar; absent and unrecognized values migrate to the
+explicit `UNKNOWN` fallback.
 The training loader must apply the same rule to consecutive legacy snapshots;
 after filtering, causal gaps are measured from the last materially distinct
 surface. Do not delete old CSV rows as part of this filter.
 
 - `collectedAt`, `symbol`, `expiration`, `optionType`
-- `underlyingPrice`, `marketState`, `riskFreeRate`, `riskFreeRateSource`,
-  `dividendYield`
+- `underlyingPrice`, `underlyingPriceSource`, `underlyingQuoteTime`,
+  `underlyingQuoteTimeSource`, `marketState`, `riskFreeRate`,
+  `riskFreeRateSource`, `dividendYield`
 - `timeToExpiryYears`, `impliedVolatility`, `greekModel`
 - `delta`, `gamma`, `theta`, `vega`
 
@@ -195,6 +199,11 @@ small and stable:
   `regularMarketSession` and `marketStateCoverage` belong to the named
   `market_session` ablation, but masking those policy inputs must never disable
   the independent execution-safety mask.
+- Explicit provider quote age above the environment's configured maximum masks
+  every non-hold option and underlying action. Missing or future-skewed quote
+  time has zero `underlyingQuoteAgeCoverage`; legacy missing coverage remains
+  research-demo tradeable and must be reported. The age/coverage inputs belong
+  to `data_freshness`, but its ablation must never disable the execution guard.
 - Multiple orders in one action are revalidated sequentially so cash cannot go
   negative even when individual pre-step actions were affordable.
 - Execute the underlying leg first, then option slots in ascending order. Masks
@@ -302,12 +311,12 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v18`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v19`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
 years, held quantity and unrealized return are signed-log compressed, and
-heavy-tailed fields are compressed and clipped. Raw
+heavy-tailed fields, including provider quote age, are compressed and clipped. Raw
 volume and open interest
 must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and

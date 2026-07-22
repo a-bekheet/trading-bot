@@ -7,6 +7,7 @@ import pandas as pd
 from trading_bot.interface.data import (
     available_tickers,
     load_latest_snapshot,
+    market_data_freshness_status,
     market_session_status,
 )
 
@@ -47,3 +48,22 @@ class InterfaceDataTests(TestCase):
         })
         self.assertFalse(closed["trading_enabled"])
         self.assertTrue(regular["trading_enabled"])
+
+    def test_market_freshness_status_distinguishes_legacy_fresh_and_stale(self):
+        legacy = market_data_freshness_status(pd.DataFrame([{
+            "collectedAt": "2026-07-22T10:00:00Z",
+        }]), max_age_seconds=1_200)
+        fresh = market_data_freshness_status(pd.DataFrame([{
+            "collectedAt": "2026-07-22T10:00:00Z",
+            "underlyingQuoteTime": "2026-07-22T09:50:00Z",
+            "underlyingQuoteTimeSource": "regularMarketTime",
+            "underlyingPriceSource": "regularMarketPrice",
+        }]), max_age_seconds=1_200)
+        stale = market_data_freshness_status(pd.DataFrame([{
+            "collectedAt": "2026-07-22T10:00:00Z",
+            "underlyingQuoteTime": "2026-07-22T09:00:00Z",
+        }]), max_age_seconds=1_200)
+
+        self.assertEqual((legacy["coverage"], legacy["trading_enabled"]), (0, True))
+        self.assertEqual((fresh["age_seconds"], fresh["trading_enabled"]), (600, True))
+        self.assertEqual((stale["age_seconds"], stale["trading_enabled"]), (3_600, False))
