@@ -682,8 +682,13 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 explorable_per_decision.clamp_min(1)
             )
             explorable_decisions = explorable_per_decision > 0
+            explorable_values = explorable.to(entropies.dtype)
             return {
                 "raw_mean": entropies.mean(),
+                "explorable_raw_mean": (
+                    (entropies * explorable_values).sum()
+                    / explorable_values.sum().clamp_min(1)
+                ),
                 "feasible_normalized": (
                     (
                         normalized_per_decision

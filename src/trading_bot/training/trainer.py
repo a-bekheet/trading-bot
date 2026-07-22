@@ -29,7 +29,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v45"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v46"
 CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION = (
     "research-demo.critic-balance-diagnostic.v1"
 )
@@ -1161,6 +1161,43 @@ def _parameter_gradient_norm(parameters, torch) -> float:
     )
 
 
+def _choice_aware_advantages(advantages, choice_mask, torch):
+    """Normalize actor advantages only across genuine policy choices."""
+    if advantages.ndim != 1 or choice_mask.shape != advantages.shape:
+        raise ValueError("choice mask must match one-dimensional advantages")
+    if choice_mask.dtype != torch.bool:
+        raise ValueError("choice mask must be boolean")
+    normalized = advantages.clone()
+    choice_count = int(choice_mask.sum())
+    if choice_count > 1:
+        selected = advantages[choice_mask]
+        normalized[choice_mask] = (selected - selected.mean()) / (
+            selected.std(unbiased=False) + 1e-8
+        )
+    return normalized
+
+
+def _masked_mean(values, mask, torch):
+    """Mean over an exact actor-support mask, retaining a zero-gradient scalar."""
+    if values.shape != mask.shape or mask.dtype != torch.bool:
+        raise ValueError("masked mean requires an equal-shape boolean mask")
+    if bool(mask.any()):
+        return values[mask].mean()
+    return values.sum() * 0.0
+
+
+def _actor_objective_mask(action_masks, aggregation: str):
+    """Select exact decoder support on which the actor had a real choice."""
+    if aggregation not in {"components", "joint"}:
+        raise ValueError("actor objective aggregation must be components or joint")
+    explorable_factors = action_masks.sum(dim=-1) > 1
+    return (
+        explorable_factors.any(dim=-1, keepdim=True)
+        if aggregation == "joint"
+        else explorable_factors
+    )
+
+
 def _generalized_advantages(
     rewards,
     values,
@@ -1565,6 +1602,7 @@ def train_actor_critic(
         )
         sequences = []
         action_masks = []
+        choice_steps = []
         actions = []
         rewards = []
         transition_seconds = []
@@ -1591,13 +1629,39 @@ def train_actor_critic(
                 chunk_hidden_states.append(_detach_hidden(hidden_state))
             sequence = _one_step_tensor(observation, torch)
             action_mask = torch.from_numpy(observation.action_mask).unsqueeze(0)
+            has_actor_choice = bool((action_mask.sum(dim=-1) > 1).any())
+            choice_steps.append(has_actor_choice)
             with torch.no_grad():
                 logits, value, hidden_state = model(
                     sequence,
                     action_mask,
                     hidden_state=hidden_state,
                 )
-                action = model.actions_from_logits(logits)
+                if has_actor_choice:
+                    action = model.actions_from_logits(logits)
+                    old_log_probability = model.action_log_probabilities(
+                        logits,
+                        action,
+                        aggregation=likelihood_aggregation,
+                    )
+                else:
+                    action = torch.zeros(
+                        1,
+                        episode_env.action_shape[0],
+                        dtype=torch.long,
+                        device=logits.device,
+                    )
+                    likelihood_factors = (
+                        episode_env.action_shape[0]
+                        if likelihood_aggregation == "components"
+                        else 1
+                    )
+                    old_log_probability = torch.zeros(
+                        1,
+                        likelihood_factors,
+                        dtype=logits.dtype,
+                        device=logits.device,
+                    )
             hidden_state = _detach_hidden(hidden_state)
             action_array = action.squeeze(0).detach().cpu().numpy()
             requested_option_orders += int(
@@ -1618,13 +1682,7 @@ def train_actor_critic(
             action_masks.append(action_mask.squeeze(0))
             actions.append(action.squeeze(0))
             rewards.append(float(reward))
-            old_log_probabilities.append(
-                model.action_log_probabilities(
-                    logits,
-                    action,
-                    aggregation=likelihood_aggregation,
-                ).squeeze(0)
-            )
+            old_log_probabilities.append(old_log_probability.squeeze(0))
             old_values.append(value.squeeze(0))
             invalid_actions += int(info["invalid_action_count"])
             executions += len(info["executions"])
@@ -1655,6 +1713,7 @@ def train_actor_critic(
         actions_tensor = torch.stack(actions)
         old_log_probs_tensor = torch.stack(old_log_probabilities)
         old_values_tensor = torch.stack(old_values)
+        choice_steps_tensor = torch.tensor(choice_steps, dtype=torch.bool)
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
         discounts_tensor = torch.from_numpy(
             _duration_adjusted_factors(
@@ -1703,10 +1762,11 @@ def train_actor_critic(
                 torch,
             )
             advantages = returns_tensor - old_values_tensor
-        if len(advantages) > 1:
-            advantages = (advantages - advantages.mean()) / (
-                advantages.std(unbiased=False) + 1e-8
-            )
+        actor_advantages = _choice_aware_advantages(
+            advantages,
+            choice_steps_tensor,
+            torch,
+        )
 
         update_metrics = []
         stop_early = False
@@ -1796,22 +1856,75 @@ def train_actor_critic(
                     predicted_auxiliary = None
                 logits = sequence_logits[valid_steps]
                 predicted_values = sequence_values[valid_steps]
-                new_log_probs = model.action_log_probabilities(
-                    logits,
-                    actions_tensor[batch],
-                    aggregation=likelihood_aggregation,
+                actor_objective_mask = _actor_objective_mask(
+                    batch_masks[valid_steps],
+                    likelihood_aggregation,
                 )
-                log_ratio = new_log_probs - old_log_probs_tensor[batch]
-                ratio = log_ratio.exp()
-                batch_advantages = advantages[batch].unsqueeze(-1)
-                if config.algorithm == "ppo":
-                    unclipped = ratio * batch_advantages
-                    clipped = ratio.clamp(
-                        1 - config.clip_ratio,
-                        1 + config.clip_ratio,
-                    ) * batch_advantages
-                    policy_loss = -torch.minimum(unclipped, clipped).mean()
+                has_actor_choices = bool(actor_objective_mask.any())
+                # Hold is always feasible, so its logit is finite even when
+                # every non-hold action is masked. Avoid ``-inf * 0`` NaNs.
+                zero_actor = logits[..., 0].sum() * 0.0
+                approx_kl = 0.0
+                clip_fraction = 0.0
+                if has_actor_choices:
+                    new_log_probs = model.action_log_probabilities(
+                        logits,
+                        actions_tensor[batch],
+                        aggregation=likelihood_aggregation,
+                    )
+                    batch_advantages = actor_advantages[batch].unsqueeze(-1)
+                    if config.algorithm == "ppo":
+                        log_ratio = (
+                            new_log_probs - old_log_probs_tensor[batch]
+                        )
+                        ratio = log_ratio.exp()
+                        unclipped = ratio * batch_advantages
+                        clipped = ratio.clamp(
+                            1 - config.clip_ratio,
+                            1 + config.clip_ratio,
+                        ) * batch_advantages
+                        policy_loss = -_masked_mean(
+                            torch.minimum(unclipped, clipped),
+                            actor_objective_mask,
+                            torch,
+                        )
+                        approx_kl = float(_masked_mean(
+                            (ratio - 1) - log_ratio,
+                            actor_objective_mask,
+                            torch,
+                        ).detach())
+                        clip_fraction = float(_masked_mean(
+                            (
+                                ratio.sub(1).abs()
+                                > config.clip_ratio
+                            ).float(),
+                            actor_objective_mask,
+                            torch,
+                        ).detach())
+                    else:
+                        policy_loss = -_masked_mean(
+                            new_log_probs * batch_advantages,
+                            actor_objective_mask,
+                            torch,
+                        )
+                    entropy_statistics = model.action_entropy_statistics(
+                        logits
+                    )
+                    entropy = (
+                        entropy_statistics["explorable_raw_mean"]
+                        if config.entropy_objective == "raw_mean"
+                        else entropy_statistics["feasible_normalized"]
+                    )
+                else:
+                    policy_loss = zero_actor
+                    entropy = zero_actor
+                    entropy_statistics = {
+                        "raw_mean": zero_actor,
+                        "feasible_normalized": zero_actor,
+                        "explorable_factor_fraction": zero_actor,
+                    }
 
+                if config.algorithm == "ppo":
                     value_delta = predicted_values - old_values_tensor[batch]
                     clipped_values = (
                         old_values_tensor[batch]
@@ -1825,14 +1938,9 @@ def train_actor_critic(
                         (clipped_values - returns_tensor[batch]).square(),
                     ).mean()
                 else:
-                    policy_loss = -(
-                        new_log_probs * batch_advantages
-                    ).mean()
                     value_loss = 0.5 * (
                         predicted_values - returns_tensor[batch]
                     ).square().mean()
-                entropy_statistics = model.action_entropy_statistics(logits)
-                entropy = entropy_statistics[config.entropy_objective]
                 auxiliary_loss = predicted_values.sum() * 0.0
                 auxiliary_mae = predicted_values.sum() * 0.0
                 if auxiliary_enabled:
@@ -1875,7 +1983,6 @@ def train_actor_critic(
                     model.parameters(), config.gradient_clip
                 )
                 optimizer.step()
-                approx_kl = float(((ratio - 1) - log_ratio).mean().detach())
                 update_metrics.append(
                     (
                         float(loss.detach()),
@@ -1884,15 +1991,7 @@ def train_actor_critic(
                         float(entropy.detach()),
                         float(gradient_norm),
                         approx_kl,
-                        (
-                            float(
-                                (ratio.sub(1).abs() > config.clip_ratio)
-                                .float()
-                                .mean()
-                            )
-                            if config.algorithm == "ppo"
-                            else 0.0
-                        ),
+                        clip_fraction,
                         float(auxiliary_loss.detach()),
                         float(auxiliary_mae.detach()),
                         float(entropy_statistics["raw_mean"].detach()),
@@ -1991,6 +2090,11 @@ def train_actor_critic(
                 "training_symbol": episode_env.dataset.symbol,
                 "training_environment_index": environment_index,
                 "steps": steps,
+                "actor_choice_steps": int(choice_steps_tensor.sum()),
+                "forced_hold_steps": int((~choice_steps_tensor).sum()),
+                "actor_choice_step_fraction": float(
+                    choice_steps_tensor.float().mean()
+                ),
                 "rollout_start_index": rollout_start,
                 "rollout_end_index": rollout_start + steps,
                 "rollout_start_sampling_requested": config.start_sampling,
@@ -2266,8 +2370,18 @@ def checkpoint_manifest(
             "entropy_reduction": (
                 "mean_per_decision_over_explorable_factors_normalized_by_log_feasible_actions"
                 if training_config.entropy_objective == "feasible_normalized"
-                else "raw_mean_per_decoder_factor"
+                else "mean_over_explorable_decoder_factors"
             ),
+            "actor_credit_assignment": {
+                "choice_definition": "at_least_one_decoder_factor_has_multiple_feasible_actions",
+                "advantage_normalization": "choice_steps_only",
+                "policy_surrogate": "explorable_support_only",
+                "entropy": "explorable_support_only",
+                "kl_and_clip_diagnostics": "explorable_support_only",
+                "critic_returns": "all_chronological_transitions",
+                "recurrent_context": "all_chronological_transitions",
+                "auxiliary_targets": "all_available_chronological_transitions",
+            },
         },
         "critic_balance_diagnostic": critic_balance_diagnostics(metrics),
         "temporal_training": {
@@ -2561,7 +2675,7 @@ def _parser() -> argparse.ArgumentParser:
         default="feasible_normalized",
         help=(
             "normalize masked entropy by each feasible action set or use "
-            "the legacy raw factor mean"
+            "the unnormalized explorable-factor mean"
         ),
     )
     parser.add_argument(

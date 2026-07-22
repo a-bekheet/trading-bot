@@ -515,6 +515,14 @@ class RecurrentTests(TestCase):
             math.log(3) / 7,
         )
         self.assertAlmostEqual(
+            float(four_rows["explorable_raw_mean"]),
+            math.log(3),
+        )
+        self.assertAlmostEqual(
+            float(seven_rows["explorable_raw_mean"]),
+            math.log(3),
+        )
+        self.assertAlmostEqual(
             float(four_rows["explorable_factor_fraction"]),
             0.25,
         )
@@ -564,6 +572,7 @@ class RecurrentTests(TestCase):
             torch.tensor([[0.0, *([float("-inf")] * 6)]])
         )
         self.assertEqual(float(hold_only["feasible_normalized"]), 0.0)
+        self.assertEqual(float(hold_only["explorable_raw_mean"]), 0.0)
         self.assertEqual(float(hold_only["explorable_factor_fraction"]), 0.0)
 
     @skipUnless(torch is not None, "install the optional ml extra")

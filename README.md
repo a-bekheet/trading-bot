@@ -622,6 +622,32 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.63 makes actor credit assignment aware of whether the policy had a genuine
+choice. Session-forced holds and any other state where every decoder factor is
+singleton no longer enter actor-advantage normalization, the policy surrogate,
+entropy, approximate KL, or clip fraction. Joint PPO/REINFORCE masks entire
+choice-free transitions; the dimensionwise PPO ablation masks individual
+singleton factors. This follows the constrained-policy lesson that training
+must operate on the actual masked distribution, supported by
+[Huang and Ontañón](https://arxiv.org/abs/2006.14171) and the more recent
+[state-dependent relevance work](https://arxiv.org/abs/2406.03704).
+
+Nothing is removed from chronological learning: every forced transition still
+advances GRU/LSTM state and participates in rewards, GAE or returns, critic
+loss, and available auxiliary targets. Episode metrics now record actor-choice
+steps, forced-hold steps, and their fraction; checkpoint manifests persist the
+full support contract. This is training-only and adds no deployment inference
+operation. Checkpoint, single-ticker walk-forward, and universe walk-forward
+schemas advance to v46, v50, and v34; environment and feature schemas remain
+v23 and `dimensionless.v18`.
+
+All-forced minibatches also skip categorical construction, log-probability,
+importance-ratio, and entropy work. A matched seven-repeat benchmark of 20
+one-step closed-session PPO runs measured 25.86 ms per run versus 25.98 ms on
+committed v0.62. The removed operations are semantically unnecessary, but the
+0.5% end-to-end difference is not a measurable speedup because recurrent,
+critic, setup, and evaluation work dominate this tiny run.
+
 v0.62 adds a causal market-session boundary from Yahoo's option-chain
 [`underlying.marketState`](https://github.com/ranaroussi/yfinance/blob/main/yfinance/ticker.py).
 The collector normalizes and persists the provider
@@ -1322,7 +1348,7 @@ retains the joint candidate because this training-only choice has no deployment
 latency tradeoff.
 
 Add `--entropy-objective-ablation` to compare the default mask-density-invariant
-entropy against the legacy raw factor mean. The flag requires a positive
+entropy against the unnormalized explorable-factor mean. The flag requires a positive
 entropy coefficient and creates a matched candidate for every declared model.
 Artifacts record both objective values and validation lift; an exact tie retains
 `feasible_normalized` because the choice adds no inference operations.

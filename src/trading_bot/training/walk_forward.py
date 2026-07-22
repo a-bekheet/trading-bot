@@ -56,7 +56,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v49"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v50"
 
 
 @dataclass(frozen=True)
@@ -1606,7 +1606,7 @@ def _parser() -> argparse.ArgumentParser:
         default="feasible_normalized",
         help=(
             "normalize masked entropy by each feasible action set or use "
-            "the legacy raw factor mean"
+            "the unnormalized explorable-factor mean"
         ),
     )
     parser.add_argument(
@@ -1680,7 +1680,7 @@ def _parser() -> argparse.ArgumentParser:
         "--entropy-objective-ablation",
         action="store_true",
         help=(
-            "add matched legacy raw-mean entropy candidates for every model"
+            "add matched unnormalized explorable-entropy candidates for every model"
         ),
     )
     parser.add_argument("--slot-count", type=int, default=32)

@@ -35,7 +35,7 @@ Every candidate must eventually pass:
 
 | Evidence | Useful idea for this repository | Decision |
 | --- | --- | --- |
-| [A Closer Look at Invalid Action Masking in Policy Gradient Algorithms (2020)](https://arxiv.org/abs/2006.14171) and [Improving Stochastic Action-Constrained RL via Truncated Distributions (2025)](https://arxiv.org/abs/2511.22406) | Action constraints change the policy distribution whose log probability and entropy must be optimized; approximating those quantities from an unmasked distribution can degrade constrained-policy learning. Neither paper establishes option-trading alpha or the repository's normalization rule. | Keep exact masked categorical entropy. As an explicit engineering choice, divide each explorable factor by its state-specific maximum `log(K)`, omit hold-only factors, and average per decision so mask density cannot silently rescale exploration. Preserve raw entropy and require a matched validation ablation. |
+| [A Closer Look at Invalid Action Masking in Policy Gradient Algorithms (2020)](https://arxiv.org/abs/2006.14171), [Excluding the Irrelevant (2024)](https://arxiv.org/abs/2406.03704), and [Improving Stochastic Action-Constrained RL via Truncated Distributions (2025)](https://arxiv.org/abs/2511.22406) | Action constraints change the policy distribution whose log probability and entropy must be optimized; state-specific relevant sets can improve learning efficiency. None establishes option-trading alpha or the repository's normalization rule. | Keep exact masked categorical likelihoods. Normalize actor advantages and aggregate policy, entropy, KL, and clipping only where the decoder has multiple feasible choices. Retain every transition for recurrent context, returns, critic learning, and available auxiliary targets. Preserve raw explorable entropy and require a matched entropy ablation. |
 | [Dimension-Wise Importance Sampling Weight Clipping for Sample-Efficient Reinforcement Learning (ICML 2019)](https://proceedings.mlr.press/v97/han19b.html) | Per-dimension PPO clipping is a distinct high-dimensional control algorithm intended to trade variance against clipping bias; it is not the likelihood ratio of the complete sampled action. | Make the exact product-policy joint ratio the factorized PPO default and retain dimension-wise clipping only as a named validation ablation. Use the exact joint score function for REINFORCE and record the ratio count in every run. |
 | [SANOS: A Strictly Arbitrage-Free Neural Option Surface (2026)](https://arxiv.org/abs/2601.11209) | Bid/ask spreads belong directly in no-arbitrage constraints; midpoint-only checks can manufacture violations that cannot be traded. | Add causal bid/ask-aware adjacent-strike vertical and convexity diagnostics with explicit coverage. Treat them as state-quality signals and test their marginal value through `static_arbitrage`; do not automatically trade or reward them. |
 | [Volatility Surface Reconstruction using Deep Learning under No-Arbitrage Constraints (2026)](https://arxiv.org/abs/2605.24031) | In a sparse/noisy reconstruction study, coordinate-aware attention and explicit calendar/butterfly penalties reduce reconstruction and consistency errors. Reconstruction accuracy does not imply a profitable trading representation. | Keep the compact masked attention candidate and add observed-strike butterfly diagnostics. Defer reconstructed quotes and calendar constraints until the repository has forward-consistent European-equivalent inputs and enough history for separate reconstruction validation. |
@@ -250,9 +250,15 @@ after action feasibility is applied, then averaged only across factors with at
 least two choices within each decision before decisions are averaged. This
 keeps the exploration coefficient invariant to empty
 option slots and changing feasible-set size while retaining exact raw entropy
-for audit. The former raw mean remains a validation-only ablation. The change
+for audit. The unnormalized explorable-factor mean remains a validation-only
+ablation. The change
 adds no inference operation; its small training overhead and lack of observed
 lift on the tiny GOOG smoke are both recorded rather than treated as alpha.
+Actor credit assignment now uses that same exact explorable support. Forced-hold
+transitions cannot rescale advantages or dilute policy/KL/clipping averages, but
+they remain in recurrent chronology, returns, critic loss, and auxiliary
+supervision. This distinction is especially important once explicit session
+state makes pre/post-market observations intentionally non-tradeable.
 
 The factorized decoder now treats its sampled rows as one product-distribution
 action for optimization: component log probabilities are summed before PPO

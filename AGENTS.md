@@ -430,6 +430,16 @@ raw entropy, normalized entropy, and the explorable-factor fraction in episode
 metrics. Keep `raw_mean` only as the named validation ablation, require a
 positive coefficient for that comparison, and prefer `feasible_normalized` on
 an exact score tie because neither objective changes inference.
+Actor credit assignment must use the same exact support. A transition is an
+actor-choice step only when at least one decoder factor has more than one
+feasible action. Normalize advantages only across those steps. The default
+joint PPO/REINFORCE objective averages only actor-choice transitions; the
+dimensionwise PPO ablation averages only explorable factors. Apply the same
+support to entropy, approximate-KL, and clip-fraction aggregation. Forced-hold
+transitions still advance recurrent state and remain in rewards, GAE/returns,
+critic loss, and available auxiliary targets. Never drop them from chronology
+or treat their absence from the actor loss as an absent market state. Persist
+choice/forced counts and the exact credit-assignment contract.
 Do not hard-cap active rows or post-process sampled actions without deriving the
 matching joint likelihood; that would invalidate PPO ratios. Preserve requested
 option/underlying order counts and action-density metrics in every episode.

@@ -31,12 +31,15 @@ from trading_bot.training.trainer import (
     RecurrentPolicyState,
     StreamingRecurrentPolicy,
     TrainingConfig,
+    _actor_objective_mask,
     _burn_in_recurrent_context,
+    _choice_aware_advantages,
     _discounted_returns,
     _duration_adjusted_factors,
     _environment_kwargs_from_args,
     _elapsed_seconds,
     _generalized_advantages,
+    _masked_mean,
     _parser,
     _sample_rollout_bounds,
     _symbols_from_args,
@@ -57,6 +60,153 @@ from tests.test_training_env import demo_dataset, three_snapshot_dataset
 
 
 class TrainerTests(TestCase):
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_choice_aware_actor_statistics_exclude_forced_holds(self):
+        advantages = torch.tensor([100.0, 1.0, 3.0])
+        choice_mask = torch.tensor([False, True, True])
+
+        normalized = _choice_aware_advantages(
+            advantages,
+            choice_mask,
+            torch,
+        )
+        masked = _masked_mean(
+            torch.tensor([100.0, 1.0, 3.0]),
+            choice_mask,
+            torch,
+        )
+
+        torch.testing.assert_close(normalized, torch.tensor([100.0, -1.0, 1.0]))
+        torch.testing.assert_close(
+            _choice_aware_advantages(
+                advantages,
+                torch.tensor([False, True, False]),
+                torch,
+            ),
+            advantages,
+        )
+        self.assertEqual(float(masked), 2.0)
+        forced_only = _masked_mean(
+            advantages.requires_grad_(),
+            torch.zeros(3, dtype=torch.bool),
+            torch,
+        )
+        forced_only.backward()
+        self.assertEqual(float(forced_only.detach()), 0.0)
+        torch.testing.assert_close(advantages.grad, torch.zeros(3))
+
+        action_masks = torch.tensor([
+            [[True, True, False], [True, False, False]],
+            [[True, False, False], [True, False, False]],
+        ])
+        torch.testing.assert_close(
+            _actor_objective_mask(action_masks, "components"),
+            torch.tensor([[True, False], [False, False]]),
+        )
+        torch.testing.assert_close(
+            _actor_objective_mask(action_masks, "joint"),
+            torch.tensor([[True], [False]]),
+        )
+        with self.assertRaisesRegex(ValueError, "aggregation"):
+            _actor_objective_mask(action_masks, "mean")
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_forced_hold_sessions_train_critic_without_actor_credit(self):
+        source = demo_dataset()
+        snapshots = tuple(
+            Snapshot(
+                snapshot.timestamp,
+                snapshot.frame.assign(marketState="CLOSED"),
+            )
+            for snapshot in source.snapshots
+        )
+        env = OptionsEnv(
+            SnapshotDataset(snapshots, source.symbol),
+            slot_count=2,
+        )
+        observation, _ = env.reset()
+        for algorithm in ("ppo", "reinforce"):
+            for action_decoder in ("factorized", "single_leg"):
+                with self.subTest(
+                    algorithm=algorithm,
+                    action_decoder=action_decoder,
+                ):
+                    recurrent = RecurrentConfig(
+                        input_size=observation_vector(observation).size,
+                        slot_count=2,
+                        action_count=env.action_shape[1],
+                        action_slot_count=env.action_shape[0],
+                        hidden_size=8,
+                        action_decoder=action_decoder,
+                    )
+                    _, metrics = train_actor_critic(
+                        env,
+                        recurrent,
+                        TrainingConfig(
+                            episodes=1,
+                            sequence_length=1,
+                            ppo_epochs=1,
+                            algorithm=algorithm,
+                        ),
+                    )
+
+                    self.assertEqual(metrics[0]["actor_choice_steps"], 0)
+                    self.assertEqual(metrics[0]["forced_hold_steps"], 1)
+                    self.assertEqual(
+                        metrics[0]["actor_choice_step_fraction"],
+                        0.0,
+                    )
+                    self.assertEqual(metrics[0]["policy_loss"], 0.0)
+                    self.assertEqual(metrics[0]["entropy"], 0.0)
+                    self.assertEqual(metrics[0]["approx_kl"], 0.0)
+                    self.assertEqual(
+                        metrics[0]["actor_head_gradient_norm"],
+                        0.0,
+                    )
+                    self.assertGreaterEqual(
+                        metrics[0]["critic_head_gradient_norm"],
+                        0.0,
+                    )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_mixed_sessions_retain_context_but_count_only_real_choices(self):
+        source = three_snapshot_dataset()
+        states = ("PRE", "REGULAR", "CLOSED")
+        snapshots = tuple(
+            Snapshot(
+                snapshot.timestamp,
+                snapshot.frame.assign(marketState=state),
+            )
+            for snapshot, state in zip(source.snapshots, states, strict=True)
+        )
+        env = OptionsEnv(
+            SnapshotDataset(snapshots, source.symbol),
+            slot_count=2,
+        )
+        observation, _ = env.reset()
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=env.action_shape[1],
+            action_slot_count=env.action_shape[0],
+            hidden_size=8,
+        )
+
+        _, metrics = train_actor_critic(
+            env,
+            recurrent,
+            TrainingConfig(
+                episodes=1,
+                sequence_length=2,
+                ppo_epochs=1,
+            ),
+        )
+
+        self.assertEqual(metrics[0]["steps"], 2)
+        self.assertEqual(metrics[0]["actor_choice_steps"], 1)
+        self.assertEqual(metrics[0]["forced_hold_steps"], 1)
+        self.assertEqual(metrics[0]["actor_choice_step_fraction"], 0.5)
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_attention_set_policy_trains_and_round_trips_checkpoint(self):
         env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
@@ -786,6 +936,16 @@ class TrainerTests(TestCase):
             "entropy_reduction": (
                 "mean_per_decision_over_explorable_factors_normalized_by_log_feasible_actions"
             ),
+            "actor_credit_assignment": {
+                "choice_definition": "at_least_one_decoder_factor_has_multiple_feasible_actions",
+                "advantage_normalization": "choice_steps_only",
+                "policy_surrogate": "explorable_support_only",
+                "entropy": "explorable_support_only",
+                "kl_and_clip_diagnostics": "explorable_support_only",
+                "critic_returns": "all_chronological_transitions",
+                "recurrent_context": "all_chronological_transitions",
+                "auxiliary_targets": "all_available_chronological_transitions",
+            },
         })
         self.assertEqual(
             sidecar["critic_balance_diagnostic"]["schema_version"],
@@ -1364,7 +1524,7 @@ class TrainerTests(TestCase):
             _, manifest = load_checkpoint(path)
         self.assertEqual(
             manifest["policy_optimization"]["entropy_reduction"],
-            "raw_mean_per_decoder_factor",
+            "mean_over_explorable_decoder_factors",
         )
 
     def test_selection_score_combines_declared_validation_risks(self):
