@@ -84,15 +84,17 @@ class RecurrentConfig:
 
 
 def build_recurrent_actor_critic(config: RecurrentConfig):
-    """Build a GRU, LSTM, or hybrid actor-critic."""
+    """Build a GRU, LSTM, concatenated hybrid, or gated mixture."""
     try:
         import torch
         from torch import nn
     except ImportError as error:  # pragma: no cover - exercised without ML extra
         raise RuntimeError("Install the ML extra: pip install -e '.[ml]'") from error
 
-    if config.kind not in {"gru", "lstm", "hybrid"}:
-        raise ValueError("kind must be 'gru', 'lstm', or 'hybrid'")
+    if config.kind not in {"gru", "lstm", "hybrid", "mixture"}:
+        raise ValueError(
+            "kind must be 'gru', 'lstm', 'hybrid', or 'mixture'"
+        )
     graph_encoder = config.encoder in {"graph", "graph_set"}
     single_leg = config.action_decoder == "single_leg"
     if config.encoder not in {"flat", "graph", "graph_set"}:
@@ -185,13 +187,21 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                     )
                     for source, target in zip(graph_dimensions, graph_dimensions[1:])
                 )
-            if config.kind == "hybrid":
+            if config.kind in {"hybrid", "mixture"}:
                 self.recurrent = nn.ModuleDict(
                     {"gru": make_recurrent("gru"), "lstm": make_recurrent("lstm")}
                 )
-                output_size = 2 * config.hidden_size
+                if config.kind == "mixture":
+                    self.mixture_gate = nn.Linear(2 * config.hidden_size, 1)
+                    nn.init.zeros_(self.mixture_gate.weight)
+                    nn.init.zeros_(self.mixture_gate.bias)
+                    output_size = config.hidden_size
+                else:
+                    self.mixture_gate = None
+                    output_size = 2 * config.hidden_size
             else:
                 self.recurrent = make_recurrent(config.kind)
+                self.mixture_gate = None
                 output_size = config.hidden_size
             if config.encoder == "graph_set":
                 self.policy = None
@@ -353,7 +363,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             if graph_encoder:
                 sequence, node_embeddings = self._graph_encode(sequence)
             sequence = self.input_norm(sequence)
-            if config.kind == "hybrid":
+            if config.kind in {"hybrid", "mixture"}:
                 gru_initial = None if hidden_state is None else hidden_state["gru"]
                 lstm_initial = None if hidden_state is None else hidden_state["lstm"]
                 gru_encoded, gru_hidden = self.recurrent["gru"](
@@ -362,7 +372,15 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 lstm_encoded, lstm_hidden = self.recurrent["lstm"](
                     sequence, lstm_initial
                 )
-                encoded = torch.cat((gru_encoded, lstm_encoded), dim=-1)
+                combined = torch.cat((gru_encoded, lstm_encoded), dim=-1)
+                if config.kind == "mixture":
+                    gru_weight = torch.sigmoid(self.mixture_gate(combined))
+                    encoded = (
+                        gru_weight * gru_encoded
+                        + (1.0 - gru_weight) * lstm_encoded
+                    )
+                else:
+                    encoded = combined
                 hidden = {"gru": gru_hidden, "lstm": lstm_hidden}
             else:
                 encoded, hidden = self.recurrent(sequence, hidden_state)

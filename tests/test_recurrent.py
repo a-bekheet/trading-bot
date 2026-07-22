@@ -118,7 +118,7 @@ class RecurrentTests(TestCase):
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_recurrent_variants_have_safe_masked_action_shapes(self):
-        for kind in ("gru", "lstm", "hybrid"):
+        for kind in ("gru", "lstm", "hybrid", "mixture"):
             model = build_recurrent_actor_critic(RecurrentConfig(
                 5,
                 2,
@@ -143,7 +143,7 @@ class RecurrentTests(TestCase):
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_streaming_state_matches_causal_sequence_for_every_variant(self):
         torch.manual_seed(19)
-        for kind in ("gru", "lstm", "hybrid"):
+        for kind in ("gru", "lstm", "hybrid", "mixture"):
             model = build_recurrent_actor_critic(RecurrentConfig(
                 5,
                 2,
@@ -176,6 +176,76 @@ class RecurrentTests(TestCase):
             torch.testing.assert_close(
                 torch.stack(streamed_values, dim=1),
                 full_values,
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_mixture_starts_balanced_and_trains_both_recurrent_experts(self):
+        torch.manual_seed(23)
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            2,
+            3,
+            hidden_size=8,
+            kind="mixture",
+        ))
+        sequence = torch.randn(2, 4, 5)
+        mask = torch.ones(2, 4, 2, 3, dtype=torch.bool)
+        gate_logits = []
+        handle = model.mixture_gate.register_forward_hook(
+            lambda _module, _inputs, output: gate_logits.append(output.detach())
+        )
+
+        logits, values, _ = model.forward_sequence(sequence, mask)
+        handle.remove()
+        loss = logits.square().mean() + values.square().mean()
+        loss.backward()
+
+        self.assertEqual(len(gate_logits), 1)
+        torch.testing.assert_close(
+            torch.sigmoid(gate_logits[0]),
+            torch.full((2, 4, 1), 0.5),
+        )
+        self.assertIsNotNone(model.mixture_gate.weight.grad)
+        self.assertIsNotNone(model.recurrent["gru"].weight_ih_l0.grad)
+        self.assertIsNotNone(model.recurrent["lstm"].weight_ih_l0.grad)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_mixture_has_fewer_parameters_than_concatenated_hybrid(self):
+        for encoder in ("flat", "graph_set"):
+            kwargs = (
+                {}
+                if encoder == "flat"
+                else {
+                    "encoder": "graph_set",
+                    "contract_feature_count": 4,
+                    "market_feature_count": 2,
+                    "portfolio_feature_count": 3,
+                    "action_slot_count": 3,
+                    "graph_hidden_size": 4,
+                    "graph_layers": 1,
+                    "graph_neighbors": 0,
+                }
+            )
+            input_size = 5 if encoder == "flat" else 15
+            hybrid = build_recurrent_actor_critic(RecurrentConfig(
+                input_size,
+                2,
+                3,
+                hidden_size=8,
+                kind="hybrid",
+                **kwargs,
+            ))
+            mixture = build_recurrent_actor_critic(RecurrentConfig(
+                input_size,
+                2,
+                3,
+                hidden_size=8,
+                kind="mixture",
+                **kwargs,
+            ))
+            self.assertLess(
+                sum(parameter.numel() for parameter in mixture.parameters()),
+                sum(parameter.numel() for parameter in hybrid.parameters()),
             )
 
     @skipUnless(torch is not None, "install the optional ml extra")
@@ -399,7 +469,7 @@ class RecurrentTests(TestCase):
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_set_streaming_matches_full_sequence_for_every_variant(self):
         torch.manual_seed(41)
-        for kind in ("gru", "lstm", "hybrid"):
+        for kind in ("gru", "lstm", "hybrid", "mixture"):
             model = build_recurrent_actor_critic(
                 self.graph_set_config(kind=kind)
             )

@@ -26,7 +26,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v26"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v27"
 
 
 @dataclass(frozen=True)
@@ -170,7 +170,7 @@ def _environment_pool(
 
 
 def _detach_hidden(hidden_state):
-    """Detach a tensor, LSTM tuple, or hybrid recurrent-state mapping."""
+    """Detach a tensor, LSTM tuple, or dual-recurrent state mapping."""
     if hidden_state is None:
         return None
     if isinstance(hidden_state, dict):
@@ -1348,7 +1348,11 @@ def _parser() -> argparse.ArgumentParser:
         default="single",
         help="train one ticker or one shared policy across the top-50 universe",
     )
-    parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
+    parser.add_argument(
+        "--kind",
+        choices=("gru", "lstm", "hybrid", "mixture"),
+        default="gru",
+    )
     parser.add_argument(
         "--encoder",
         choices=("flat", "graph", "graph_set"),

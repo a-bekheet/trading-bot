@@ -52,6 +52,7 @@ class TrainerTests(TestCase):
             action_slot_count=env.action_shape[0],
             action_count=env.action_shape[1],
             hidden_size=4,
+            kind="mixture",
             encoder="graph_set",
             contract_feature_count=observation.contracts.shape[1],
             market_feature_count=observation.market.size,
@@ -77,7 +78,9 @@ class TrainerTests(TestCase):
             restored, manifest = load_checkpoint(path)
 
         self.assertEqual(restored.config.encoder, "graph_set")
+        self.assertEqual(restored.config.kind, "mixture")
         self.assertEqual(restored.config.graph_neighbors, 0)
+        self.assertIsNotNone(restored.mixture_gate)
         self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
         self.assertTrue(all(
             torch.isfinite(parameter).all()
@@ -801,7 +804,7 @@ class TrainerTests(TestCase):
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_multi_horizon_training_supports_all_recurrent_learners_and_decoders(self):
-        for kind in ("gru", "lstm", "hybrid"):
+        for kind in ("gru", "lstm", "hybrid", "mixture"):
             for algorithm in ("ppo", "reinforce"):
                 for action_decoder in ("factorized", "single_leg"):
                     with self.subTest(

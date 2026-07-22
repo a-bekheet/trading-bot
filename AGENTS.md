@@ -26,7 +26,8 @@ does not place live trades.
   snapshot loader, fixed-slot environment, deterministic baselines, and
   evaluation reports. `features.py` computes causal features and `sequence.py`
   builds chronological windows. `recurrent.py` is an optional PyTorch GRU,
-  LSTM, or hybrid actor-critic with flat, flattened-graph, or graph-set contract
+  LSTM, concatenated hybrid, or gated-mixture actor-critic with flat,
+  flattened-graph, or graph-set contract
   encoding. `trainer.py`
   owns factorized and exact single-leg-joint PPO/GAE optimization,
   deterministic evaluation, safe
@@ -195,7 +196,7 @@ and an explicit source/license.
 
 Engineered features must be causal: current rows may use current cross-sectional
 values and the immediately prior snapshot, but never future rows. Sequence
-windows are chronological and unpadded. GRU/LSTM/hybrid code is optional
+windows are chronological and unpadded. GRU/LSTM/hybrid/mixture code is optional
 (`.[ml]`) and must preserve a no-PyTorch collector path. Checkpoints must retain
 the environment fingerprint, full model and training configuration, metrics,
 and the `research_demo` label.
@@ -294,6 +295,14 @@ the configured in-sample or validation selection environment. Persist whether
 each run stopped early, its completed episode count, patience, and minimum
 improvement. `None` disables patience; test results may never reset it or resume
 training.
+
+`kind="hybrid"` concatenates full-width GRU and LSTM outputs and is a distinct
+checkpoint contract. `kind="mixture"` runs the same causal experts but applies
+one state-dependent scalar sigmoid gate per timestamp and convex-combines their
+outputs at the original hidden width. Initialize that gate to an exact 0.5
+blend, preserve both experts' hidden states, and never reinterpret an old hybrid
+checkpoint as a mixture. The mixture's smaller heads do not imply lower latency;
+keep both parameter and batch-one inference measurements in tournaments.
 The declared selection score is total reward minus non-negative configured
 coefficients times maximum drawdown, downside deviation, and turnover. Use this
 one score consistently for best-episode restoration, patience, architecture,
@@ -462,7 +471,8 @@ streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
-train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:3 --candidate graph_set:hybrid:ppo:0
+train-demo --symbol AAPL --encoder graph_set --kind mixture --episodes 25
+train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:0 --candidate graph_set:mixture:ppo:0
 ```
 
 The collector defaults to three expirations per ticker, one cycle every 900

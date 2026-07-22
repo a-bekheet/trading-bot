@@ -48,7 +48,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v28"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v29"
 
 
 @dataclass(frozen=True)
@@ -138,8 +138,10 @@ class ModelSpec:
     time_aware_discounting: bool | None = None
 
     def __post_init__(self) -> None:
-        if self.kind not in {"gru", "lstm", "hybrid"}:
-            raise ValueError("model kind must be gru, lstm, or hybrid")
+        if self.kind not in {"gru", "lstm", "hybrid", "mixture"}:
+            raise ValueError(
+                "model kind must be gru, lstm, hybrid, or mixture"
+            )
         if self.encoder not in {"flat", "graph", "graph_set"}:
             raise ValueError("model encoder must be flat, graph, or graph_set")
         if min(
@@ -886,7 +888,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--latency-warmup-iterations", type=int, default=10)
     parser.add_argument("--latency-measured-iterations", type=int, default=100)
     parser.add_argument("--max-median-inference-latency-us", type=float)
-    parser.add_argument("--kind", choices=("gru", "lstm", "hybrid"), default="gru")
+    parser.add_argument(
+        "--kind",
+        choices=("gru", "lstm", "hybrid", "mixture"),
+        default="gru",
+    )
     parser.add_argument(
         "--encoder",
         choices=("flat", "graph", "graph_set"),

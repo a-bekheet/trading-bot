@@ -224,8 +224,8 @@ writes reduced its median from 23.43 ms. Engineering runs once when loading a
 dataset, not on every policy step; treat these numbers as machine-specific
 evidence, not a production SLA.
 
-Optional recurrent actor-critic models support GRU, LSTM, and parallel hybrid
-GRU+LSTM encoders:
+Optional recurrent actor-critic models support GRU, LSTM, parallel concatenated
+GRU+LSTM hybrids, and adaptively gated GRU-LSTM mixtures:
 
 ```bash
 python -m pip install -e '.[ml]'
@@ -500,6 +500,22 @@ recovering the earlier measured end-to-end latency despite the added state.
 These are machine-specific latency results; the position features remain an
 ablation hypothesis, not evidence of alpha.
 
+The `mixture` recurrent candidate runs causal GRU and LSTM experts in parallel,
+then uses one learned sigmoid gate per timestamp to form a convex combination
+before the policy, value, and auxiliary heads. Its gate starts at exactly 0.5,
+so neither expert receives an arbitrary initialization advantage. Unlike
+`hybrid`, it keeps downstream width at `hidden_size` instead of concatenating
+to twice that width. On the v0.39 width-128 layout, this reduced flat parameters
+from 1,073,206 to 1,043,767 and zero-neighbor `graph_set` parameters from
+216,025 to 214,362. Local 2,000-iteration streaming medians were 198.46 versus
+188.71 microseconds for flat mixture versus hybrid and 284.90 versus 266.94 for
+the graph-set pair. The extra adaptive gate was slower despite the smaller
+heads, so `mixture` is an explicit validation/latency candidate—not the default
+and not a latency optimization. A two-fold, width-eight AAPL integration smoke
+tied at zero validation score and selected the mixture only through the declared
+smaller-parameter tie-break; it establishes training/checkpoint plumbing, not
+predictive benefit.
+
 The categorical policy head starts with a configurable `5.0` logit bias toward
 hold, while every feasible action remains sampleable and the bias remains fully
 trainable. On the real AAPL 33-row mask, 1,024 untrained graph-hybrid samples
@@ -611,7 +627,7 @@ The optional integer neighbor override permits full and zero-neighbor graph
 candidates in one predeclared tournament; otherwise `--graph-neighbors` applies.
 The decoder is `factorized` or `single_leg`; for a non-graph candidate it may
 occupy the fourth field directly, as in `flat:gru:ppo:single_leg`.
-Every GRU, LSTM, hybrid, flat, flattened-graph, or graph-set candidate receives
+Every GRU, LSTM, hybrid, mixture, flat, flattened-graph, or graph-set candidate receives
 the same fold and training seed. Each candidate restores its best validation
 checkpoint; the
 highest declared validation selection score wins, with fewer trainable

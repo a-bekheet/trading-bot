@@ -120,7 +120,7 @@ class WalkForwardTrainingTests(TestCase):
             "--candidate",
             "flat:gru:ppo:factorized",
             "--candidate",
-            "graph_set:hybrid:ppo:0:single_leg",
+            "graph_set:mixture:ppo:0:single_leg",
         ])
 
         specs = _model_specs_from_args(args)
@@ -612,6 +612,7 @@ class WalkForwardTrainingTests(TestCase):
             ModelSpec("gru", "flat", hidden_size=32, parameter_budget=5_000),
             ModelSpec("lstm", "flat", hidden_size=32, parameter_budget=5_000),
             ModelSpec("hybrid", "flat", hidden_size=32, parameter_budget=5_000),
+            ModelSpec("mixture", "flat", hidden_size=32, parameter_budget=5_000),
             ModelSpec(
                 "gru",
                 "graph",
@@ -637,6 +638,15 @@ class WalkForwardTrainingTests(TestCase):
                 graph_hidden_size=4,
                 graph_layers=1,
                 graph_neighbors=1,
+                parameter_budget=5_000,
+            ),
+            ModelSpec(
+                "mixture",
+                "graph_set",
+                hidden_size=32,
+                graph_hidden_size=4,
+                graph_layers=1,
+                graph_neighbors=0,
                 parameter_budget=5_000,
             ),
         )

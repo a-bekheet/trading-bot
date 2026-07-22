@@ -52,6 +52,7 @@ Every candidate must eventually pass:
 | [Time-Aware Q-Networks (2021)](https://arxiv.org/abs/2105.02580) and [Semi-Markov Offline RL (2022)](https://arxiv.org/abs/2203.09365) | Irregular decision intervals affect both state estimation and the discount applied to future value; treating variable-duration transitions as fixed-step MDP transitions can change the learned objective. | PPO and REINFORCE now compose gamma, and GAE lambda where applicable, over elapsed wall-clock time relative to a declared reference interval. Retain fixed-step semantics as a matched validation ablation. |
 | [Multi-Horizon Echo State Network Prediction of Intraday Stock Returns (2025)](https://arxiv.org/abs/2504.19623) | Compact recurrent models can predict intraday returns at multiple horizons without the cost of a large generic architecture. | Expose causal 4/16-snapshot cumulative log returns to the existing GRU/LSTM families before adding another recurrent family; require the named `price_trend` ablation. |
 | [A New Option Momentum: The Role of the Systematic Component (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4404190) | Transaction-cost-robust option momentum is concentrated in a systematic component, while past prices have limited influence relative to risk and quality characteristics. | Treat price trend as a small optional state contribution, keep surface risk/quality features, and remove trend unless it earns validation lift after costs. |
+| [Hybrid Recurrent Expert Gating for Financial Time Series (2026)](https://doi.org/10.1016/j.procs.2026.06.366) | A learnable gate can vary the contribution of recurrent experts across nonstationary regimes, but its daily-price forecasting evidence does not establish trading or RL benefit. | Add a compact scalar-gated GRU-LSTM mixture as a declared candidate while preserving GRU, LSTM, and concatenated-hybrid baselines, parameter budgets, latency gates, and held-out selection. |
 
 This is not an exclusive reading list. Profiling, microstructure knowledge,
 negative experimental results, and newly published work should change the
@@ -74,8 +75,9 @@ uses a real bounded underlying-share action with explicit synthetic costs. It
 remains a research approximation until historical underlying bid/ask, borrow,
 margin, dividend, and funding data are available.
 
-The runner can now compare flat, flattened-graph, and graph-set GRU, LSTM, and
-hybrid candidates within each fold. All candidates share the fold and seed;
+The runner can now compare flat, flattened-graph, and graph-set GRU, LSTM,
+concatenated-hybrid, and gated-mixture candidates within each fold. All
+candidates share the fold and seed;
 architecture selection uses
 the declared validation selection score with a deterministic simplicity
 tie-break, and only the winner reaches held-out evaluation. A common trainable
@@ -176,13 +178,21 @@ Episode provenance reports requested option and hedge actions separately.
 
 An optional exact single-leg decoder now replaces the 33 independent row
 categoricals with one masked categorical over hold or one row/action pair. It
-trains under both PPO and REINFORCE with GRU, LSTM, hybrid, flat, graph, and
+trains under both PPO and REINFORCE with GRU, LSTM, hybrid, mixture, flat, graph, and
 graph-set encoders; graph-set option scores remain permutation equivariant. It
 reduces the default flat-hybrid head by 8,224 parameters but measured roughly
 11% slower in batch-one deterministic inference because the joint category must
 be decoded into the fixed environment array. The current tiny AAPL tournament
 tied at zero validation reward and selected it only by parameter count, so the
 factorized decoder remains the default and any coordination benefit is unproven.
+
+The gated recurrent mixture keeps independent GRU and LSTM causal states but
+compresses their outputs through one state-dependent scalar convex gate before
+all heads. Equal initialization avoids favoring either expert. It reduces
+parameters modestly versus concatenation but measured slower in batch-one CPU
+inference on both flat and graph-set layouts, so it remains a tournament
+candidate subject to the same latency ceiling rather than replacing GRU or the
+concatenated hybrid.
 
 Walk-forward artifacts now include post-selection, paired circular moving-block
 comparisons of the agent against every baseline. They report cumulative
