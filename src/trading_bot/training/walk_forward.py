@@ -52,7 +52,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v41"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v42"
 
 
 @dataclass(frozen=True)
@@ -438,6 +438,10 @@ def _select_seed_robust_group(
         eligible,
         key=lambda group: (
             -group["aggregate"]["robust_training_seed_validation_score"],
+            max(
+                run["inference_latency"]["median_microseconds"]
+                for run in group["replicates"]
+            ),
             group["representative"]["parameter_count"],
             group["representative"]["active_input_count"],
             sum(
@@ -1105,6 +1109,7 @@ def run_walk_forward_training(
                     ),
                 },
                 "tie_break": [
+                    "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
                     "optimizer_updates",

@@ -26,6 +26,8 @@ POSITION_CONTRACT_FEATURES = (
     "positionQuantity",
     "positionAveragePrice",
     "positionUnrealizedReturn",
+    "positionAgeSteps",
+    "positionLastTradeAgeSteps",
 )
 CONTRACT_FEATURES = (
     "strike", "lastPrice", "bid", "ask", "impliedVolatility", "delta", "gamma",
@@ -52,6 +54,8 @@ class Position:
     strike: float = 0.0
     expiration: str = ""
     last_liquidation_price: float = 0.0
+    opened_index: int = 0
+    last_trade_index: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -729,6 +733,18 @@ class OptionsEnv:
                         )
                         else 0.0
                     )
+                elif name == "positionAgeSteps":
+                    contracts[index, feature_index] = float(
+                        max(self._index - position.opened_index, 0)
+                        if position is not None
+                        else 0
+                    )
+                elif name == "positionLastTradeAgeSteps":
+                    contracts[index, feature_index] = float(
+                        max(self._index - position.last_trade_index, 0)
+                        if position is not None
+                        else 0
+                    )
                 else:
                     contracts[index, feature_index] = float(
                         contract.get(name, 0) or 0
@@ -1139,6 +1155,11 @@ class OptionsEnv:
         else:
             average_price = price
         option_type, strike, expiration = self._position_metadata(contract)
+        same_position_lifecycle = (
+            position is not None
+            and old_quantity != 0
+            and (new_quantity > 0) == (old_quantity > 0)
+        )
         self._positions[symbol] = Position(
             new_quantity,
             average_price,
@@ -1150,6 +1171,12 @@ class OptionsEnv:
                 contract,
                 "sell" if new_quantity > 0 else "buy",
             ),
+            (
+                position.opened_index
+                if same_position_lifecycle
+                else self._index
+            ),
+            self._index,
         )
 
     def _settle_expired_positions(

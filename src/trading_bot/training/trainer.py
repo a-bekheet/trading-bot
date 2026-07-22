@@ -27,7 +27,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v38"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v39"
 
 
 @dataclass(frozen=True)
@@ -1316,6 +1316,23 @@ def checkpoint_manifest(
             "inference_path": "excluded_from_policy_inference",
         },
         "feature_vector_schema": FEATURE_VECTOR_SCHEMA_VERSION,
+        "input_ablation": {
+            "masked_input_count": len(recurrent_config.masked_input_indices),
+            "active_input_count": (
+                recurrent_config.input_size
+                - len(recurrent_config.masked_input_indices)
+            ),
+            "execution": (
+                "compact_flat_gather"
+                if recurrent_config.encoder == "flat"
+                and recurrent_config.masked_input_indices
+                else (
+                    "zero_mask_before_encoder"
+                    if recurrent_config.masked_input_indices
+                    else "none"
+                )
+            ),
+        },
         "selection": {
             "scope": selected_metric.get(
                 "evaluation_scope",

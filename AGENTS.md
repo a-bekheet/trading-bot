@@ -245,7 +245,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v15`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v16`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
@@ -256,6 +256,13 @@ must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
 finite-value tests, and a checkpoint-schema bump; old weights must never be
 silently loaded against a changed feature layout.
+
+Every visible held contract exposes snapshots since opening and since its most
+recent trade. Same-sign adds retain the opening index, every fill resets the
+last-trade index, and crossing through zero starts a new position lifecycle.
+Both clocks are zero for unheld contracts, causal, log-compressed, and isolated
+in the named `position_lifecycle` ablation. Preserve these rules when changing
+fills, partial closes, settlement, stable slots, or observation construction.
 
 Static-arbitrage diagnostics must remain current-snapshot, bid/ask-aware data
 quality signals. Compare only positive, non-crossed quotes with the same
@@ -491,7 +498,9 @@ measure learned-policy variability; never replace that experiment with repeated
 evaluation of one checkpoint. Training-seed offsets must be predeclared. Rank an
 architecture by its configured mean/worst/dispersion aggregate, require every
 replicate to satisfy the latency ceiling, and deploy the run closest to the median
-validation score rather than cherry-picking the best seed. Persist every seed
+validation score rather than cherry-picking the best seed. When robust validation
+scores tie exactly, compare the worst training-seed median inference latency
+before parameter count, active input count, or training work. Persist every seed
 score, the representative rule, actual path count, seed repetitions, and
 bootstrap independence unit in every fold. The default minimum
 is 20 transitions; shorter paths must report `insufficient_history` and null
@@ -561,12 +570,13 @@ Benchmark each candidate's streaming batch-one inference on a training-range
 observation after training. Record median, p95, and mean latency together with
 device, PyTorch version, thread count, warm-up iterations, and measured
 iterations. Restore the model's prior train/eval mode afterward. Timing is
-machine-specific diagnostic evidence and must not silently enter validation
-ranking, tie-breaking, or held-out selection. An explicit predeclared median
+machine-specific and must never outrank validation evidence. It is the first
+deterministic tie-break only when robust validation scores are exactly equal, so
+a smaller but slower candidate does not win on parameter count. An explicit predeclared median
 latency ceiling may filter deployment-ineligible candidates before winner
 selection; preserve their validation evidence and exclusion reason, allow only
 eligible candidates to reach test, and fail if none remain. With no ceiling,
-timing must remain informational.
+timing remains inactive unless validation scores tie.
 
 Feature-removal candidates must use the named, non-overlapping groups in
 `sequence.FEATURE_ABLATION_GROUPS`. Apply masks inside the recurrent model after
@@ -574,7 +584,10 @@ the versioned transform and persist exact flattened indices in
 `RecurrentConfig`; external preprocessing would make restored checkpoints
 ambiguous. CLI ablations retain a matched full-feature candidate, report
 validation score and raw-reward lift versus it, and obey the same one-winner
-test boundary.
+test boundary. Flat encoders must gather active columns before LayerNorm and the
+recurrent input matrix so removal changes actual capacity; graph encoders retain
+the full structured layout and zero masked relations before graph construction.
+Persist masked and active counts plus the execution mode in checkpoint evidence.
 
 ## Commands
 

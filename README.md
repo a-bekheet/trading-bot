@@ -211,6 +211,11 @@ different holdings can collapse to the same aggregate-Greek observation and the
 value function cannot tell which slot may create future P&L. Use the
 `position_state` ablation to test their marginal value without changing fills or
 sell feasibility.
+Two additional causal lifecycle clocks report snapshots since the position
+opened and since its most recent trade. Same-sign adds retain the opening clock,
+every adjustment resets the last-trade clock, and crossing through zero starts a
+new lifecycle. Both are zero for unheld contracts, log-compressed before policy
+inference, and removable through the separate `position_lifecycle` ablation.
 Each visible contract also carries a compact prior-snapshot dynamics group:
 mid-quote log return, relative-spread change, IV change, and separate quote/IV
 coverage bits. Changes are available only when the same contract exists in both
@@ -223,7 +228,7 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v15` transform. Prices, strikes, and average entry price are
+`dimensionless.v16` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
@@ -231,8 +236,10 @@ become ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields and
 position quantity are log-compressed. Unrealized return uses a signed log transform.
 Cumulative log returns use the same signed bounded transform as one-step return.
 Signed contract changes are log-compressed at fixed scales. The `time_context`,
-`price_trend`, `position_state`, and `contract_dynamics` walk-forward ablations
-can mask their inputs without changing model shape.
+`price_trend`, `position_state`, `position_lifecycle`, and `contract_dynamics`
+walk-forward ablations preserve the external observation/action contract. Flat
+models physically compact masked inputs; graph encoders retain shape and zero
+masked relations before graph construction.
 Raw volume and
 open interest are omitted because their causal log features contain the useful
 ordering at a much better numerical scale. The transform is fitted on no data,
@@ -605,9 +612,30 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.54 adds explicit position-lifecycle state and makes latency an honest
+equal-score tournament tie-break. Each visible held contract reports
+`positionAgeSteps` and `positionLastTradeAgeSteps`; same-sign adds preserve the
+first clock, all adjustments reset the second, and a long/short crossing resets
+both. This exposes holding and rebalance cadence to truncated recurrent chunks
+without requiring the GRU or LSTM to reconstruct the entire trade history.
+
+Flat-model feature ablations now physically remove masked inputs from LayerNorm
+and the recurrent input matrix. At 32 slots and hidden size 128, removing the 64
+lifecycle inputs cut the flat GRU from 592,330 to 567,626 parameters. It did not
+improve batch-one latency on this machine: across independently trained seeds 7
+and 1007, the full model measured 129.79/128.60 microseconds median versus
+131.79/132.71 for the compact lifecycle ablation. Because validation scores tied
+at zero, the new worst-seed latency tie-break correctly retained the faster full
+model. The held-out smoke made zero trades and zero return, so lifecycle state
+remains an ablation hypothesis rather than alpha evidence.
+
+The feature, environment, checkpoint, single-ticker walk-forward, and universe
+walk-forward schemas advance to `dimensionless.v16`, v21, v39, v42, and v26.
+The external action contract is unchanged.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v15` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v16` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters
@@ -992,25 +1020,27 @@ Every trained candidate also receives a standardized streaming, batch-one
 inference benchmark using one training-partition observation. The artifact
 records median, p95, and mean microseconds plus device, PyTorch version, thread
 count, warm-up count, and measured count. Configure the run length with
-`--latency-warmup-iterations` and `--latency-measured-iterations`. Timing is
-diagnostic only: it never changes validation ranking, and it is not portable
-across hardware or runtime configurations. Use it to expose graph construction
-or recurrent execution cost. When a deployment SLA is known in advance,
+`--latency-warmup-iterations` and `--latency-measured-iterations`. Timing never
+outranks validation score and is not portable across hardware or runtime
+configurations. It is the first deterministic tie-break only when seed-robust
+validation scores are equal, preventing a smaller-but-slower model from winning
+on parameter count. Use it to expose graph construction or recurrent execution
+cost. When a deployment SLA is known in advance,
 `--max-median-inference-latency-us` makes that predeclared ceiling an
 eligibility constraint: candidates above it retain their configuration,
 validation evidence, measured latency, and exclusion reason, but cannot win or
 reach test. The run fails if every candidate exceeds the ceiling. The default
-is no ceiling, so timing does not affect selection unless explicitly requested.
+has no hard ceiling, while the equal-score latency tie-break remains active.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are
-`slot_identity`, `position_state`, `contract_dynamics`, `static_arbitrage`,
+`slot_identity`, `position_state`, `position_lifecycle`, `contract_dynamics`, `static_arbitrage`,
 `time_context`, `price_trend`, `surface_wings`, `term_structure`,
 `surface_dynamics`, `volatility_regime`, `volatility_normalization`,
 `data_quality`, and `derived_contract_surface`. Masking happens inside the
-checkpointed model after
-the versioned transform, so training, restored inference, and all encoders use
-the same ablation. Artifacts report each ablated candidate's validation
+checkpointed model after the versioned transform. Flat encoders gather only
+active inputs, while graph encoders zero masked inputs before graph construction;
+training and restored inference use identical semantics. Artifacts report each ablated candidate's validation
 score and raw-reward lift versus its full-feature counterpart plus active and
 masked input counts.
 Only the validation winner reaches test, preventing feature research from

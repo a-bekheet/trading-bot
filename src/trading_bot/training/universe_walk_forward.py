@@ -56,7 +56,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v25"
+    "research-demo.universe-walk-forward.v26"
 )
 
 
@@ -912,6 +912,7 @@ def run_universe_walk_forward_training(
                     ),
                 },
                 "tie_break": [
+                    "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
                     "optimizer_updates",

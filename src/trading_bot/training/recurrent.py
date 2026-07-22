@@ -70,6 +70,8 @@ class RecurrentConfig:
             for index in self.masked_input_indices
         ):
             raise ValueError("masked_input_indices are outside the input layout")
+        if len(self.masked_input_indices) == self.input_size:
+            raise ValueError("masked_input_indices cannot disable every input")
         if self.auxiliary_target_count < 0:
             raise ValueError("auxiliary_target_count cannot be negative")
         normalized_horizons = tuple(self.auxiliary_horizons)
@@ -123,7 +125,20 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             "attention_set graph_hidden_size must be divisible by attention_heads"
         )
 
-    temporal_input_size = config.input_size
+    compact_flat_mask = bool(
+        not graph_encoder and config.masked_input_indices
+    )
+    temporal_input_size = (
+        config.input_size - len(config.masked_input_indices)
+        if compact_flat_mask
+        else config.input_size
+    )
+    masked_input_index_set = set(config.masked_input_indices)
+    active_input_indices = tuple(
+        index
+        for index in range(config.input_size)
+        if index not in masked_input_index_set
+    )
     policy_slot_count = config.action_slot_count or config.slot_count
     joint_action_count = 1 + policy_slot_count * (config.action_count - 1)
     effective_graph_neighbors = min(
@@ -175,6 +190,14 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             self.register_buffer(
                 "_masked_input_indices",
                 torch.tensor(config.masked_input_indices, dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_active_input_indices",
+                torch.tensor(
+                    active_input_indices,
+                    dtype=torch.long,
+                ),
                 persistent=False,
             )
             self.input_norm = nn.LayerNorm(temporal_input_size)
@@ -435,8 +458,14 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
 
         def _encode_sequence(self, sequence, hidden_state=None):
             if self._masked_input_indices.numel():
-                sequence = sequence.clone()
-                sequence.index_fill_(-1, self._masked_input_indices, 0.0)
+                if compact_flat_mask:
+                    sequence = sequence.index_select(
+                        -1,
+                        self._active_input_indices,
+                    )
+                else:
+                    sequence = sequence.clone()
+                    sequence.index_fill_(-1, self._masked_input_indices, 0.0)
             node_embeddings = None
             if graph_encoder:
                 sequence, node_embeddings = self._graph_encode(sequence)

@@ -43,7 +43,8 @@ Every candidate must eventually pass:
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | The collateralized liability foundation now exists. Add CVaR or learned P&L-distribution objectives only after enough independent paths and lifecycle validation exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Causal realized-volatility horizons, walk-forward evaluation, and explicit per-contract position quantity/cost/P&L state implement this lesson. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, include realistic transaction costs and limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v15`, executable net-liquidation wealth, compact volatility state, stable contract/position identity, Greek budgets, collateral, cost stress, and paired moving-block intervals implement the state/risk lesson. |
+| [Deep Hedging with Market Impact (2024)](https://arxiv.org/abs/2402.13326) | Under costs and price impact, learned hedges can damp or delay rebalancing instead of following a frictionless target continuously. | Explicit position-age and last-trade-age clocks make holding and rebalance cadence observable and removable through `position_lifecycle`. Current top-of-book data has no depth or impact model, so do not infer optimal no-trade regions yet. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, include realistic transaction costs and limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v16`, executable net-liquidation wealth, compact volatility state, stable contract/position identity and lifecycle, Greek budgets, collateral, cost stress, and paired moving-block intervals implement the state/risk lesson. |
 | [Deep Hedging of Derivatives Using Reinforcement Learning (2021)](https://arxiv.org/abs/2103.16409) | Accounting P&L and cash-flow objectives differ under transaction costs, so the valuation convention is part of the learning problem. | Default every training, selection, baseline, and held-out report to executable net liquidation value. Persist legacy midpoint mode only for declared reproduction, and never compare runs whose valuation contracts differ. |
 | [How Many Random Seeds? Statistical Power Analysis in Deep Reinforcement Learning Experiments (2018)](https://arxiv.org/abs/1806.08295) | Random seeds quantify stochastic training variability and determine statistical power; a seed label does not make an otherwise identical deterministic trajectory independent. | Require one evaluation seed for each deterministic policy/path pair. Add multiple independently trained policies only as a predeclared training-seed experiment, and retain path-level dependence in inference. |
 | [Deep Reinforcement Learning at the Edge of the Statistical Precipice (2021)](https://arxiv.org/abs/2108.13264) | Point estimates from a few expensive training runs hide substantial uncertainty; robust aggregate metrics and intervals are preferable to best-run reporting. | Train predeclared seed replicates, rank architectures with mean/worst/dispersion validation aggregation, and deploy the median-representative checkpoint rather than the best seed. Add intervals only when the run count supports them. |
@@ -258,7 +259,7 @@ inference on both flat and graph-set layouts, so it remains a tournament
 candidate subject to the same latency ceiling rather than replacing GRU or the
 concatenated hybrid.
 
-The `dimensionless.v15` policy transform batches signed contract columns,
+The `dimensionless.v16` policy transform batches signed contract columns,
 uses clipping for infinity handling, replaces NaNs in one pass, and assembles
 the float32 vector directly. This reduced local preprocessing median by 37% and
 cut matched batch-one medians across flat and graph-set hybrid/mixture models
@@ -292,6 +293,14 @@ mean/worst/dispersion aggregate, all replicates face the latency ceiling, and th
 checkpoint closest to the median seed score is deployed. This measures training
 instability without best-seed cherry-picking or an N-model inference penalty;
 held-out paths remain separate from training-seed evidence.
+
+Held contracts now expose causal opening-age and last-adjustment-age clocks so
+truncated recurrent chunks need not reconstruct the complete trade lifecycle.
+The two fields form a separate validation-only ablation. Flat ablations gather
+active inputs before normalization and recurrent computation, while graph
+ablations preserve structured shape and zero masked relations. Equal robust
+validation scores now break first on worst-seed median batch-one latency and
+only then on parameter count; latency never outranks a validation difference.
 
 A causal long-volatility baseline now converts the IV-minus-realized feature
 into an executable comparator: after sufficient history, it opens feasible
@@ -353,12 +362,14 @@ candidate. This corrects objective semantics; it is not evidence of alpha.
 - Retain the sparse stable-slot and empty-option-portfolio fast paths. Padding
   alone must not trigger repeated ranking, while newly visible contracts and
   every held-option settlement must preserve the full deterministic path.
-- Keep the 37-field contract state under `dimensionless.v15` as the current
+- Keep the 39-field contract state under `dimensionless.v16` as the current
   model: current per-slot quantity, average entry price, and executable
-  unrealized return prevent portfolio-state aliasing, while matched bid/ask and
+  unrealized return plus opening and last-adjustment clocks prevent portfolio
+  and lifecycle aliasing, while matched bid/ask and
   IV dynamics plus static-arbitrage scores separate observed change and surface
   consistency from missing coverage. Test these through the named
-  `position_state`, `contract_dynamics`, and `static_arbitrage` removal candidates;
+  `position_state`, `position_lifecycle`, `contract_dynamics`, and
+  `static_arbitrage` removal candidates;
   volatility-regime state still belongs once in the market vector.
 - Retain prior-snapshot elapsed time only if its named `time_context` removal
   candidate does not win validation; do not silently reinterpret snapshot

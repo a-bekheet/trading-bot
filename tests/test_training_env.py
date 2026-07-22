@@ -820,6 +820,59 @@ class OptionsEnvTests(TestCase):
         self.assertFalse(crossed.valid_mask[0])
         self.assertFalse(crossed.action_mask[0].any())
 
+    def test_position_lifecycle_clocks_survive_adds_and_reset_on_cross(self):
+        dataset = option_lifecycle_dataset(
+            "put",
+            spots=(100, 100, 100, 100, 100),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+                "2026-07-20T14:02:00Z",
+                "2026-07-20T14:03:00Z",
+                "2026-07-20T14:04:00Z",
+            ),
+            expiration="2026-08-21",
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=3,
+            starting_cash=20_000,
+            allow_collateralized_option_shorts=True,
+        )
+        quantity = CONTRACT_FEATURES.index("positionQuantity")
+        age = CONTRACT_FEATURES.index("positionAgeSteps")
+        last_trade_age = CONTRACT_FEATURES.index(
+            "positionLastTradeAgeSteps"
+        )
+
+        initial, _ = env.reset()
+        opened, *_ = env.step(np.array([1, 0]))
+        held, *_ = env.step(np.array([0, 0]))
+        added, *_ = env.step(np.array([1, 0]))
+        crossed, *_ = env.step(np.array([6, 0]))
+
+        np.testing.assert_array_equal(
+            initial.contracts[0, [quantity, age, last_trade_age]],
+            (0, 0, 0),
+        )
+        np.testing.assert_array_equal(
+            opened.contracts[0, [quantity, age, last_trade_age]],
+            (1, 1, 1),
+        )
+        np.testing.assert_array_equal(
+            held.contracts[0, [quantity, age, last_trade_age]],
+            (1, 2, 2),
+        )
+        np.testing.assert_array_equal(
+            added.contracts[0, [quantity, age, last_trade_age]],
+            (2, 3, 1),
+        )
+        np.testing.assert_array_equal(
+            crossed.contracts[0, [quantity, age, last_trade_age]],
+            (-1, 1, 1),
+        )
+
     def test_mask_rejects_aggregate_cash_violation(self):
         env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=130)
         observation, _ = env.reset()

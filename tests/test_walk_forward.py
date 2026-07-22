@@ -143,14 +143,22 @@ class WalkForwardTrainingTests(TestCase):
     def test_seed_robust_selection_does_not_choose_best_single_run(self):
         spec = ModelSpec(hidden_size=4)
 
-        def group(model_id, robust_score, representative_score):
+        def group(
+            model_id,
+            robust_score,
+            representative_score,
+            *,
+            latency=100.0,
+            parameter_count=100,
+        ):
             representative = {
                 "model_id": model_id,
                 "model_spec": spec,
-                "parameter_count": 100,
+                "parameter_count": parameter_count,
                 "active_input_count": 10,
                 "optimizer_updates": 2,
                 "validation_selection_score": representative_score,
+                "inference_latency": {"median_microseconds": latency},
             }
             return {
                 "representative": representative,
@@ -167,6 +175,25 @@ class WalkForwardTrainingTests(TestCase):
         selected = _select_seed_robust_group((unstable, stable))
 
         self.assertIs(selected, stable)
+
+        smaller_slow = group(
+            "smaller-slow",
+            1.0,
+            1.0,
+            latency=200.0,
+            parameter_count=50,
+        )
+        larger_fast = group(
+            "larger-fast",
+            1.0,
+            1.0,
+            latency=100.0,
+            parameter_count=200,
+        )
+        self.assertIs(
+            _select_seed_robust_group((smaller_slow, larger_fast)),
+            larger_fast,
+        )
 
     def test_deterministic_heldout_rejects_seed_pseudoreplication(self):
         with self.assertRaisesRegex(ValueError, "not independent"):
@@ -653,7 +680,13 @@ class WalkForwardTrainingTests(TestCase):
             expected = min(
                 candidate_results,
                 key=lambda result: (
-                    -result["selection"]["validation_selection_score"],
+                    -result["selection"][
+                        "robust_training_seed_validation_score"
+                    ],
+                    max(
+                        replicate["inference_latency"]["median_microseconds"]
+                        for replicate in result["training_seed_replicates"]
+                    ),
                     result["parameter_count"],
                     result["active_input_count"],
                     result["optimizer_updates"],
@@ -689,6 +722,7 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(
             selection["tie_break"],
             [
+                "worst_training_seed_median_inference_latency",
                 "parameter_count",
                 "active_input_count",
                 "optimizer_updates",
@@ -896,9 +930,24 @@ class WalkForwardTrainingTests(TestCase):
             fixed["selection"]["validation_selection_score"]
             == time_aware["selection"]["validation_selection_score"]
         ):
-            self.assertEqual(
-                summary["folds"][0]["model_selection"]["selected_model_id"],
-                candidates[0].identifier,
+            selected_id = summary["folds"][0]["model_selection"][
+                "selected_model_id"
+            ]
+            selected = next(
+                result
+                for result in (time_aware, fixed)
+                if result["model_id"] == selected_id
+            )
+            other = fixed if selected is time_aware else time_aware
+            self.assertLessEqual(
+                max(
+                    item["inference_latency"]["median_microseconds"]
+                    for item in selected["training_seed_replicates"]
+                ),
+                max(
+                    item["inference_latency"]["median_microseconds"]
+                    for item in other["training_seed_replicates"]
+                ),
             )
 
     @skipUnless(torch is not None, "install the optional ml extra")
@@ -951,9 +1000,24 @@ class WalkForwardTrainingTests(TestCase):
             disabled["selection"]["validation_selection_score"]
             == enabled["selection"]["validation_selection_score"]
         ):
-            self.assertEqual(
-                summary["folds"][0]["model_selection"]["selected_model_id"],
-                candidates[0].identifier,
+            selected_id = summary["folds"][0]["model_selection"][
+                "selected_model_id"
+            ]
+            selected = next(
+                result
+                for result in (enabled, disabled)
+                if result["model_id"] == selected_id
+            )
+            other = disabled if selected is enabled else enabled
+            self.assertLessEqual(
+                max(
+                    item["inference_latency"]["median_microseconds"]
+                    for item in selected["training_seed_replicates"]
+                ),
+                max(
+                    item["inference_latency"]["median_microseconds"]
+                    for item in other["training_seed_replicates"]
+                ),
             )
 
     def test_cli_expands_each_architecture_with_requested_ablation(self):

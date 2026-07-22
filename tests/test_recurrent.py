@@ -79,6 +79,8 @@ class RecurrentTests(TestCase):
             RecurrentConfig(5, 2, 3, masked_input_indices=(5,))
         with self.assertRaisesRegex(ValueError, "masked_input_indices"):
             RecurrentConfig(5, 2, 3, masked_input_indices=(1, 1))
+        with self.assertRaisesRegex(ValueError, "disable every input"):
+            RecurrentConfig(2, 1, 3, masked_input_indices=(0, 1))
         with self.assertRaisesRegex(ValueError, "auxiliary_target_count"):
             RecurrentConfig(5, 2, 3, auxiliary_target_count=-1)
         with self.assertRaisesRegex(ValueError, "auxiliary_horizons"):
@@ -141,6 +143,17 @@ class RecurrentTests(TestCase):
 
         torch.testing.assert_close(first_logits, second_logits)
         torch.testing.assert_close(first_values, second_values)
+        self.assertEqual(model.recurrent.input_size, 3)
+        full = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            2,
+            3,
+            hidden_size=8,
+        ))
+        self.assertLess(
+            sum(parameter.numel() for parameter in model.parameters()),
+            sum(parameter.numel() for parameter in full.parameters()),
+        )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_recurrent_variants_have_safe_masked_action_shapes(self):

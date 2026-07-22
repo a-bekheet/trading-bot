@@ -342,6 +342,10 @@ class FeatureSequenceTests(TestCase):
         dynamics_indices = feature_ablation_indices(("surface_dynamics",), 2)
         identity_indices = feature_ablation_indices(("slot_identity",), 2)
         position_indices = feature_ablation_indices(("position_state",), 2)
+        lifecycle_indices = feature_ablation_indices(
+            ("position_lifecycle",),
+            2,
+        )
         contract_dynamics_indices = feature_ablation_indices(
             ("contract_dynamics",),
             2,
@@ -363,6 +367,7 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(len(term_indices), 4)
         self.assertEqual(len(dynamics_indices), 7)
         self.assertEqual(len(identity_indices), 2)
+        self.assertEqual(len(lifecycle_indices), 4)
         self.assertEqual(len(position_indices), 6)
         self.assertEqual(
             len(contract_dynamics_indices),
@@ -417,6 +422,7 @@ class FeatureSequenceTests(TestCase):
         self.assertFalse(set(trend_indices) & set(time_indices))
         self.assertFalse(set(trend_indices) & set(term_indices))
         self.assertFalse(set(position_indices) & set(identity_indices))
+        self.assertFalse(set(position_indices) & set(lifecycle_indices))
         self.assertFalse(set(contract_dynamics_indices) & set(position_indices))
         self.assertFalse(set(contract_dynamics_indices) & set(contract_indices))
         for window in (4, 16):
@@ -819,6 +825,8 @@ class FeatureSequenceTests(TestCase):
                 "positionQuantity": 2,
                 "positionAveragePrice": 1.2 * scale,
                 "positionUnrealizedReturn": 0.25,
+                "positionAgeSteps": 9,
+                "positionLastTradeAgeSteps": 99,
             }
             for name, value in values.items():
                 contracts[0, CONTRACT_FEATURES.index(name)] = value
@@ -868,9 +876,17 @@ class FeatureSequenceTests(TestCase):
             first[2 + CONTRACT_FEATURES.index("ivChange")],
             np.log1p(0.4),
         )
+        self.assertAlmostEqual(
+            first[2 + CONTRACT_FEATURES.index("positionAgeSteps")],
+            np.log(10) / 10,
+        )
+        self.assertAlmostEqual(
+            first[2 + CONTRACT_FEATURES.index("positionLastTradeAgeSteps")],
+            np.log(100) / 10,
+        )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v15")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v16")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

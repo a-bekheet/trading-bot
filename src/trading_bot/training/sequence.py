@@ -23,6 +23,10 @@ FEATURE_ABLATION_GROUPS = {
         "positionAveragePrice",
         "positionUnrealizedReturn",
     ),
+    "position_lifecycle": (
+        "positionAgeSteps",
+        "positionLastTradeAgeSteps",
+    ),
     "contract_dynamics": CONTRACT_DYNAMICS_FEATURES,
     "static_arbitrage": (
         "verticalArbitrageViolationPct",
@@ -221,6 +225,10 @@ def _dimensionless_components(
     contracts[:, indices["quoteAgeSeconds"]] = (
         np.log1p(np.maximum(contracts[:, indices["quoteAgeSeconds"]], 0.0)) / 10.0
     )
+    for name in ("positionAgeSteps", "positionLastTradeAgeSteps"):
+        contracts[:, indices[name]] = (
+            np.log1p(np.maximum(contracts[:, indices[name]], 0.0)) / 10.0
+        )
 
     if len(market):
         # Contract prices and Greeks are expressed relative to spot below, so
