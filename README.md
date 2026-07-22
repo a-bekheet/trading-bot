@@ -450,6 +450,22 @@ tied at zero validation score and selected the normalization-masked candidate
 through the active-input tie-break, so the current sample provides no reason to
 promote the new signals.
 
+v0.47 removes pandas row materialization from the environment's repeated
+observation path. Contract slots now use immutable scalar views over snapshot
+column arrays, and portfolio marking reuses the same first-occurrence quote
+lookup. Ranking, duplicate handling, fill prices, action masks, Greek exposure,
+and accounting are unchanged; an explicit regression test preserves the
+first-quote rule for duplicate contract symbols. Invalid zero-midpoint quotes
+also remain uncovered without emitting NumPy division warnings.
+
+On the current 11-snapshot, 84-contract AAPL sample at 32 slots, 50 complete
+no-op episodes reduced median transition time from 5.27 ms to 1.63 ms and p95
+from 8.34 ms to 1.81 ms. Median reset time fell from 9.15 ms to 6.93 ms. These
+are same-machine measurements and do not alter model inference latency or
+establish alpha. Profiling showed Python/pandas object construction—not a
+numerical kernel—as the bottleneck, so a Rust or C++ extension would add a
+boundary without addressing the measured cause.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
 coverage bit; `dimensionless.v13` log-compresses the interval before it reaches

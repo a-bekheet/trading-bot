@@ -52,6 +52,44 @@ class Position:
     expiration: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _ContractRow:
+    """Cheap scalar view over one immutable snapshot row."""
+
+    frame: "_FrameRows"
+    position: int
+
+    def __getitem__(self, name: str) -> Any:
+        return self.frame.columns[name][self.position]
+
+    def get(self, name: str, default: Any = None) -> Any:
+        values = self.frame.columns.get(name)
+        return default if values is None else values[self.position]
+
+
+class _FrameRows:
+    """Column-array snapshot view without per-row pandas Series allocation."""
+
+    __slots__ = ("columns", "positions")
+
+    def __init__(self, frame: pd.DataFrame):
+        self.columns = {
+            str(name): values.to_numpy(copy=False)
+            for name, values in frame.items()
+        }
+        self.positions: dict[str, int] = {}
+        symbols = self.columns.get("contractSymbol", ())
+        for position, symbol in enumerate(symbols):
+            self.positions.setdefault(str(symbol), position)
+
+    def get(self, symbol: str) -> _ContractRow | None:
+        position = self.positions.get(symbol)
+        return None if position is None else _ContractRow(self, position)
+
+    def at(self, position: int) -> _ContractRow:
+        return _ContractRow(self, position)
+
+
 class OptionsEnv:
     """Bounded option and underlying trades over CSV snapshots.
 
@@ -170,7 +208,7 @@ class OptionsEnv:
         self._cached_index = -1
         self._cached_observation: Observation | None = None
         self._cached_info: dict[str, Any] = {}
-        self._cached_slots: list[pd.Series | None] = []
+        self._cached_slots: list[_ContractRow | None] = []
         self._contract_home_slots: dict[str, int] = {}
         self._peak_nav = starting_cash
         self._max_drawdown = 0.0
@@ -475,7 +513,7 @@ class OptionsEnv:
         self,
         observation: Observation,
         info: dict[str, Any],
-        slots: list[pd.Series | None],
+        slots: list[_ContractRow | None],
     ) -> None:
         """Cache exactly the slot state returned to the policy."""
         self._cached_index = self._index
@@ -489,7 +527,12 @@ class OptionsEnv:
     def _current_frame(self) -> pd.DataFrame:
         return self.dataset.snapshots[self._index].frame
 
-    def _ranked_slots(self, frame: pd.DataFrame) -> list[pd.Series]:
+    def _ranked_slots(
+        self,
+        frame: pd.DataFrame,
+        rows: _FrameRows | None = None,
+    ) -> list[_ContractRow]:
+        rows = _FrameRows(frame) if rows is None else rows
         ranked = frame.drop_duplicates(
             "contractSymbol",
             keep="first",
@@ -535,21 +578,20 @@ class OptionsEnv:
             ["_surfaceDepth", "expiration", "optionType", *ordering[2:]]
         )
         selected = pd.concat((held, remainder.head(max(0, self.slot_count - len(held)))))
-        return [row for _, row in selected.head(self.slot_count).iterrows()]
+        return [
+            row
+            for symbol in selected["contractSymbol"].head(self.slot_count)
+            if (row := rows.get(str(symbol))) is not None
+        ]
 
-    def _slots(self, frame: pd.DataFrame) -> list[pd.Series | None]:
+    def _slots(self, frame: pd.DataFrame) -> list[_ContractRow | None]:
         """Assign ranked contracts while preserving prior per-slot identity."""
+        rows = _FrameRows(frame)
         if self.slot_assignment == "ranked" or self._cached_observation is None:
-            return self._ranked_slots(frame)
+            return self._ranked_slots(frame, rows)
 
-        current_rows = {
-            str(row["contractSymbol"]): row
-            for _, row in frame.drop_duplicates(
-                "contractSymbol",
-                keep="first",
-            ).iterrows()
-        }
-        assigned: list[pd.Series | None] = [None] * self.slot_count
+        current_rows = rows.positions
+        assigned: list[_ContractRow | None] = [None] * self.slot_count
         used: set[str] = set()
         previous_contract_ids = (
             self._cached_observation.contract_ids[:self.slot_count]
@@ -561,7 +603,7 @@ class OptionsEnv:
                 contract_id in self._positions
                 and contract_id in current_rows
             ):
-                assigned[index] = current_rows[contract_id]
+                assigned[index] = rows.get(contract_id)
                 used.add(contract_id)
         # Reappearing held contracts reclaim their original home when it is
         # vacant, otherwise the first vacancy. They must remain sellable.
@@ -586,7 +628,7 @@ class OptionsEnv:
                 )
             if target is None:
                 continue
-            assigned[target] = current_rows[contract_id]
+            assigned[target] = rows.get(contract_id)
             used.add(contract_id)
         for index, contract_id in enumerate(previous_contract_ids):
             if (
@@ -596,13 +638,13 @@ class OptionsEnv:
                 or contract_id not in current_rows
             ):
                 continue
-            assigned[index] = current_rows[contract_id]
+            assigned[index] = rows.get(contract_id)
             used.add(contract_id)
 
         if all(row is not None for row in assigned):
             return assigned
 
-        candidates = self._ranked_slots(frame)
+        candidates = self._ranked_slots(frame, rows)
         vacant = iter(index for index, row in enumerate(assigned) if row is None)
         for candidate in candidates:
             contract_id = str(candidate["contractSymbol"])
@@ -619,7 +661,7 @@ class OptionsEnv:
     def _observation(
         self,
         frame: pd.DataFrame | None = None,
-        slots: list[pd.Series | None] | None = None,
+        slots: list[_ContractRow | None] | None = None,
     ) -> tuple[Observation, dict[str, Any]]:
         frame = self._current_frame() if frame is None else frame
         slots = self._slots(frame) if slots is None else slots
@@ -678,7 +720,13 @@ class OptionsEnv:
                     contracts[index, feature_index] = float(
                         contract.get(name, 0) or 0
                     )
-        nav, exposures = self._portfolio_metrics(frame)
+        frame_rows = next(
+            (contract.frame for contract in slots if contract is not None),
+            None,
+        )
+        if frame_rows is None:
+            frame_rows = _FrameRows(frame)
+        nav, exposures = self._portfolio_metrics(frame, frame_rows)
         action_mask = np.zeros(self.action_shape, dtype=bool)
         for index, contract in enumerate(slots):
             if contract is None:
@@ -727,7 +775,7 @@ class OptionsEnv:
                 )
         underlying_slot = self.slot_count
         action_mask[underlying_slot, 0] = True
-        spot = float(frame["underlyingPrice"].iloc[0])
+        spot = float(frame_rows.columns["underlyingPrice"][0])
         for encoded, signed_quantity in enumerate(
             self.underlying_action_quantities[1:],
             start=1,
@@ -761,7 +809,7 @@ class OptionsEnv:
                 and fill_allowed
                 and self._risk_allowed(exposures, greek_change)
             )
-        first = frame.iloc[0]
+        first = frame_rows.at(0)
         market = np.array(
             [float(first.get(name, 0.0) or 0.0) for name in MARKET_FEATURES],
             dtype=np.float64,
@@ -843,7 +891,7 @@ class OptionsEnv:
             })
         return observation, info
 
-    def _execution_price(self, contract: pd.Series, side: str) -> float:
+    def _execution_price(self, contract: _ContractRow, side: str) -> float:
         """Return a deterministic fill with configurable spread stress."""
         bid = float(contract["bid"])
         ask = float(contract["ask"])
@@ -867,12 +915,14 @@ class OptionsEnv:
         return spot * (1 + slippage if side == "buy" else 1 - slippage)
 
     @staticmethod
-    def _contract_greeks(contract: pd.Series) -> np.ndarray:
-        values = pd.to_numeric(
-            pd.Series([contract.get(name, 0.0) for name in GREEK_NAMES]),
-            errors="coerce",
-        ).fillna(0.0).to_numpy(dtype=np.float64, copy=True)
-        values[~np.isfinite(values)] = 0.0
+    def _contract_greeks(contract: _ContractRow) -> np.ndarray:
+        values = np.empty(len(GREEK_NAMES), dtype=np.float64)
+        for index, name in enumerate(GREEK_NAMES):
+            try:
+                value = float(contract.get(name, 0.0))
+            except (TypeError, ValueError):
+                value = 0.0
+            values[index] = value if math.isfinite(value) else 0.0
         return values
 
     def _risk_allowed(self, current: np.ndarray, change: np.ndarray) -> bool:
@@ -890,7 +940,7 @@ class OptionsEnv:
 
     @staticmethod
     def _position_metadata(
-        contract: pd.Series,
+        contract: _ContractRow,
     ) -> tuple[str, float, str]:
         option_type = str(contract.get("optionType", "")).lower()
         try:
@@ -913,7 +963,7 @@ class OptionsEnv:
         *,
         override_symbol: str | None = None,
         override_quantity: int | None = None,
-        override_contract: pd.Series | None = None,
+        override_contract: _ContractRow | None = None,
     ) -> tuple[float, int, int]:
         """Return cash, covered shares, and put-assignment shares reserved."""
         cash = 0.0
@@ -961,7 +1011,7 @@ class OptionsEnv:
     def _option_fill_allowed(
         self,
         side: str,
-        contract: pd.Series,
+        contract: _ContractRow,
         quantity: int,
         price: float,
         fee: float,
@@ -1024,13 +1074,13 @@ class OptionsEnv:
         )
 
     @staticmethod
-    def _quote_valid(contract: pd.Series) -> bool:
+    def _quote_valid(contract: _ContractRow) -> bool:
         try:
             return all(math.isfinite(float(contract[name])) and float(contract[name]) > 0 for name in ("bid", "ask", "lastPrice")) and float(contract["bid"]) <= float(contract["ask"])
         except (TypeError, ValueError):
             return False
 
-    def _fill(self, side: str, contract: pd.Series, quantity: int, price: float, fee: float) -> None:
+    def _fill(self, side: str, contract: _ContractRow, quantity: int, price: float, fee: float) -> None:
         symbol = str(contract["contractSymbol"])
         greeks = tuple(float(value) for value in self._contract_greeks(contract))
         if not self._option_fill_allowed(side, contract, quantity, price, fee):
@@ -1145,14 +1195,19 @@ class OptionsEnv:
             del self._positions[symbol]
         return settlements
 
-    def _portfolio_metrics(self, frame: pd.DataFrame) -> tuple[float, np.ndarray]:
-        quotes = frame.drop_duplicates("contractSymbol").set_index("contractSymbol")
-        spot = float(frame["underlyingPrice"].iloc[0])
+    def _portfolio_metrics(
+        self,
+        frame: pd.DataFrame,
+        rows: _FrameRows | None = None,
+    ) -> tuple[float, np.ndarray]:
+        rows = _FrameRows(frame) if rows is None else rows
+        spot = float(rows.columns["underlyingPrice"][0])
         value = self._underlying_shares * spot
         exposures = np.zeros(len(GREEK_NAMES), dtype=np.float64)
         exposures[0] = self._underlying_shares
         for symbol, position in self._positions.items():
-            if symbol not in quotes.index:
+            quote = rows.get(symbol)
+            if quote is None:
                 value += (
                     position.quantity
                     * position.average_price
@@ -1164,7 +1219,6 @@ class OptionsEnv:
                     * OPTION_CONTRACT_MULTIPLIER
                 )
                 continue
-            quote = quotes.loc[symbol]
             bid, ask = float(quote["bid"]), float(quote["ask"])
             mark = (bid + ask) / 2 if bid > 0 and ask > 0 else float(quote["lastPrice"])
             value += (

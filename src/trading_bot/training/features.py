@@ -108,8 +108,9 @@ def _contract_dynamics_features(
     quote_coverage = current_quote_valid & prior_quote_valid
     current_mid = (current_bid + current_ask) / 2
     prior_mid = (prior_bid + prior_ask) / 2
-    current_spread_pct = (current_ask - current_bid) / current_mid
-    prior_spread_pct = (prior_ask - prior_bid) / prior_mid
+    with np.errstate(divide="ignore", invalid="ignore"):
+        current_spread_pct = (current_ask - current_bid) / current_mid
+        prior_spread_pct = (prior_ask - prior_bid) / prior_mid
     result["quoteChangeCoverage"] = quote_coverage.astype(float)
     covered_quotes = quote_coverage.astype(bool)
     mid_price_log_return = np.zeros(len(result), dtype=float)

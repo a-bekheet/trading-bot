@@ -852,6 +852,37 @@ class OptionsEnvTests(TestCase):
             len(duplicate_safe),
         )
 
+    def test_duplicate_quotes_keep_first_row_for_slots_marks_and_greeks(self):
+        source = demo_dataset()
+        next_frame = source.snapshots[1].frame.copy()
+        duplicate = next_frame.iloc[[0]].copy()
+        duplicate["bid"] = 50.0
+        duplicate["ask"] = 60.0
+        duplicate["lastPrice"] = 55.0
+        duplicate["delta"] = 9.0
+        next_frame = pd.concat((next_frame, duplicate), ignore_index=True)
+        dataset = SnapshotDataset(
+            (
+                source.snapshots[0],
+                Snapshot(source.snapshots[1].timestamp, next_frame),
+            ),
+            source.symbol,
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=1_000,
+        )
+        env.reset()
+
+        observation, _, _, truncated, info = env.step(np.array([1, 0]))
+
+        self.assertTrue(truncated)
+        self.assertAlmostEqual(observation.portfolio[2], 1_039.35)
+        self.assertAlmostEqual(observation.portfolio[3], 50.0)
+        self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
+
     def test_single_snapshot_truncates_without_unmarkable_fill(self):
         source = demo_dataset()
         dataset = SnapshotDataset((source.snapshots[0],), source.symbol)

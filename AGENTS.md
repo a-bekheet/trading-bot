@@ -588,6 +588,12 @@ by remote HTTP latency, so Rust or C++ would not materially improve throughput.
 Keep orchestration and deep-learning integration in Python. If profiling later
 finds a CPU-bound hot path, prefer an isolated Rust extension with benchmarks
 and a Python fallback; use C++ only when required by an existing library.
+The training environment must keep snapshot rows as lightweight column-array
+views through slot assignment, valuation, masks, and fills. Do not reintroduce
+`DataFrame.iterrows()`, per-contract `Series` construction, or repeated indexed
+DataFrames in the transition loop. Preserve first-occurrence duplicate-symbol
+semantics and verify both accounting equivalence and full-episode latency after
+changing this path.
 
 ## Known limitations and next decisions
 

@@ -306,6 +306,11 @@ candidate. This corrects objective semantics; it is not evidence of alpha.
 
 ### 3. Improve the state without inflating latency
 
+- Retain the implemented column-array environment row path and profile complete
+  episodes before adding caches or native extensions. The current measured
+  bottleneck was pandas object allocation rather than numerical compute; do not
+  trade deterministic first-quote, accounting, or action-mask semantics for a
+  synthetic microbenchmark win.
 - Keep the 33-field contract state under `dimensionless.v13` as the current
   model: current per-slot quantity, average entry price, and executable
   unrealized return prevent portfolio-state aliasing, while matched bid/ask and
