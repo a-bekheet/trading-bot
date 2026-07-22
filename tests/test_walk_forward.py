@@ -422,7 +422,7 @@ class WalkForwardTrainingTests(TestCase):
             "--candidate",
             "graph:hybrid:reinforce",
             "--candidate",
-            "graph_set:gru",
+            "graph_set:gru:ppo:0",
             "--ablation",
             "surface_wings",
             "--parameter-budget",
@@ -441,6 +441,26 @@ class WalkForwardTrainingTests(TestCase):
             {"ppo", "reinforce"},
         )
         self.assertEqual({spec.parameter_budget for spec in specs}, {5000})
+        graph_set_specs = [
+            spec for spec in specs
+            if spec.encoder == "graph_set"
+        ]
+        self.assertEqual({spec.graph_neighbors for spec in graph_set_specs}, {0})
+
+    def test_cli_validates_candidate_graph_neighbor_override(self):
+        args = _parser().parse_args([
+            "--candidate",
+            "graph_set:gru:ppo:not-an-integer",
+        ])
+        with self.assertRaisesRegex(ValueError, "must be an integer"):
+            _model_specs_from_args(args)
+
+        args = _parser().parse_args([
+            "--candidate",
+            "graph_set:gru:ppo:-1",
+        ])
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            _model_specs_from_args(args)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_parameter_budget_resolves_widest_fitting_recurrent_state(self):

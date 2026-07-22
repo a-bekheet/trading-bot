@@ -46,7 +46,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v21"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v22"
 
 
 @dataclass(frozen=True)
@@ -132,11 +132,10 @@ class ModelSpec:
             self.layers,
             self.graph_hidden_size,
             self.graph_layers,
-            self.graph_neighbors,
         ) < 1:
-            raise ValueError(
-                "model sizes, layers, and graph neighbors must be positive"
-            )
+            raise ValueError("model sizes and layers must be positive")
+        if self.graph_neighbors < 0:
+            raise ValueError("model graph neighbors cannot be negative")
         if not 0 <= self.dropout < 1:
             raise ValueError("model dropout must be in [0, 1)")
         if self.algorithm not in {"ppo", "reinforce"}:
@@ -775,10 +774,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidate",
         action="append",
-        metavar="ENCODER:KIND[:ALGORITHM]",
+        metavar="ENCODER:KIND[:ALGORITHM[:GRAPH_NEIGHBORS]]",
         help=(
-            "repeat to select architectures and PPO/REINFORCE using "
-            "validation only"
+            "repeat to select architectures, PPO/REINFORCE, and optionally "
+            "the graph-neighbor count using validation only"
         ),
     )
     parser.add_argument(
@@ -869,12 +868,21 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
     specs = []
     for candidate in candidates:
         parts = candidate.split(":")
-        if len(parts) not in {2, 3}:
+        if len(parts) not in {2, 3, 4}:
             raise ValueError(
-                "candidate must use ENCODER:KIND or ENCODER:KIND:ALGORITHM"
+                "candidate must use ENCODER:KIND, ENCODER:KIND:ALGORITHM, "
+                "or ENCODER:KIND:ALGORITHM:GRAPH_NEIGHBORS"
             )
         encoder, kind = parts[:2]
-        algorithm = parts[2] if len(parts) == 3 else args.algorithm
+        algorithm = parts[2] if len(parts) >= 3 else args.algorithm
+        try:
+            graph_neighbors = (
+                int(parts[3]) if len(parts) == 4 else args.graph_neighbors
+            )
+        except ValueError as error:
+            raise ValueError(
+                "candidate graph neighbors must be an integer"
+            ) from error
         specs.append(
             ModelSpec(
                 kind=kind,
@@ -882,7 +890,7 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 hidden_size=args.hidden_size,
                 graph_hidden_size=args.graph_hidden_size,
                 graph_layers=args.graph_layers,
-                graph_neighbors=args.graph_neighbors,
+                graph_neighbors=graph_neighbors,
                 initial_hold_bias=args.initial_hold_bias,
                 algorithm=algorithm,
                 parameter_budget=args.parameter_budget,

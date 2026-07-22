@@ -86,6 +86,10 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
 
     temporal_input_size = config.input_size
     policy_slot_count = config.action_slot_count or config.slot_count
+    effective_graph_neighbors = min(
+        config.graph_neighbors,
+        max(config.slot_count - 1, 0),
+    )
     if graph_encoder:
         expected = (
             config.market_feature_count
@@ -144,7 +148,17 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                     nn.ModuleDict(
                         {
                             "self": nn.Linear(source, target),
-                            "neighbor": nn.Linear(source, target, bias=False),
+                            **(
+                                {
+                                    "neighbor": nn.Linear(
+                                        source,
+                                        target,
+                                        bias=False,
+                                    )
+                                }
+                                if effective_graph_neighbors
+                                else {}
+                            ),
                         }
                     )
                     for source, target in zip(graph_dimensions, graph_dimensions[1:])
@@ -203,16 +217,9 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             valid = flattened[:, portfolio_end:].bool()
             hidden = self.contract_norm(contracts)
 
-            pair_valid = valid.unsqueeze(1) & valid.unsqueeze(2)
-            adjacency = torch.zeros(
-                batch * steps,
-                config.slot_count,
-                config.slot_count,
-                dtype=hidden.dtype,
-                device=hidden.device,
-            )
-            neighbor_count = min(config.graph_neighbors, max(config.slot_count - 1, 0))
+            neighbor_count = effective_graph_neighbors
             if neighbor_count:
+                pair_valid = valid.unsqueeze(1) & valid.unsqueeze(2)
                 relation_indices = config.graph_relation_indices or tuple(
                     range(config.contract_feature_count)
                 )
@@ -233,17 +240,25 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 ).unsqueeze(0)
                 distances = distances.masked_fill(~pair_valid | diagonal, float("inf"))
                 neighbors = distances.topk(neighbor_count, largest=False).indices
+                adjacency = torch.zeros(
+                    batch * steps,
+                    config.slot_count,
+                    config.slot_count,
+                    dtype=hidden.dtype,
+                    device=hidden.device,
+                )
                 adjacency.scatter_(-1, neighbors, 1.0)
                 adjacency *= pair_valid
                 adjacency = torch.maximum(adjacency, adjacency.transpose(1, 2))
-            adjacency += torch.diag_embed(valid.to(hidden.dtype))
-            degree = adjacency.sum(dim=-1, keepdim=True).clamp_min(1.0)
+                adjacency += torch.diag_embed(valid.to(hidden.dtype))
+                degree = adjacency.sum(dim=-1, keepdim=True).clamp_min(1.0)
 
             for layer in self.graph_message_layers:
-                neighbor_mean = adjacency.bmm(hidden) / degree
-                hidden = torch.nn.functional.gelu(
-                    layer["self"](hidden) + layer["neighbor"](neighbor_mean)
-                )
+                transformed = layer["self"](hidden)
+                if neighbor_count:
+                    neighbor_mean = adjacency.bmm(hidden) / degree
+                    transformed = transformed + layer["neighbor"](neighbor_mean)
+                hidden = torch.nn.functional.gelu(transformed)
                 hidden *= valid.unsqueeze(-1)
 
             valid_values = valid.to(hidden.dtype)

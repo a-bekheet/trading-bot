@@ -301,6 +301,10 @@ underlying logits, and auxiliary predictions unchanged. Padded node content must
 remain inert. Preserve these invariants with tests whenever graph construction,
 pooling, action layout, or recurrent state changes. Do not assume `graph_set` is
 always faster: enforce a predeclared latency budget when speed affects selection.
+With `graph_neighbors=0`, construct only pointwise self layers: do not allocate
+adjacency/degree tensors, call graph multiplication, or register dead neighbor
+weights. This self-only Deep Sets configuration must remain selectable alongside
+the full neighbor graph in one validation-only tournament.
 
 Evaluation changes must preserve chronological order. `walk_forward_splits`
 uses half-open train/validation/test ranges with explicit embargoes and may
@@ -390,7 +394,7 @@ streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
-train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph:hybrid --candidate graph_set:hybrid
+train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:3 --candidate graph_set:hybrid:ppo:0
 ```
 
 The collector defaults to three expirations per ticker, one cycle every 900

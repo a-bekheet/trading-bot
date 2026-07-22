@@ -10,7 +10,11 @@ from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_acto
 
 class RecurrentTests(TestCase):
     @staticmethod
-    def graph_set_config(*, kind: str = "gru") -> RecurrentConfig:
+    def graph_set_config(
+        *,
+        kind: str = "gru",
+        graph_neighbors: int = 2,
+    ) -> RecurrentConfig:
         # market(2), three contracts(4 each), portfolio(3), valid mask(3)
         return RecurrentConfig(
             20,
@@ -25,7 +29,7 @@ class RecurrentTests(TestCase):
             portfolio_feature_count=3,
             graph_hidden_size=6,
             graph_layers=2,
-            graph_neighbors=2,
+            graph_neighbors=graph_neighbors,
             graph_relation_indices=(0, 1),
             auxiliary_target_count=5,
         )
@@ -375,3 +379,40 @@ class RecurrentTests(TestCase):
             sum(parameter.numel() for parameter in graph_set.parameters()),
             sum(parameter.numel() for parameter in flattened.parameters()),
         )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_zero_neighbor_graph_set_is_finite_and_removes_neighbor_path(self):
+        torch.manual_seed(43)
+        zero_neighbor = build_recurrent_actor_critic(
+            self.graph_set_config(graph_neighbors=0)
+        )
+        full_graph = build_recurrent_actor_critic(
+            self.graph_set_config(graph_neighbors=2)
+        )
+        self.assertFalse(any(
+            ".neighbor." in name
+            for name, _ in zero_neighbor.named_parameters()
+        ))
+        self.assertTrue(any(
+            ".neighbor." in name
+            for name, _ in full_graph.named_parameters()
+        ))
+        self.assertLess(
+            sum(parameter.numel() for parameter in zero_neighbor.parameters()),
+            sum(parameter.numel() for parameter in full_graph.parameters()),
+        )
+
+        sequence = torch.randn(2, 3, 20)
+        sequence[..., -3:] = 0
+        action_mask = torch.zeros(2, 3, 4, 3, dtype=torch.bool)
+        action_mask[..., 0] = True
+        logits, values, auxiliary, _ = (
+            zero_neighbor.forward_sequence_with_auxiliary(
+                sequence,
+                action_mask,
+            )
+        )
+        self.assertTrue(torch.isfinite(logits[..., 0]).all())
+        self.assertTrue(torch.isneginf(logits[..., 1:]).all())
+        self.assertTrue(torch.isfinite(values).all())
+        self.assertTrue(torch.isfinite(auxiliary).all())

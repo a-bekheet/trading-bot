@@ -55,6 +55,7 @@ class TrainerTests(TestCase):
             market_feature_count=observation.market.size,
             portfolio_feature_count=observation.portfolio.size,
             graph_hidden_size=4,
+            graph_neighbors=0,
             auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
         )
         training = TrainingConfig(
@@ -74,6 +75,7 @@ class TrainerTests(TestCase):
             restored, manifest = load_checkpoint(path)
 
         self.assertEqual(restored.config.encoder, "graph_set")
+        self.assertEqual(restored.config.graph_neighbors, 0)
         self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
         self.assertTrue(all(
             torch.isfinite(parameter).all()

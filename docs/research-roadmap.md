@@ -193,9 +193,17 @@ recurrent layer handles time. The implemented `graph_set` variant replaces the
 slot-dependent flattened policy with validity-masked mean/max pooling and a
 shared per-contract action scorer. This makes option outputs equivariant to slot
 permutations, makes global outputs invariant, and cuts policy parameters without
-introducing a graph-framework dependency. Next experiments should compare:
+introducing a graph-framework dependency. A zero-neighbor configuration now
+removes adjacency construction, graph multiplication, and neighbor weights while
+retaining shared pointwise encoding and invariant pooling. It is the low-latency
+[Deep Sets](https://arxiv.org/abs/1703.06114) baseline for deciding whether
+learned cross-contract messages earn their cost. The architecture supplies the
+desired set symmetry, not evidence of trading performance. Next experiments
+should compare:
 
 - Flat GRU versus GNN-GRU at matched parameter and latency budgets.
+- Zero-neighbor Deep Sets versus neighbor-message graph sets in the same
+  validation-only tournament.
 - Hand-built neighbor graphs versus learned attention with validity masks.
 - Per-ticker training versus the shared graph-set policy with ticker/regime
   context.
@@ -203,9 +211,9 @@ introducing a graph-framework dependency. Next experiments should compare:
   neural-process surface latent only after the data volume supports it.
 
 The flat, flattened-graph, graph-set, and recurrent-family tournament plumbing,
-exact parameter-cap matching, and a standardized streaming batch-one inference benchmark are
-implemented. Each fold reports median, p95, and mean latency with runtime
-context from a training observation. Timing is informational by default; a
+exact parameter-cap matching, and a standardized streaming batch-one inference
+benchmark are implemented. Each fold reports median, p95, and mean latency with
+runtime context from a training observation. Timing is informational by default; a
 predeclared median ceiling can exclude deployment-ineligible candidates before
 the validation winner reaches test, with exclusions kept in the artifact. The
 next valid experiment needs sufficiently long point-in-time history and should

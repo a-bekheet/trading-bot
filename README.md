@@ -374,19 +374,30 @@ avoids a separate graph-framework dependency at the default 32 slots. Keep
 `flat` and flattened `graph` as measured baselines rather than assuming more
 relational structure is automatically better.
 
+Set `--graph-neighbors 0` to turn `graph_set` into a self-only Deep Sets path.
+It retains pointwise contract encoding, validity-masked pooling, the recurrent
+global state, and the shared contract scorer, but creates no adjacency matrix,
+graph multiply, or unused neighbor weights. This is a first-class candidate,
+not an inference-only shortcut, so its exact likelihood and trainable parameter
+count remain valid during PPO or REINFORCE training.
+
 Recurrent state is carried causally from one snapshot to the next. PPO updates
 shuffle contiguous truncated-backpropagation chunks instead of independently
 shuffling zero-padded windows; `--sequence-length` is the maximum gradient
 chunk length, not a claim that earlier state is erased. Deterministic inference
 feeds one observation at a time and caches the GRU/LSTM hidden state. On the
-current AAPL layout (899 inputs, 32 option slots, and 33 action rows), a local
-1,000-iteration CPU benchmark with hybrid width 128 and graph width 32 measured
-184.38 microseconds median and 984,691 parameters for `flat`, 390.35
-microseconds and 1,160,935 parameters for flattened `graph`, and 374.33
-microseconds and 215,472 parameters for `graph_set`. At tiny width 8, a real-data
-integration smoke measured `graph_set` around 369-376 microseconds versus about
-331 for flattened `graph`, showing that its fixed pooling/scoring overhead can
-outweigh its smaller parameter count. Stable steady-state slot assignment measured
+current AAPL layout (899 inputs, 32 option slots, 33 action rows, and seven
+actions per row), a matched local 1,000-iteration CPU benchmark with hybrid
+width 128 and graph width 32 measured 187.50 microseconds median and 983,406
+parameters for `flat`, 360.67 microseconds and 1,159,650 parameters for
+flattened `graph`, 333.42 microseconds and 214,187 parameters for three-neighbor
+`graph_set`, and 240.50 microseconds and 212,331 parameters for zero-neighbor
+`graph_set`. The self-only path was about 28% faster than full `graph_set` while
+remaining about 28% slower than `flat`. In a three-fold, tiny-width-eight AAPL
+integration smoke, it measured about 213-215 microseconds versus 316-324 for
+the full graph set and 112-115 for flat. All validation scores tied at zero, so
+the smoke establishes integration and latency only—not alpha. Stable
+steady-state slot assignment measured
 1.57 ms median versus 4.95 ms for full reranking; across the 17-transition AAPL
 no-op episode, the median environment loop fell from 144.38 ms to 84.53 ms.
 Treat these as machine-specific engineering measurements, not trading results.
@@ -462,6 +473,7 @@ train-walk-forward \
   --candidate flat:lstm:reinforce \
   --candidate graph:hybrid:ppo \
   --candidate graph_set:hybrid:ppo \
+  --candidate graph_set:hybrid:ppo:0 \
   --hidden-size 256 \
   --parameter-budget 20000 \
   --latency-warmup-iterations 10 \
@@ -471,12 +483,14 @@ train-walk-forward \
   --ablation volatility_regime
 ```
 
-Repeat `--candidate ENCODER:KIND[:ALGORITHM]` to run a leak-safe architecture
-and learning-algorithm tournament. The optional algorithm is `ppo` or
-`reinforce` and defaults to `--algorithm` when omitted. Every GRU, LSTM, hybrid,
-flat, flattened-graph, or graph-set candidate receives the same fold and
-training seed. Each
-candidate restores its best validation checkpoint; the
+Repeat `--candidate ENCODER:KIND[:ALGORITHM[:GRAPH_NEIGHBORS]]` to run a
+leak-safe architecture and learning-algorithm tournament. The optional
+algorithm is `ppo` or `reinforce` and defaults to `--algorithm` when omitted.
+The optional integer neighbor override permits full and zero-neighbor graph
+candidates in one predeclared tournament; otherwise `--graph-neighbors` applies.
+Every GRU, LSTM, hybrid, flat, flattened-graph, or graph-set candidate receives
+the same fold and training seed. Each candidate restores its best validation
+checkpoint; the
 highest declared validation selection score wins, with fewer trainable
 parameters and then a smaller active input set, fewer optimizer updates, and
 stable model ID breaking ties. Only that winner is instantiated against the
