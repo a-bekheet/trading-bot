@@ -10,6 +10,7 @@ from trading_bot.interface.results import (
     discover_agent_runs,
     equity_curve,
     evidence_summary,
+    feature_ablation_results,
     heldout_results,
     promotion_assessment,
     trade_ledger,
@@ -31,7 +32,12 @@ def result_summary():
         },
         {
             "model_id": "lstm",
-            "model": {"kind": "lstm", "encoder": "flat", "algorithm": "ppo"},
+            "model": {
+                "kind": "lstm",
+                "encoder": "flat",
+                "algorithm": "ppo",
+                "disabled_feature_groups": ("contract_smile_residual",),
+            },
             "selection": {
                 "robust_training_seed_validation_score": 0.01,
                 "training_seed_mean_validation_reward": 0.015,
@@ -139,11 +145,14 @@ class InterfaceResultTests(TestCase):
             ["Factorized multi-leg", "Factorized multi-leg"],
         )
         self.assertEqual(leaderboard["Selected folds"].tolist(), [1, 0])
+        self.assertEqual(leaderboard["Smile residual"].tolist(), ["Enabled", "Ablated"])
         self.assertEqual(leaderboard["Competitive folds"].tolist(), [1, 1])
         self.assertEqual(leaderboard["Training seeds"].tolist(), [1, 1])
         self.assertEqual(heldout.iloc[0]["Agent"], "GRU Agent")
         self.assertEqual(heldout.iloc[0]["Encoder"], "Flat")
         self.assertEqual(heldout.iloc[0]["Architecture"], "Flat / Gru")
+        self.assertEqual(heldout.iloc[0]["Feature set"], "Full")
+        self.assertEqual(heldout.iloc[0]["Smile residual"], "Enabled")
         self.assertEqual(heldout.iloc[0]["Competitive candidates"], 1)
         self.assertEqual(heldout.iloc[0]["Activation"], "Active")
         self.assertEqual(heldout.iloc[0]["Sandbox policy"], "GRU Agent")
@@ -198,6 +207,11 @@ class InterfaceResultTests(TestCase):
         self.assertEqual(overview.iloc[1]["Selected agent"], "LSTM Agent")
         self.assertEqual(overview.iloc[1]["Selected encoder"], "Surface Graph Set")
         self.assertEqual(overview.iloc[1]["Architecture"], "Surface Graph Set / Lstm")
+        self.assertEqual(
+            overview.iloc[1]["Feature set"],
+            "Without Contract Smile Residual",
+        )
+        self.assertEqual(overview.iloc[1]["Smile residual"], "Ablated")
         self.assertEqual(overview.iloc[1]["Action policy"], "Sparse single-leg")
         self.assertEqual(overview.iloc[1]["Activation"], "Abstain")
         self.assertEqual(overview.iloc[1]["Sandbox policy"], "No Op")
@@ -205,6 +219,21 @@ class InterfaceResultTests(TestCase):
         self.assertAlmostEqual(overview.iloc[1]["Sandbox lift"], -0.01)
         self.assertEqual(overview.iloc[1]["Sandbox executions"], 0)
         self.assertEqual(overview.iloc[1]["Promotion"], "Research only")
+
+    def test_feature_ablation_results_expose_validation_only_lift(self):
+        summary = result_summary()
+        ablated = summary["folds"][0]["model_selection"]["candidates"][1]
+        ablated["validation_score_lift_vs_full"] = -0.0002
+        ablated["training_seed_aggregate"] = {"training_seed_count": 3}
+        summary["_run_name"] = "arena"
+
+        results = feature_ablation_results([summary])
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results.iloc[0]["Feature"], "Contract Smile Residual")
+        self.assertAlmostEqual(results.iloc[0]["Feature lift (bp)"], 2.0)
+        self.assertEqual(results.iloc[0]["Feature helped"], "Yes")
+        self.assertEqual(results.iloc[0]["Training seeds"], 3)
 
     def test_promotion_gate_requires_all_deployment_evidence(self):
         summary = result_summary()

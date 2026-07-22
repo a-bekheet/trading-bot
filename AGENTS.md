@@ -358,6 +358,12 @@ without its parameter count, actor latency, and held-out result. A failure
 for one ticker must be written with its exception type and message while other
 tickers continue. Do not average returns into a portfolio claim: each row is an
 independent, validation-selected research-demo path with its own provenance.
+The default arena also carries six exact `contract_smile_residual` removals:
+flat and `surface_graph_set` GRU/LSTM/gated-mixture agents with the same sparse
+decoder and otherwise identical model settings. Keep these matched identities
+intact so `validation_score_lift_vs_full` is populated. The interface must show
+whether each winner enabled or ablated the signal and summarize only validation
+lift; never use held-out results to decide whether the feature remains enabled.
 
 The default arena uses training-seed offsets 0, 1, and 2. Model selection first
 finds the highest seed-robust validation score, then retains every eligible
@@ -388,7 +394,7 @@ closed. Keep all failed reasons visible in the drill-down and never weaken a
 gate merely to produce a deployable-looking result.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v22`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v23`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
@@ -430,6 +436,17 @@ block removable through `smile_fit`; it is a noisy surface diagnostic and alpha
 hypothesis, never a reconstructed quote or execution authority. Yahoo option
 bid/ask rows have no synchronized exchange timestamp, so numeric quote validity
 is not proof of contemporaneous fillability.
+
+Contract smile residuals are node-local observed-surface diagnostics. Within
+the current snapshot, group only positive, non-crossed executable quotes by the
+same expiration and option side, restrict absolute forward log-moneyness to
+0.35, and require at least five rows with three unique coordinates. Standardize
+the coordinate before a quadratic solve, convert the in-sample residual to its
+leverage-adjusted leave-one-out value, divide by observed IV, bound it, and emit
+separate coverage. Missing support is zero with zero coverage. Keep both fields
+in `contract_smile_residual`; flat ablation compacts them while graph ablation
+masks them without rewiring strike/expiry edges. Never use this residual as a
+reconstructed volatility, quote, fair value, fill price, or execution permit.
 
 Every visible held contract exposes snapshots since opening and since its most
 recent trade. Same-sign adds retain the opening index, every fill resets the

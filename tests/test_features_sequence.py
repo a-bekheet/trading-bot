@@ -10,6 +10,7 @@ from trading_bot.training.features import (
     BENCHMARK_CONTEXT_FEATURES,
     CONTRACT_ARBITRAGE_FEATURES,
     CONTRACT_DYNAMICS_FEATURES,
+    CONTRACT_SMILE_RESIDUAL_FEATURES,
     ENGINEERED_FEATURES,
     INTRADAY_CLOCK_FEATURES,
     MARKET_ENGINEERED_FEATURES,
@@ -167,15 +168,43 @@ class FeatureSequenceTests(TestCase):
         self.assertAlmostEqual(first["frontSmileCurvature"], 0.00125)
         self.assertAlmostEqual(first["frontSmileFitRmsePct"], 0.0)
         self.assertAlmostEqual(first["frontAtmSmileResidualPct"], 0.0)
+        self.assertTrue((fitted["smileResidualCoverage"] == 1.0).all())
+        np.testing.assert_allclose(fitted["smileResidualPct"], 0.0, atol=1e-12)
         self.assertEqual(
             feature_ablation_indices(("smile_fit",), 2),
             tuple(MARKET_FEATURES.index(name) for name in SMILE_FIT_FEATURES),
         )
-        shuffled = engineer_snapshot(
+        residual_indices = feature_ablation_indices(
+            ("contract_smile_residual",), 2
+        )
+        contract_start = len(MARKET_FEATURES)
+        self.assertEqual(
+            residual_indices,
+            tuple(sorted(
+                contract_start
+                + slot * len(CONTRACT_FEATURES)
+                + CONTRACT_FEATURES.index(name)
+                for slot in range(2)
+                for name in CONTRACT_SMILE_RESIDUAL_FEATURES
+            )),
+        )
+        shuffled_frame = engineer_snapshot(
             pd.DataFrame(rows).sample(frac=1.0, random_state=69)
-        ).iloc[0]
+        )
+        shuffled = shuffled_frame.iloc[0]
         for name in SMILE_FIT_FEATURES:
             self.assertAlmostEqual(shuffled[name], first[name])
+        ordered_residuals = fitted.set_index("contractSymbol")[
+            list(CONTRACT_SMILE_RESIDUAL_FEATURES)
+        ].sort_index()
+        shuffled_residuals = shuffled_frame.set_index("contractSymbol")[
+            list(CONTRACT_SMILE_RESIDUAL_FEATURES)
+        ].sort_index()
+        np.testing.assert_allclose(
+            ordered_residuals,
+            shuffled_residuals,
+            atol=1e-12,
+        )
 
         rich_atm = pd.DataFrame(rows)
         rich_atm.loc[
@@ -188,15 +217,47 @@ class FeatureSequenceTests(TestCase):
             0.02 / 0.22,
         )
         self.assertGreater(rich["frontSmileFitRmsePct"], 0.0)
+        rich_contracts = engineer_snapshot(rich_atm)
+        rich_atm_residuals = rich_contracts.loc[
+            np.isclose(rich_contracts["strike"], 100),
+            "smileResidualPct",
+        ]
+        self.assertTrue((rich_atm_residuals > 0).all())
+
+        sparse_global = pd.DataFrame(rows)
+        sparse_global.loc[
+            np.isclose(sparse_global["strike"], 100 * np.exp(-0.2)),
+            "bid",
+        ] = 0.0
+        unavailable = engineer_snapshot(sparse_global).iloc[0]
+        self.assertEqual(unavailable["frontSmileFitCoverage"], 0.0)
+        self.assertEqual(unavailable["frontSmileCurvature"], 0.0)
 
         sparse = pd.DataFrame(rows)
         sparse.loc[
-            np.isclose(sparse["strike"], 100 * np.exp(-0.2)),
+            sparse["optionType"].eq("call")
+            & np.isclose(sparse["strike"], 100 * np.exp(-0.2)),
             "bid",
         ] = 0.0
-        unavailable = engineer_snapshot(sparse).iloc[0]
-        self.assertEqual(unavailable["frontSmileFitCoverage"], 0.0)
-        self.assertEqual(unavailable["frontSmileCurvature"], 0.0)
+        sparse_engineered = engineer_snapshot(sparse)
+        self.assertTrue(
+            (
+                sparse_engineered.loc[
+                    sparse_engineered["optionType"].eq("call"),
+                    "smileResidualCoverage",
+                ]
+                == 0.0
+            ).all()
+        )
+        self.assertTrue(
+            (
+                sparse_engineered.loc[
+                    sparse_engineered["optionType"].eq("put"),
+                    "smileResidualCoverage",
+                ]
+                == 1.0
+            ).all()
+        )
 
         narrow = pd.DataFrame(rows)
         original_coordinates = -np.log(narrow["strike"] / 100)
@@ -1364,7 +1425,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v22")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v23")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

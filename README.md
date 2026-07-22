@@ -96,7 +96,9 @@ By default it independently compares PPO GRU, LSTM, and gated-mixture agents on
 AAPL, NVDA, MSFT, AMZN, and GOOG. Every flat recurrent family gets factorized
 multi-leg and exact sparse single-leg policies. Three additional
 `surface_graph_set` agents pair the sparse decoder with local strike/expiry and
-opposite-side message passing, for nine candidates per ticker. Repeat
+opposite-side message passing. Six matched sparse agents remove only the causal
+contract-level smile residual across flat/surface-GNN and GRU/LSTM/mixture
+families, for 15 candidates per ticker. Repeat
 `--symbol` to choose another set. The command keeps identical budgets and split
 rules across tickers, writes one walk-forward artifact per ticker plus
 `agent-arena.json`, and records a per-ticker failure without discarding
@@ -228,6 +230,10 @@ env = OptionsEnv.from_directory(
 Snapshot loading adds causal engineered features such as relative spread,
 forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs, IV
 change/skew, ATM term slope, put-call IV spread, and put-call parity residual.
+Each executable contract also receives a same-expiry, same-side quadratic-smile
+leave-one-out IV residual plus coverage. The residual measures rich/cheap
+deviation from the currently observed smile without reconstructing a quote or
+changing execution prices and is removable through `contract_smile_residual`.
 Underlying return, cumulative log return over 4- and 16-snapshot windows,
 elapsed seconds from the causal prior snapshot, and annualized realized
 volatility over the same windows live once in the market vector rather than
@@ -300,7 +306,7 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v22` transform. Prices, strikes, and average entry price are
+`dimensionless.v23` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
@@ -807,6 +813,28 @@ to 0%, zero fills, zero fees, and no actor invocation. This is loss avoidance,
 not alpha: the gate has not yet activated a profitable agent, and the same tiny
 test paths are not fresh evidence. Walk-forward, universe walk-forward, and
 arena schemas advance to v61, v44, and v5; package version is 0.78.0.
+
+v0.79 adds a causal per-contract volatility-smile residual to both flat
+recurrent and surface-GNN observations. It fits only positive, non-crossed
+current quotes within each expiration and option side, requires five points and
+three unique forward-log-moneyness coordinates, and reports a leverage-adjusted
+leave-one-out residual with explicit coverage. The default arena now evaluates
+15 policies per ticker: nine full-feature agents plus six exact sparse
+`contract_smile_residual` ablations across flat/GNN and GRU/LSTM/mixture.
+
+In the five-ticker integration run, the signal improved 13 of 30 matched
+validation pairs, hurt 14, and tied 3. Mean feature lift was +1.02 bp for the 15
+surface-GNN pairs and -1.04 bp for the 15 flat pairs, so it remains selectable
+rather than mandatory. Winners retained the signal for AMZN and GOOG and
+ablated it for AAPL, MSFT, and NVDA; GOOG and MSFT selected surface-GNN LSTMs.
+Every winner still had a negative validation advantage, from -0.29 to -1.21 bp,
+so all sandbox policies abstained. The already inspected held-out research paths
+averaged -0.023%, with 13 fills and $3.73 in fees; operational return remained
+0%. Median selected actor latency was 118.5 microseconds. These small repeated
+samples are engineering and hypothesis-ranking evidence, not fresh alpha.
+Environment, feature-vector, checkpoint, walk-forward, universe, and arena
+schemas advance to v28, `dimensionless.v23`, v55, v62, v45, and v6; package
+version is 0.79.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The

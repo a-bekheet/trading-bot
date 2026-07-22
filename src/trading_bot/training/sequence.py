@@ -17,6 +17,7 @@ from trading_bot.training.env import (
 )
 from trading_bot.training.features import (
     BENCHMARK_CONTEXT_FEATURES,
+    CONTRACT_SMILE_RESIDUAL_FEATURES,
     CONTRACT_DYNAMICS_FEATURES,
     INTRADAY_CLOCK_FEATURES,
     REALIZED_VOL_WINDOWS,
@@ -44,6 +45,7 @@ FEATURE_ABLATION_GROUPS = {
         "underlyingSellFeasibleFraction",
     ),
     "contract_dynamics": CONTRACT_DYNAMICS_FEATURES,
+    "contract_smile_residual": CONTRACT_SMILE_RESIDUAL_FEATURES,
     "static_arbitrage": (
         "verticalArbitrageViolationPct",
         "butterflyArbitrageViolationPct",
@@ -253,12 +255,20 @@ _SIGNED_CONTRACT_FEATURES = (
     "midPriceLogReturn",
     "spreadPctChange",
     "ivChange",
+    "smileResidualPct",
 )
 _SIGNED_CONTRACT_INDICES = np.asarray([
     _CONTRACT_FEATURE_INDEX[name]
     for name in _SIGNED_CONTRACT_FEATURES
 ])
-_SIGNED_CONTRACT_SCALES = np.asarray((1.0, 1.0, 100.0, 10.0, 10.0))
+_SIGNED_CONTRACT_SCALES = np.asarray((
+    1.0,
+    1.0,
+    100.0,
+    10.0,
+    10.0,
+    10.0,
+))
 
 
 def feature_ablation_indices(

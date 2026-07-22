@@ -39,7 +39,7 @@ from trading_bot.training.sequence import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v54"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v55"
 CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION = (
     "research-demo.critic-balance-diagnostic.v1"
 )

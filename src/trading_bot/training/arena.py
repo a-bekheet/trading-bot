@@ -18,7 +18,7 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v5"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v6"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 DEFAULT_ARENA_TRAINING_SEED_OFFSETS = (0, 1, 2)
 DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE = 1e-4
@@ -30,7 +30,7 @@ def recurrent_arena_models(
     hidden_size: int = 8,
     initial_hold_bias: float = 0.0,
 ) -> tuple[ModelSpec, ...]:
-    """Return flat controls plus topology-aware surface-GNN agents."""
+    """Return recurrent controls, surface GNNs, and matched signal ablations."""
     flat_controls = tuple(
         ModelSpec(
             kind=kind,
@@ -57,7 +57,39 @@ def recurrent_arena_models(
         )
         for kind in ("gru", "lstm", "mixture")
     )
-    return flat_controls + surface_gnn_agents
+    flat_smile_residual_ablations = tuple(
+        ModelSpec(
+            kind=kind,
+            encoder="flat",
+            hidden_size=hidden_size,
+            initial_hold_bias=initial_hold_bias,
+            algorithm="ppo",
+            action_decoder="single_leg",
+            disabled_feature_groups=("contract_smile_residual",),
+        )
+        for kind in ("gru", "lstm", "mixture")
+    )
+    surface_smile_residual_ablations = tuple(
+        ModelSpec(
+            kind=kind,
+            encoder="surface_graph_set",
+            hidden_size=hidden_size,
+            graph_hidden_size=hidden_size,
+            graph_layers=1,
+            graph_neighbors=1,
+            initial_hold_bias=initial_hold_bias,
+            algorithm="ppo",
+            action_decoder="single_leg",
+            disabled_feature_groups=("contract_smile_residual",),
+        )
+        for kind in ("gru", "lstm", "mixture")
+    )
+    return (
+        flat_controls
+        + surface_gnn_agents
+        + flat_smile_residual_ablations
+        + surface_smile_residual_ablations
+    )
 
 
 def run_agent_arena(

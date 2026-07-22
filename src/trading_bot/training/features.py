@@ -27,6 +27,11 @@ SMILE_FIT_FEATURES = (
     "frontAtmSmileResidualPct",
     "frontSmileFitCoverage",
 )
+CONTRACT_SMILE_RESIDUAL_FEATURES = (
+    "smileResidualPct",
+    "smileResidualCoverage",
+)
+CONTRACT_SMILE_RESIDUAL_MAX_ABS = 5.0
 INTRADAY_CLOCK_FEATURES = (
     "easternCaptureDayFraction",
     "easternCaptureClockCoverage",
@@ -106,6 +111,7 @@ ENGINEERED_FEATURES = (
     *CONTRACT_DYNAMICS_FEATURES,
     *CONTRACT_ARBITRAGE_FEATURES,
     "forwardLogMoneyness", "extrinsicValuePct", "atmIv", "ivSkew",
+    *CONTRACT_SMILE_RESIDUAL_FEATURES,
     "atmTermSlope", "putCallIvSpread", "parityResidual",
     *MARKET_ENGINEERED_FEATURES,
 )
@@ -757,6 +763,98 @@ def _quadratic_smile_fit(
     return values if all(math.isfinite(value) for value in values) else None
 
 
+def _contract_smile_residual_features(result: pd.DataFrame) -> None:
+    """Add executable leave-one-out IV residuals within each observed smile."""
+    residuals = np.zeros(len(result), dtype=np.float64)
+    coverage = np.zeros(len(result), dtype=np.float64)
+    for name, values in zip(
+        CONTRACT_SMILE_RESIDUAL_FEATURES,
+        (residuals, coverage),
+        strict=True,
+    ):
+        result[name] = values
+    required = {
+        "expiration",
+        "optionType",
+        "forwardLogMoneyness",
+        "impliedVolatility",
+        "bid",
+        "ask",
+    }
+    if result.empty or not required.issubset(result.columns):
+        return
+
+    surface = pd.DataFrame({
+        "position": np.arange(len(result), dtype=np.int64),
+        "expiration": result["expiration"].astype(str).to_numpy(),
+        "optionType": result["optionType"].astype(str).str.lower().to_numpy(),
+        "x": pd.to_numeric(
+            result["forwardLogMoneyness"], errors="coerce"
+        ).to_numpy(),
+        "iv": pd.to_numeric(
+            result["impliedVolatility"], errors="coerce"
+        ).to_numpy(),
+        "bid": pd.to_numeric(result["bid"], errors="coerce").to_numpy(),
+        "ask": pd.to_numeric(result["ask"], errors="coerce").to_numpy(),
+    })
+    surface = surface[
+        surface["optionType"].isin(("call", "put"))
+        & np.isfinite(surface["x"])
+        & (
+            surface["x"].abs()
+            <= SMILE_FIT_MAX_ABS_FORWARD_LOG_MONEYNESS
+        )
+        & np.isfinite(surface["iv"])
+        & (surface["iv"] > 0)
+        & np.isfinite(surface["bid"])
+        & np.isfinite(surface["ask"])
+        & (surface["bid"] > 0)
+        & (surface["ask"] > 0)
+        & (surface["bid"] <= surface["ask"])
+    ]
+    for _, group in surface.groupby(
+        ["expiration", "optionType"], sort=False
+    ):
+        if len(group) < SMILE_FIT_MIN_POINTS or group["x"].nunique() < 3:
+            continue
+        x = group["x"].to_numpy(dtype=np.float64)
+        iv = group["iv"].to_numpy(dtype=np.float64)
+        scale = float(x.std())
+        if not math.isfinite(scale) or scale <= 1e-8:
+            continue
+        standardized = (x - float(x.mean())) / scale
+        design = np.column_stack((
+            np.ones(len(group), dtype=np.float64),
+            standardized,
+            np.square(standardized),
+        ))
+        coefficients, _, rank, _ = np.linalg.lstsq(design, iv, rcond=None)
+        if rank != 3 or not np.isfinite(coefficients).all():
+            continue
+        residual = iv - design @ coefficients
+        gram_inverse = np.linalg.pinv(design.T @ design)
+        leverage = np.einsum(
+            "ij,jk,ik->i", design, gram_inverse, design
+        )
+        denominator = 1.0 - leverage
+        valid = (
+            np.isfinite(residual)
+            & np.isfinite(denominator)
+            & (denominator > 1e-8)
+        )
+        positions = group["position"].to_numpy(dtype=np.int64)[valid]
+        values = residual[valid] / denominator[valid] / iv[valid]
+        residuals[positions] = np.clip(
+            values,
+            -CONTRACT_SMILE_RESIDUAL_MAX_ABS,
+            CONTRACT_SMILE_RESIDUAL_MAX_ABS,
+        )
+        coverage[positions] = 1.0
+
+    result["smileResidualPct"] = residuals
+    result["smileResidualCoverage"] = coverage
+
+
 def _market_surface_features(result: pd.DataFrame) -> None:
     """Add compact, causal surface factors and explicit quality coverage."""
     neutral = (
@@ -1132,6 +1230,7 @@ def engineer_snapshot(
     for name, value in realized_volatility_features(spot_history).items():
         result[name] = value
     _surface_features(result)
+    _contract_smile_residual_features(result)
     _market_surface_features(result)
     _surface_dynamics_features(result, previous)
     for name, value in volatility_regime_zscore_features(

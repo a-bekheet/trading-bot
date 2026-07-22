@@ -24,7 +24,7 @@ class AgentArenaTests(TestCase):
             DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE, 1e-4
         )
 
-    def test_fixed_arena_adds_surface_gnns_to_matched_flat_controls(self):
+    def test_fixed_arena_adds_surface_gnns_and_matched_signal_ablations(self):
         models = recurrent_arena_models(hidden_size=12)
 
         self.assertEqual(
@@ -35,6 +35,12 @@ class AgentArenaTests(TestCase):
                 "lstm",
                 "lstm",
                 "mixture",
+                "mixture",
+                "gru",
+                "lstm",
+                "mixture",
+                "gru",
+                "lstm",
                 "mixture",
                 "gru",
                 "lstm",
@@ -53,6 +59,12 @@ class AgentArenaTests(TestCase):
                 "single_leg",
                 "single_leg",
                 "single_leg",
+                "single_leg",
+                "single_leg",
+                "single_leg",
+                "single_leg",
+                "single_leg",
+                "single_leg",
             ],
         )
         self.assertEqual(
@@ -67,17 +79,37 @@ class AgentArenaTests(TestCase):
                 "surface_graph_set",
                 "surface_graph_set",
                 "surface_graph_set",
+                "flat",
+                "flat",
+                "flat",
+                "surface_graph_set",
+                "surface_graph_set",
+                "surface_graph_set",
             ],
         )
         self.assertEqual({model.hidden_size for model in models}, {12})
         self.assertEqual(
             {
                 (model.graph_hidden_size, model.graph_layers, model.graph_neighbors)
-                for model in models[6:]
+                for model in models[6:9] + models[12:]
             },
             {(12, 1, 1)},
         )
-        self.assertEqual(len({model.identifier for model in models}), 9)
+        self.assertTrue(
+            all(
+                model.disabled_feature_groups
+                == ("contract_smile_residual",)
+                for model in models[9:]
+            )
+        )
+        self.assertEqual(
+            {
+                (model.graph_hidden_size, model.graph_layers, model.graph_neighbors)
+                for model in models[9:12]
+            },
+            {(32, 2, 3)},
+        )
+        self.assertEqual(len({model.identifier for model in models}), 15)
 
     def test_runs_unique_symbols_and_records_per_ticker_failures(self):
         summary = {

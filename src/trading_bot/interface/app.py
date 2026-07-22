@@ -21,6 +21,7 @@ from trading_bot.interface.results import (
     discover_agent_runs,
     equity_curve,
     evidence_summary,
+    feature_ablation_results,
     heldout_results,
     promotion_assessment,
     trade_ledger,
@@ -122,7 +123,7 @@ with agent_tab:
                 "Newest run per ticker. Each row uses its own validation "
                 "tournament and separately selected held-out policy."
             )
-            arena_columns = st.columns(7)
+            arena_columns = st.columns(8)
             arena_columns[0].metric("Tickers evaluated", len(arena))
             arena_columns[1].metric(
                 "Agents activated",
@@ -137,13 +138,17 @@ with agent_tab:
                 int((arena["Selected encoder"] == "Surface Graph Set").sum()),
             )
             arena_columns[4].metric(
-                "Sandbox fills", int(arena["Sandbox executions"].sum())
+                "Smile-signal winners",
+                int((arena["Smile residual"] == "Enabled").sum()),
             )
             arena_columns[5].metric(
+                "Sandbox fills", int(arena["Sandbox executions"].sum())
+            )
+            arena_columns[6].metric(
                 "Median sandbox latency",
                 f"{float(arena['Sandbox latency (us)'].median()):.1f} us",
             )
-            arena_columns[6].metric(
+            arena_columns[7].metric(
                 "Promotion-ready paths",
                 int((arena["Promotion"] == "Promotion ready").sum()),
             )
@@ -165,6 +170,8 @@ with agent_tab:
                     + arena["Selected agent"]
                     + " / "
                     + arena["Action policy"]
+                    + " / "
+                    + arena["Smile residual"]
                 )
                 winner_counts = winner_labels.value_counts().rename("Selections")
                 st.bar_chart(winner_counts, height=260)
@@ -186,6 +193,43 @@ with agent_tab:
                     ),
                 },
             )
+            ablations = feature_ablation_results(runs)
+            if not ablations.empty:
+                st.subheader("Contract smile-residual experiment")
+                st.caption(
+                    "Matched validation comparison with only the causal "
+                    "contract-level smile residual removed. Positive feature "
+                    "lift means the signal helped; held-out data is excluded."
+                )
+                grouped = (
+                    ablations.groupby(["Encoder", "Agent"], as_index=False)
+                    .agg(
+                        **{
+                            "Mean feature lift (bp)": (
+                                "Feature lift (bp)",
+                                "mean",
+                            ),
+                            "Helped tickers": (
+                                "Feature helped",
+                                lambda values: int((values == "Yes").sum()),
+                            ),
+                            "Evaluated tickers": ("Ticker", "nunique"),
+                        }
+                    )
+                )
+                grouped["Candidate"] = (
+                    grouped["Encoder"] + " / " + grouped["Agent"]
+                )
+                ablation_chart, ablation_table = st.columns((2, 3))
+                with ablation_chart:
+                    st.bar_chart(
+                        grouped.set_index("Candidate")["Mean feature lift (bp)"],
+                        height=260,
+                    )
+                with ablation_table:
+                    st.dataframe(grouped, width="stretch", hide_index=True)
+                with st.expander("Per-ticker matched comparisons"):
+                    st.dataframe(ablations, width="stretch", hide_index=True)
             st.divider()
 
         st.subheader("Experiment drill-down")
@@ -284,7 +328,8 @@ with agent_tab:
             (
                 f"{heldout.iloc[0]['Agent']} · "
                 f"{heldout.iloc[0]['Encoder']} · "
-                f"{heldout.iloc[0]['Action policy']}"
+                f"{heldout.iloc[0]['Action policy']} · "
+                f"smile residual {heldout.iloc[0]['Smile residual'].lower()}"
             )
             if not heldout.empty
             else "Unavailable"
@@ -324,8 +369,9 @@ with agent_tab:
         st.caption(
             "Models are ranked only on validation evidence. Surface Graph Set "
             "agents pass messages over neighboring strike/expiry contracts and "
-            "opposite-side counterparts. Held-out data is opened after a winner "
-            "is fixed."
+            "opposite-side counterparts. Matched feature ablations show whether "
+            "the contract-level smile residual helps. Held-out data is opened "
+            "after a winner is fixed."
         )
         st.dataframe(
             leaderboard,

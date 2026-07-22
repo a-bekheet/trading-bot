@@ -1297,7 +1297,7 @@ class TrainerTests(TestCase):
             },
         )
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v27")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v28")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
@@ -1313,7 +1313,7 @@ class TrainerTests(TestCase):
             sidecar["environment"]["reward_downside_penalty"],
             1.0,
         )
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v22")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v23")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],

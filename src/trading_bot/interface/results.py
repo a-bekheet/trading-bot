@@ -61,6 +61,10 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
                     "model_id": candidate.get("model_id", "unknown"),
                     "Agent": AGENT_LABELS.get(kind, kind.upper()),
                     "Architecture": _architecture_label(model),
+                    "Feature set": _feature_set_label(model),
+                    "Smile residual": _feature_status(
+                        model, "contract_smile_residual"
+                    ),
                     "Action policy": _decoder_label(model),
                     "Algorithm": str(model.get("algorithm", "unknown")).upper(),
                     "Validation score": _number(
@@ -94,6 +98,8 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
             "model_id",
             "Agent",
             "Architecture",
+            "Feature set",
+            "Smile residual",
             "Action policy",
             "Algorithm",
         ]
@@ -127,6 +133,8 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
         label = _agent_label(winner)
         model = winner.get("model", {})
         action_policy = _decoder_label(model)
+        feature_set = _feature_set_label(model)
+        smile_residual = _feature_status(model, "contract_smile_residual")
         selection_rule = fold.get("model_selection", {}).get(
             "simplicity_rule", {}
         )
@@ -153,6 +161,8 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
                     "Agent": label,
                     "Encoder": _humanize(str(model.get("encoder", "unknown"))),
                     "Architecture": _architecture_label(model),
+                    "Feature set": feature_set,
+                    "Smile residual": smile_residual,
                     "Action policy": action_policy,
                     "Selected latency (us)": selected_latency,
                     "Score traded (bp)": 10_000.0
@@ -211,6 +221,8 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
         agents = sorted(set(heldout["Agent"]))
         encoders = sorted(set(heldout["Encoder"]))
         architectures = sorted(set(heldout["Architecture"]))
+        feature_sets = sorted(set(heldout["Feature set"]))
+        smile_residuals = sorted(set(heldout["Smile residual"]))
         action_policies = sorted(set(heldout["Action policy"]))
         activations = sorted(set(heldout["Activation"]))
         sandbox_policies = sorted(set(heldout["Sandbox policy"]))
@@ -221,6 +233,8 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
                 "Selected agent": ", ".join(agents),
                 "Selected encoder": ", ".join(encoders),
                 "Architecture": ", ".join(architectures),
+                "Feature set": ", ".join(feature_sets),
+                "Smile residual": ", ".join(smile_residuals),
                 "Action policy": ", ".join(action_policies),
                 "Activation": ", ".join(activations),
                 "Sandbox policy": ", ".join(sandbox_policies),
@@ -264,6 +278,64 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
     if not records:
         return pd.DataFrame()
     return pd.DataFrame(records).sort_values("Ticker").reset_index(drop=True)
+
+
+def feature_ablation_results(
+    runs: Sequence[dict[str, Any]],
+    feature_group: str = "contract_smile_residual",
+) -> pd.DataFrame:
+    """Project newest per-ticker matched feature-ablation validation evidence."""
+    newest_by_symbol: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        symbol = str(run.get("symbol", "")).upper()
+        if symbol and symbol not in newest_by_symbol:
+            newest_by_symbol[symbol] = run
+    records = []
+    for symbol, run in newest_by_symbol.items():
+        for fold in run.get("folds", []):
+            for candidate in fold.get("model_selection", {}).get("candidates", []):
+                model = candidate.get("model", {})
+                disabled = tuple(model.get("disabled_feature_groups") or ())
+                if feature_group not in disabled:
+                    continue
+                ablation_lift = _number(
+                    candidate.get("validation_score_lift_vs_full")
+                )
+                if pd.isna(ablation_lift):
+                    continue
+                kind = str(model.get("kind", "unknown"))
+                feature_lift_bp = -10_000.0 * ablation_lift
+                records.append(
+                    {
+                        "Ticker": symbol,
+                        "Fold": int(fold.get("fold", 0)),
+                        "Encoder": _humanize(
+                            str(model.get("encoder", "unknown"))
+                        ),
+                        "Agent": AGENT_LABELS.get(kind, kind.upper()),
+                        "Feature": _humanize(feature_group),
+                        "Feature lift (bp)": feature_lift_bp,
+                        "Feature helped": "Yes" if feature_lift_bp > 0 else "No",
+                        "Ablated latency (us)": _number(
+                            candidate.get("inference_latency", {}).get(
+                                "median_microseconds"
+                            )
+                        ),
+                        "Ablated parameters": _number(
+                            candidate.get("parameter_count")
+                        ),
+                        "Training seeds": int(
+                            candidate.get("training_seed_aggregate", {}).get(
+                                "training_seed_count", 1
+                            )
+                        ),
+                    }
+                )
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records).sort_values(
+        ["Ticker", "Encoder", "Agent"]
+    ).reset_index(drop=True)
 
 
 def promotion_assessment(summary: dict[str, Any]) -> dict[str, Any]:
@@ -485,6 +557,18 @@ def _architecture_label(model: dict[str, Any]) -> str:
     encoder = _humanize(str(model.get("encoder", "unknown")))
     kind = _humanize(str(model.get("kind", "unknown")))
     return f"{encoder} / {kind}"
+
+
+def _feature_set_label(model: dict[str, Any]) -> str:
+    disabled = tuple(model.get("disabled_feature_groups") or ())
+    if not disabled:
+        return "Full"
+    return "Without " + ", ".join(_humanize(str(name)) for name in disabled)
+
+
+def _feature_status(model: dict[str, Any], group: str) -> str:
+    disabled = tuple(model.get("disabled_feature_groups") or ())
+    return "Ablated" if group in disabled else "Enabled"
 
 
 def _decoder_label(model: dict[str, Any]) -> str:
