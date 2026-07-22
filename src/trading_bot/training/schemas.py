@@ -8,8 +8,8 @@ from typing import Any
 import numpy as np
 
 
-SCHEMA_VERSION = "research-demo.v12"
-FEATURE_VECTOR_SCHEMA_VERSION = "dimensionless.v9"
+SCHEMA_VERSION = "research-demo.v13"
+FEATURE_VECTOR_SCHEMA_VERSION = "dimensionless.v10"
 
 
 @dataclass(frozen=True)

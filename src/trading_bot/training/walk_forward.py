@@ -48,7 +48,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v26"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v27"
 
 
 @dataclass(frozen=True)

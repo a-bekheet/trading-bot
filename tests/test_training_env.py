@@ -198,8 +198,14 @@ class OptionsEnvTests(TestCase):
         )
         first, first_info = env.reset(seed=7)
         second, second_info = env.reset(seed=7)
+        quantity_index = CONTRACT_FEATURES.index("positionQuantity")
+        average_index = CONTRACT_FEATURES.index("positionAveragePrice")
+        unrealized_index = CONTRACT_FEATURES.index("positionUnrealizedReturn")
 
         np.testing.assert_array_equal(first.contracts, second.contracts)
+        np.testing.assert_array_equal(first.contracts[:, quantity_index], 0)
+        np.testing.assert_array_equal(first.contracts[:, average_index], 0)
+        np.testing.assert_array_equal(first.contracts[:, unrealized_index], 0)
         self.assertEqual(first.timestamp, second.timestamp)
         self.assertEqual(first_info["manifest_fingerprint"], second_info["manifest_fingerprint"])
 
@@ -217,6 +223,12 @@ class OptionsEnvTests(TestCase):
         self.assertEqual(next_observation.portfolio.shape, (8,))
         self.assertAlmostEqual(next_observation.portfolio[3], 50.0)
         self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
+        self.assertEqual(next_observation.contracts[0, quantity_index], 1)
+        self.assertAlmostEqual(next_observation.contracts[0, average_index], 1.2)
+        self.assertAlmostEqual(
+            next_observation.contracts[0, unrealized_index],
+            1.5 / 1.2 - 1,
+        )
 
     def test_mask_rejects_aggregate_cash_violation(self):
         env = OptionsEnv(demo_dataset(), slot_count=2, starting_cash=130)

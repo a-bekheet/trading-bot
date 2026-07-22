@@ -15,6 +15,11 @@ FEATURE_ABLATION_GROUPS = {
     "slot_identity": (
         "slotContinuity",
     ),
+    "position_state": (
+        "positionQuantity",
+        "positionAveragePrice",
+        "positionUnrealizedReturn",
+    ),
     "time_context": (
         "snapshotGapSeconds",
         "snapshotGapCoverage",
@@ -90,6 +95,35 @@ _AUXILIARY_LEVEL_COVERAGE = {
     "atmTermStructureSlope": ("atmTermSlopeCoverage", 1.0),
 }
 
+_CONTRACT_FEATURE_INDEX = {
+    name: index for index, name in enumerate(CONTRACT_FEATURES)
+}
+_MARKET_FEATURE_INDEX = {
+    name: index for index, name in enumerate(MARKET_FEATURES)
+}
+_SPOT_SCALED_CONTRACT_INDICES = np.asarray([
+    _CONTRACT_FEATURE_INDEX[name]
+    for name in (
+        "strike",
+        "lastPrice",
+        "bid",
+        "ask",
+        "midPrice",
+        "spread",
+        "positionAveragePrice",
+    )
+])
+_SIGNED_SURFACE_MARKET_FEATURES = (
+    "front25DeltaRiskReversal",
+    "front25DeltaButterfly",
+    "atmTermStructureSlope",
+    "atmTermStructureCurvature",
+    "frontAtmIvChange",
+    "front25DeltaRiskReversalChange",
+    "front25DeltaButterflyChange",
+    "atmTermStructureSlopeChange",
+)
+
 
 def feature_ablation_indices(
     groups: tuple[str, ...],
@@ -111,7 +145,7 @@ def feature_ablation_indices(
             if name in MARKET_FEATURES:
                 indices.add(MARKET_FEATURES.index(name))
                 continue
-            contract_index = CONTRACT_FEATURES.index(name)
+            contract_index = _CONTRACT_FEATURE_INDEX[name]
             for slot in range(slot_count):
                 indices.add(
                     contract_start
@@ -133,9 +167,18 @@ def _dimensionless_components(
 
     spot = abs(float(market[0])) if len(market) else 0.0
     spot_scale = max(spot, 1e-8)
-    indices = {name: index for index, name in enumerate(CONTRACT_FEATURES)}
-    for name in ("strike", "lastPrice", "bid", "ask", "midPrice", "spread"):
-        contracts[:, indices[name]] /= spot_scale
+    indices = _CONTRACT_FEATURE_INDEX
+    contracts[:, _SPOT_SCALED_CONTRACT_INDICES] = (
+        contracts[:, _SPOT_SCALED_CONTRACT_INDICES] / spot_scale
+    )
+    quantity_index = indices["positionQuantity"]
+    quantity = contracts[:, quantity_index]
+    contracts[:, quantity_index] = np.sign(quantity) * np.log1p(abs(quantity))
+    unrealized_index = indices["positionUnrealizedReturn"]
+    unrealized = contracts[:, unrealized_index]
+    contracts[:, unrealized_index] = (
+        np.sign(unrealized) * np.log1p(abs(unrealized))
+    )
     # Gamma times a 10% spot move is the approximate corresponding Delta
     # change and remains comparable across differently priced underlyings.
     contracts[:, indices["gamma"]] *= spot_scale * 0.1
@@ -154,9 +197,7 @@ def _dimensionless_components(
         # dependent. Keep a unit reference for valid positive spot values.
         market[0] = 1.0 if market[0] > 0 else 0.0
     if len(market) == len(MARKET_FEATURES):
-        market_indices = {
-            name: index for index, name in enumerate(MARKET_FEATURES)
-        }
+        market_indices = _MARKET_FEATURE_INDEX
         return_index = market_indices["underlyingReturn"]
         market[return_index] = (
             np.sign(market[return_index])
@@ -176,16 +217,7 @@ def _dimensionless_components(
             )
         front_iv_index = market_indices["frontAtmIv"]
         market[front_iv_index] = np.log1p(max(market[front_iv_index], 0.0))
-        for name in (
-            "front25DeltaRiskReversal",
-            "front25DeltaButterfly",
-            "atmTermStructureSlope",
-            "atmTermStructureCurvature",
-            "frontAtmIvChange",
-            "front25DeltaRiskReversalChange",
-            "front25DeltaButterflyChange",
-            "atmTermStructureSlopeChange",
-        ):
+        for name in _SIGNED_SURFACE_MARKET_FEATURES:
             index = market_indices[name]
             value = market[index]
             market[index] = np.sign(value) * np.log1p(abs(value))
@@ -217,14 +249,16 @@ def _dimensionless_components(
             dtype=np.float64,
         )
 
-    market = np.nan_to_num(market, nan=0.0, posinf=10.0, neginf=-10.0)
-    contracts = np.nan_to_num(contracts, nan=0.0, posinf=10.0, neginf=-10.0)
-    portfolio = np.nan_to_num(portfolio, nan=0.0, posinf=10.0, neginf=-10.0)
-    return (
-        np.clip(market, -10.0, 10.0),
-        np.clip(contracts, -10.0, 10.0),
-        np.clip(portfolio, -10.0, 10.0),
-    )
+    for values in (market, contracts, portfolio):
+        np.nan_to_num(
+            values,
+            copy=False,
+            nan=0.0,
+            posinf=10.0,
+            neginf=-10.0,
+        )
+        np.clip(values, -10.0, 10.0, out=values)
+    return market, contracts, portfolio
 
 
 def observation_vector(observation: Observation) -> np.ndarray:

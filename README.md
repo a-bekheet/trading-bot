@@ -195,16 +195,24 @@ identity changes and churn. This prevents GRU/LSTM state from silently following
 a different option after a cross-sectional rank reversal. Use
 `--slot-assignment ranked` only as a declared legacy comparison; the
 `slot_identity` ablation masks the continuity input without changing assignment.
+Every visible contract row also carries the agent's held quantity, average
+entry price, and executable unrealized return. These are current portfolio
+state—not market-data columns—and are zero for an unheld contract. Without them,
+different holdings can collapse to the same aggregate-Greek observation and the
+value function cannot tell which slot may create future P&L. Use the
+`position_state` ablation to test their marginal value without changing fills or
+sell feasibility.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v9` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v10` transform. Prices, strikes, and average entry price are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 the underlying position is scaled by its NAV weight, portfolio values become
-ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields are
-log-compressed. Cumulative log returns use the same signed bounded transform as
-one-step return. The `time_context` and `price_trend` walk-forward ablations can
-mask the new market context without changing model shape.
+ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields and position
+quantity are log-compressed. Unrealized return uses a signed log transform.
+Cumulative log returns use the same signed bounded transform as one-step return.
+The `time_context`, `price_trend`, and `position_state` walk-forward ablations
+can mask their inputs without changing model shape.
 Raw volume and
 open interest are omitted because their causal log features contain the useful
 ordering at a much better numerical scale. The transform is fitted on no data,
@@ -291,7 +299,7 @@ smaller-parameter tie-break.
 
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v9` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v10` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters
@@ -449,7 +457,7 @@ shuffle contiguous truncated-backpropagation chunks instead of independently
 shuffling zero-padded windows; `--sequence-length` is the maximum gradient
 chunk length, not a claim that earlier state is erased. Deterministic inference
 feeds one observation at a time and caches the GRU/LSTM hidden state. On the
-current AAPL layout (899 inputs, 32 option slots, 33 action rows, and seven
+pre-position-state layout (899 inputs, 32 option slots, 33 action rows, and seven
 actions per row), a matched local 1,000-iteration CPU benchmark with hybrid
 width 128 and graph width 32 measured 187.50 microseconds median and 983,406
 parameters for `flat`, 360.67 microseconds and 1,159,650 parameters for
@@ -464,6 +472,18 @@ steady-state slot assignment measured
 1.57 ms median versus 4.95 ms for full reranking; across the 17-transition AAPL
 no-op episode, the median environment loop fell from 144.38 ms to 84.53 ms.
 Treat these as machine-specific engineering measurements, not trading results.
+
+The v0.37 position-aware layout has 29 contract fields and 999 flattened inputs
+at 32 slots. A width-128 hybrid `flat` model grows from 986,998 to 1,073,206
+parameters, while zero-neighbor `graph_set` grows by only 102 parameters—from
+215,923 to 216,025—because its pointwise contract encoder shares weights across
+slots. Precomputed feature-index maps and in-place finite/clipping transforms
+reduced policy-vector preprocessing from 47.36 to 41.72 microseconds mean in a
+local 5,000-call benchmark. Final 2,000-iteration streaming medians were 191.13
+microseconds for `flat` and 273.10 for zero-neighbor `graph_set`, effectively
+recovering the earlier measured end-to-end latency despite the added state.
+These are machine-specific latency results; the position features remain an
+ablation hypothesis, not evidence of alpha.
 
 The categorical policy head starts with a configurable `5.0` logit bias toward
 hold, while every feasible action remains sampleable and the bias remains fully
@@ -615,7 +635,7 @@ is no ceiling, so timing does not affect selection unless explicitly requested.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are
-`slot_identity`, `time_context`, `price_trend`, `surface_wings`,
+`slot_identity`, `position_state`, `time_context`, `price_trend`, `surface_wings`,
 `term_structure`, `surface_dynamics`, `volatility_regime`, `data_quality`, and
 `derived_contract_surface`. Masking happens inside the
 checkpointed model after

@@ -237,6 +237,7 @@ class FeatureSequenceTests(TestCase):
         term_indices = feature_ablation_indices(("term_structure",), 2)
         dynamics_indices = feature_ablation_indices(("surface_dynamics",), 2)
         identity_indices = feature_ablation_indices(("slot_identity",), 2)
+        position_indices = feature_ablation_indices(("position_state",), 2)
         time_indices = feature_ablation_indices(("time_context",), 2)
         trend_indices = feature_ablation_indices(("price_trend",), 2)
         volatility_indices = feature_ablation_indices(("volatility_regime",), 2)
@@ -246,6 +247,7 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(len(term_indices), 4)
         self.assertEqual(len(dynamics_indices), 7)
         self.assertEqual(len(identity_indices), 2)
+        self.assertEqual(len(position_indices), 6)
         self.assertEqual(len(time_indices), 2)
         self.assertEqual(len(trend_indices), 2)
         self.assertEqual(
@@ -257,6 +259,7 @@ class FeatureSequenceTests(TestCase):
         self.assertFalse(set(time_indices) & set(dynamics_indices))
         self.assertFalse(set(trend_indices) & set(time_indices))
         self.assertFalse(set(trend_indices) & set(term_indices))
+        self.assertFalse(set(position_indices) & set(identity_indices))
         for window in (4, 16):
             coverage_index = MARKET_FEATURES.index(f"realizedVol{window}Coverage")
             self.assertNotIn(coverage_index, trend_indices)
@@ -467,6 +470,9 @@ class FeatureSequenceTests(TestCase):
                 "volumeLog": 5,
                 "openInterestLog": 6,
                 "quoteAgeSeconds": 60,
+                "positionQuantity": 2,
+                "positionAveragePrice": 1.2 * scale,
+                "positionUnrealizedReturn": 0.25,
             }
             for name, value in values.items():
                 contracts[0, CONTRACT_FEATURES.index(name)] = value
@@ -500,7 +506,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v9")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v10")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

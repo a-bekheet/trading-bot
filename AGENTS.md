@@ -144,6 +144,12 @@ small and stable:
 - `Observation.portfolio` contains cash, invested cost, NAV, portfolio
   Delta/Gamma/Theta/Vega, and the underlying-share position. Total Delta must
   include the shares.
+- Every valid option row exposes current `positionQuantity`,
+  `positionAveragePrice`, and `positionUnrealizedReturn`. These are causal agent
+  state, not collector columns. Quantity and average price come from the
+  environment ledger; unrealized return uses the current executable sell price.
+  Unheld rows are zero. Route all three through the named `position_state`
+  ablation and never infer holdings only from aggregate Greeks or action masks.
 - `Observation.action_mask` has `K+1` rows: `K` option slots and one final
   underlying slot. Action `0` means hold; `1..Q` are buy buckets and
   `Q+1..2Q` are sell buckets. Legacy length-`K` arrays imply underlying hold.
@@ -200,10 +206,11 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v9`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v10`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
-is expressed in years, and heavy-tailed fields are compressed and clipped. Raw
+is expressed in years, held quantity and unrealized return are signed-log
+compressed, and heavy-tailed fields are compressed and clipped. Raw
 volume and open interest
 must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and

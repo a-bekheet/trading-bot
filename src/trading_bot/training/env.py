@@ -22,9 +22,15 @@ from trading_bot.training.schemas import Action, Observation
 CONTRACT_ENGINEERED_FEATURES = tuple(
     name for name in ENGINEERED_FEATURES if name not in MARKET_ENGINEERED_FEATURES
 )
+POSITION_CONTRACT_FEATURES = (
+    "positionQuantity",
+    "positionAveragePrice",
+    "positionUnrealizedReturn",
+)
 CONTRACT_FEATURES = (
     "strike", "lastPrice", "bid", "ask", "impliedVolatility", "delta", "gamma",
-    "theta", "vega", *CONTRACT_ENGINEERED_FEATURES, "slotContinuity",
+    "theta", "vega", *CONTRACT_ENGINEERED_FEATURES,
+    *POSITION_CONTRACT_FEATURES, "slotContinuity",
 )
 MARKET_FEATURES = ("underlyingPrice", "riskFreeRate", *MARKET_ENGINEERED_FEATURES)
 GREEK_NAMES = ("delta", "gamma", "theta", "vega")
@@ -543,11 +549,30 @@ class OptionsEnv:
                 continue
             ids[index] = str(contract["contractSymbol"])
             valid[index] = self._quote_valid(contract)
+            position = self._positions.get(ids[index])
+            average_price = position.average_price if position is not None else 0.0
             for feature_index, name in enumerate(CONTRACT_FEATURES):
                 if name == "slotContinuity":
                     contracts[index, feature_index] = float(
                         previous_ids is not None
                         and previous_ids[index] == ids[index]
+                    )
+                elif name == "positionQuantity":
+                    contracts[index, feature_index] = float(
+                        position.quantity if position is not None else 0
+                    )
+                elif name == "positionAveragePrice":
+                    contracts[index, feature_index] = float(average_price)
+                elif name == "positionUnrealizedReturn":
+                    liquidation_price = (
+                        self._execution_price(contract, "sell")
+                        if valid[index] and average_price > 0
+                        else 0.0
+                    )
+                    contracts[index, feature_index] = (
+                        liquidation_price / average_price - 1.0
+                        if average_price > 0 and liquidation_price > 0
+                        else 0.0
                     )
                 else:
                     contracts[index, feature_index] = float(
