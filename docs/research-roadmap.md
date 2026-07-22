@@ -35,6 +35,8 @@ Every candidate must eventually pass:
 
 | Evidence | Useful idea for this repository | Decision |
 | --- | --- | --- |
+| [Recurrent Experience Replay in Distributed Reinforcement Learning (ICLR 2019)](https://deepmind.google/research/publications/recurrent-experience-replay-in-distributed-reinforcement-learning/) | Recurrent training on partial sequences must address inaccurate boundary hidden states; a prefix can reconstruct state before loss-bearing transitions. | Random training windows now use a bounded causal no-op prefix, one batched no-gradient recurrent call, explicit metrics, and a validation-only disabled ablation. This is on-policy context reconstruction, not replay. |
+| [AlphaZeroBeta: Deep Reinforcement Learning for Market-Neutral Portfolios (2026)](https://arxiv.org/abs/2607.18001) | A current finance study combines recurrent PPO, transaction-cost-aware objectives, and rolling walk-forward evaluation, but its reported equity-index results do not establish option alpha here. | Keep recurrent PPO in the tournament, require cost stress and walk-forward evidence, and treat market-neutrality controls as a later declared objective rather than importing performance claims. |
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | The collateralized liability foundation now exists. Add CVaR or learned P&L-distribution objectives only after enough independent paths and lifecycle validation exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Causal realized-volatility horizons, walk-forward evaluation, and explicit per-contract position quantity/cost/P&L state implement this lesson. |
@@ -138,6 +140,14 @@ it does not estimate tail distributions, CVaR, or Expected Shortfall. Those
 claims remain deferred until substantially more independent paths are available.
 Zero coefficients preserve the original objective and leave inference inputs
 and latency unchanged.
+
+Seeded random training windows now reconstruct bounded recurrent context before
+the loss-bearing segment. The prefix uses causal training observations and hold
+actions, carries no gradient or reward, and is evaluated in one batched call.
+Both single-ticker and shared-universe tournaments can add a matched disabled
+candidate and report its validation score/reward lift. This reduces a known
+GRU/LSTM boundary artifact; only held-out ablation can determine whether it
+improves trading performance.
 
 The market state now includes front-expiry ATM IV and its difference from
 backward-only 4/16-snapshot realized volatility, each paired with the existing

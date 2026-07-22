@@ -51,7 +51,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v34"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v35"
 
 
 @dataclass(frozen=True)
@@ -149,6 +149,7 @@ class ModelSpec:
     auxiliary_coefficient: float | None = None
     auxiliary_horizons: tuple[int, ...] = (1,)
     time_aware_discounting: bool | None = None
+    burn_in_steps: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid", "mixture"}:
@@ -189,6 +190,14 @@ class ModelSpec:
         ):
             raise ValueError(
                 "model time_aware_discounting must be a boolean or None"
+            )
+        if self.burn_in_steps is not None and (
+            not isinstance(self.burn_in_steps, int)
+            or isinstance(self.burn_in_steps, bool)
+            or self.burn_in_steps < 0
+        ):
+            raise ValueError(
+                "model burn_in_steps must be a non-negative integer or None"
             )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
@@ -401,6 +410,11 @@ def run_walk_forward_training(
                     if candidate.time_aware_discounting is None
                     else candidate.time_aware_discounting
                 ),
+                burn_in_steps=(
+                    fold_training.burn_in_steps
+                    if candidate.burn_in_steps is None
+                    else candidate.burn_in_steps
+                ),
             )
             model, metrics = train_actor_critic(
                 train_env,
@@ -501,6 +515,10 @@ def run_walk_forward_training(
                     candidate,
                     time_aware_discounting=None,
                 ).identifier,
+                "burn_in_reference_model_id": replace(
+                    candidate,
+                    burn_in_steps=None,
+                ).identifier,
             })
 
         eligible_runs = [
@@ -523,6 +541,7 @@ def run_walk_forward_training(
                 run["parameter_count"],
                 run["active_input_count"],
                 run["optimizer_updates"],
+                int(run["model_spec"].burn_in_steps == 0),
                 int(run["model_spec"].time_aware_discounting is False),
                 run["model_id"],
             ),
@@ -541,6 +560,9 @@ def run_walk_forward_training(
                 "effective_time_aware_discounting": run[
                     "training_config"
                 ].time_aware_discounting,
+                "effective_burn_in_steps": run[
+                    "training_config"
+                ].burn_in_steps,
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": run["latency_eligible"],
@@ -571,6 +593,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_configured_horizons": None,
                 "validation_reward_lift_vs_time_aware_discounting": None,
                 "validation_score_lift_vs_time_aware_discounting": None,
+                "validation_reward_lift_vs_burn_in": None,
+                "validation_score_lift_vs_burn_in": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -653,6 +677,20 @@ def run_walk_forward_training(
                 ] = (
                     run["validation_total_reward"]
                     - validation_rewards[run["discount_reference_model_id"]]
+                )
+            burn_in_reference = validation_scores.get(
+                run["burn_in_reference_model_id"]
+            )
+            if (
+                run["model_spec"].burn_in_steps == 0
+                and burn_in_reference is not None
+            ):
+                result["validation_score_lift_vs_burn_in"] = (
+                    run["validation_selection_score"] - burn_in_reference
+                )
+                result["validation_reward_lift_vs_burn_in"] = (
+                    run["validation_total_reward"]
+                    - validation_rewards[run["burn_in_reference_model_id"]]
                 )
         model = winning_run["model"]
         metrics = winning_run["metrics"]
@@ -828,6 +866,7 @@ def run_walk_forward_training(
                     "parameter_count",
                     "active_input_count",
                     "optimizer_updates",
+                    "burn_in_ablation",
                     "fixed_step_discount_ablation",
                     "model_id",
                 ],
@@ -994,6 +1033,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--initial-hold-bias", type=float, default=5.0)
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
+    parser.add_argument("--burn-in-steps", type=int, default=8)
     parser.add_argument("--max-steps", type=int, default=128)
     parser.add_argument(
         "--random-start",
@@ -1072,6 +1112,11 @@ def _parser() -> argparse.ArgumentParser:
         "--fixed-step-discount-ablation",
         action="store_true",
         help="add matched candidates that ignore elapsed transition duration",
+    )
+    parser.add_argument(
+        "--burn-in-ablation",
+        action="store_true",
+        help="add matched candidates with recurrent burn-in disabled",
     )
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument(
@@ -1215,6 +1260,15 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             replace(spec, time_aware_discounting=False)
             for spec in full_specs
         )
+    if args.burn_in_ablation:
+        if args.burn_in_steps <= 0:
+            raise ValueError(
+                "--burn-in-ablation requires --burn-in-steps > 0"
+            )
+        specs.extend(
+            replace(spec, burn_in_steps=0)
+            for spec in full_specs
+        )
     return _normalize_model_specs(specs)
 
 
@@ -1230,6 +1284,7 @@ def main() -> None:
             TrainingConfig(
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
+                burn_in_steps=args.burn_in_steps,
                 gamma=args.gamma,
                 gae_lambda=args.gae_lambda,
                 time_aware_discounting=args.time_aware_discounting,

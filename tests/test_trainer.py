@@ -23,6 +23,7 @@ from trading_bot.training.sequence import AUXILIARY_TARGET_FEATURES, observation
 from trading_bot.training.trainer import (
     CHECKPOINT_SCHEMA_VERSION,
     TrainingConfig,
+    _burn_in_recurrent_context,
     _discounted_returns,
     _duration_adjusted_factors,
     _environment_kwargs_from_args,
@@ -96,6 +97,7 @@ class TrainerTests(TestCase):
         self.assertEqual(_symbols_from_args(single), ("MSFT",))
         self.assertEqual(single.slot_assignment, "stable")
         self.assertEqual(single.action_decoder, "factorized")
+        self.assertEqual(single.burn_in_steps, 8)
         self.assertFalse(single.allow_collateralized_option_shorts)
         self.assertEqual(
             _environment_kwargs_from_args(single)[
@@ -104,10 +106,12 @@ class TrainerTests(TestCase):
             0.0,
         )
         risk_args = _parser().parse_args([
+            "--burn-in-steps", "13",
             "--reward-drawdown-penalty", "2.5",
             "--reward-downside-penalty", "1.5",
         ])
         risk_environment = _environment_kwargs_from_args(risk_args)
+        self.assertEqual(risk_args.burn_in_steps, 13)
         self.assertEqual(risk_environment["reward_drawdown_penalty"], 2.5)
         self.assertEqual(risk_environment["reward_downside_penalty"], 1.5)
         self.assertTrue(
@@ -276,6 +280,13 @@ class TrainerTests(TestCase):
                 "mode": "stateful_tbptt",
                 "chunk_length": 2,
                 "padding": "right_only_ignored",
+                "burn_in": {
+                    "maximum_steps": 8,
+                    "mode": "causal_no_op_context",
+                    "gradient": "disabled",
+                    "reward": "excluded",
+                    "execution": "single_batched_recurrent_call",
+                },
                 "discounting": {
                     "mode": "elapsed_wall_clock",
                     "gamma_per_reference_interval": 0.99,
@@ -418,6 +429,7 @@ class TrainerTests(TestCase):
             sequence_length=2,
             max_steps=2,
             random_start=True,
+            burn_in_steps=3,
             ppo_epochs=1,
             evaluation_interval=5,
             seed=41,
@@ -440,6 +452,46 @@ class TrainerTests(TestCase):
             item["rollout_end_index"] - item["rollout_start_index"] == 2
             for item in metrics
         ))
+        self.assertEqual(
+            [item["burn_in_steps"] for item in metrics],
+            [min(3, start) for start in expected_starts],
+        )
+        self.assertEqual(
+            [item["burn_in_start_index"] for item in metrics],
+            [start - min(3, start) for start in expected_starts],
+        )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_burn_in_batches_causal_context_without_gradients_or_positions(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset(seed=5)
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=env.action_shape[1],
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+            kind="hybrid",
+        ))
+
+        warmed, hidden = _burn_in_recurrent_context(
+            env,
+            model,
+            observation,
+            1,
+            torch,
+        )
+
+        self.assertEqual(
+            warmed.timestamp,
+            three_snapshot_dataset().snapshots[1].timestamp,
+        )
+        self.assertIsNotNone(hidden)
+        self.assertEqual(float(warmed.portfolio[0]), env.starting_cash)
+        self.assertEqual(float(warmed.portfolio[1]), 0.0)
+        for state in hidden.values():
+            values = state if isinstance(state, tuple) else (state,)
+            self.assertTrue(all(value.grad_fn is None for value in values))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_rejects_model_environment_shape_mismatch(self):
@@ -541,6 +593,12 @@ class TrainerTests(TestCase):
             TrainingConfig(time_aware_discounting=1)
         with self.assertRaisesRegex(ValueError, "discount_reference_seconds"):
             TrainingConfig(discount_reference_seconds=0)
+        for invalid in (-1, 1.5, True):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "burn_in_steps",
+            ):
+                TrainingConfig(burn_in_steps=invalid)
         for invalid in (-0.1, 1.1, float("nan")):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(
                 ValueError,

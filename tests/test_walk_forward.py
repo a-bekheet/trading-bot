@@ -142,6 +142,7 @@ class WalkForwardTrainingTests(TestCase):
 
     def test_cli_maps_all_baseline_configuration(self):
         args = _parser().parse_args([
+            "--burn-in-steps", "12",
             "--short-volatility-window", "4",
             "--short-volatility-min-coverage", "0.6",
             "--short-volatility-min-edge", "0.03",
@@ -156,6 +157,7 @@ class WalkForwardTrainingTests(TestCase):
 
         config = _walk_forward_config_from_args(args)
 
+        self.assertEqual(args.burn_in_steps, 12)
         self.assertEqual(config.short_volatility_window, 4)
         self.assertEqual(config.short_volatility_min_coverage, 0.6)
         self.assertEqual(config.short_volatility_min_edge, 0.03)
@@ -193,6 +195,25 @@ class WalkForwardTrainingTests(TestCase):
             ]))
         with self.assertRaisesRegex(ValueError, "time_aware_discounting"):
             ModelSpec(time_aware_discounting=1)
+
+    def test_cli_builds_matched_recurrent_burn_in_ablation(self):
+        args = _parser().parse_args([
+            "--burn-in-steps", "12",
+            "--burn-in-ablation",
+        ])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(len(specs), 2)
+        self.assertIsNone(specs[0].burn_in_steps)
+        self.assertEqual(specs[1].burn_in_steps, 0)
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--burn-in-steps", "0",
+                "--burn-in-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "burn_in_steps"):
+            ModelSpec(burn_in_steps=True)
 
     def test_cli_builds_matched_auxiliary_loss_ablation(self):
         args = _parser().parse_args([
@@ -484,6 +505,10 @@ class WalkForwardTrainingTests(TestCase):
         self.assertTrue(
             all(result["resolved_model"] for result in candidate_results)
         )
+        self.assertTrue(all(
+            result["effective_burn_in_steps"] == 8
+            for result in candidate_results
+        ))
         self.assertTrue(
             all(
                 result["parameter_budget_headroom"] is None
@@ -496,6 +521,7 @@ class WalkForwardTrainingTests(TestCase):
                 "parameter_count",
                 "active_input_count",
                 "optimizer_updates",
+                "burn_in_ablation",
                 "fixed_step_discount_ablation",
                 "model_id",
             ],
@@ -693,6 +719,61 @@ class WalkForwardTrainingTests(TestCase):
         if (
             fixed["selection"]["validation_selection_score"]
             == time_aware["selection"]["validation_selection_score"]
+        ):
+            self.assertEqual(
+                summary["folds"][0]["model_selection"]["selected_model_id"],
+                candidates[0].identifier,
+            )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_burn_in_ablation_reports_validation_only_lift(self):
+        candidates = (
+            ModelSpec(kind="gru", encoder="flat", hidden_size=4),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                burn_in_steps=0,
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            summary = run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    min_train_size=3,
+                    validation_size=2,
+                    test_size=2,
+                    test_seeds=(59,),
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=2,
+                ),
+                candidates,
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    burn_in_steps=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                    evaluation_interval=1,
+                    seed=37,
+                ),
+                Path(directory),
+                env_kwargs={"slot_count": 1, "starting_cash": 1_000},
+            )
+
+        enabled, disabled = summary["folds"][0]["model_selection"][
+            "candidates"
+        ]
+        self.assertEqual(enabled["effective_burn_in_steps"], 2)
+        self.assertEqual(disabled["effective_burn_in_steps"], 0)
+        self.assertAlmostEqual(
+            disabled["validation_score_lift_vs_burn_in"],
+            disabled["selection"]["validation_selection_score"]
+            - enabled["selection"]["validation_selection_score"],
+        )
+        if (
+            disabled["selection"]["validation_selection_score"]
+            == enabled["selection"]["validation_selection_score"]
         ):
             self.assertEqual(
                 summary["folds"][0]["model_selection"]["selected_model_id"],

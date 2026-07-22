@@ -27,13 +27,14 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v31"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v32"
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     episodes: int = 25
     sequence_length: int = 8
+    burn_in_steps: int = 8
     learning_rate: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -65,6 +66,12 @@ class TrainingConfig:
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
             raise ValueError("episodes and sequence_length must be positive")
+        if (
+            not isinstance(self.burn_in_steps, int)
+            or isinstance(self.burn_in_steps, bool)
+            or self.burn_in_steps < 0
+        ):
+            raise ValueError("burn_in_steps must be a non-negative integer")
         if not 0 <= self.gamma <= 1 or not 0 <= self.gae_lambda <= 1:
             raise ValueError("gamma and gae_lambda must be between zero and one")
         if not isinstance(self.time_aware_discounting, bool):
@@ -497,6 +504,39 @@ def _sample_rollout_bounds(
     return start, rollout_steps
 
 
+def _burn_in_recurrent_context(
+    env: OptionsEnv,
+    model,
+    observation,
+    steps: int,
+    torch,
+):
+    """Warm recurrent state on causal no-op context without gradients.
+
+    No-op transitions preserve the random-window zero-position contract while
+    advancing market history and stable slot assignment. The complete prefix is
+    evaluated in one batched recurrent call to avoid per-step Python overhead.
+    """
+    if steps < 0:
+        raise ValueError("burn-in steps cannot be negative")
+    if steps == 0:
+        return observation, None
+
+    sequences = []
+    hold = np.zeros(env.action_shape[0], dtype=np.int64)
+    for _ in range(steps):
+        sequences.append(_one_step_tensor(observation, torch))
+        observation, _, terminated, truncated, info = env.step(hold)
+        if info["invalid_action_count"] or terminated or truncated:
+            raise RuntimeError("causal burn-in could not reach the rollout boundary")
+
+    device = next(model.parameters()).device
+    sequence = torch.cat(sequences, dim=1).to(device)
+    with torch.no_grad():
+        _, _, hidden_state = model.forward_sequence(sequence)
+    return observation, _detach_hidden(hidden_state)
+
+
 def train_actor_critic(
     env: OptionsEnv | Sequence[OptionsEnv],
     recurrent_config: RecurrentConfig,
@@ -634,9 +674,18 @@ def train_actor_critic(
             config.random_start,
             rollout_rng,
         )
+        burn_in_steps = min(config.burn_in_steps, rollout_start)
+        burn_in_start = rollout_start - burn_in_steps
         observation, _ = episode_env.reset(
             seed=config.seed + episode,
-            options={"start_index": rollout_start},
+            options={"start_index": burn_in_start},
+        )
+        observation, hidden_state = _burn_in_recurrent_context(
+            episode_env,
+            model,
+            observation,
+            burn_in_steps,
+            torch,
         )
         sequences = []
         action_masks = []
@@ -647,7 +696,6 @@ def train_actor_critic(
         old_values = []
         auxiliary_observations = [observation] if auxiliary_target_contract else []
         chunk_hidden_states = []
-        hidden_state = None
         invalid_actions = executions = steps = 0
         requested_option_orders = 0
         requested_underlying_orders = 0
@@ -1042,6 +1090,8 @@ def train_actor_critic(
                 "steps": steps,
                 "rollout_start_index": rollout_start,
                 "rollout_end_index": rollout_start + steps,
+                "burn_in_start_index": burn_in_start,
+                "burn_in_steps": burn_in_steps,
                 "total_reward": float(sum(rewards)),
                 "reward_components": reward_component_totals.copy(),
                 "transition_seconds_mean": float(np.mean(transition_seconds)),
@@ -1226,6 +1276,13 @@ def checkpoint_manifest(
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
             "padding": "right_only_ignored",
+            "burn_in": {
+                "maximum_steps": training_config.burn_in_steps,
+                "mode": "causal_no_op_context",
+                "gradient": "disabled",
+                "reward": "excluded",
+                "execution": "single_batched_recurrent_call",
+            },
             "discounting": {
                 "mode": (
                     "elapsed_wall_clock"
@@ -1380,6 +1437,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--episodes", type=int, default=25)
     parser.add_argument("--sequence-length", type=int, default=8)
+    parser.add_argument("--burn-in-steps", type=int, default=8)
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--graph-hidden-size", type=int, default=32)
     parser.add_argument("--graph-layers", type=int, default=2)
@@ -1558,6 +1616,7 @@ def main() -> None:
     training_config = TrainingConfig(
         episodes=args.episodes,
         sequence_length=args.sequence_length,
+        burn_in_steps=args.burn_in_steps,
         seed=args.seed,
         max_steps=args.max_steps,
         random_start=args.random_start,

@@ -54,7 +54,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v18"
+    "research-demo.universe-walk-forward.v19"
 )
 
 
@@ -409,6 +409,11 @@ def run_universe_walk_forward_training(
                     if candidate.time_aware_discounting is None
                     else candidate.time_aware_discounting
                 ),
+                burn_in_steps=(
+                    fold_training.burn_in_steps
+                    if candidate.burn_in_steps is None
+                    else candidate.burn_in_steps
+                ),
             )
             model, metrics = train_actor_critic(
                 train_envs,
@@ -486,6 +491,10 @@ def run_universe_walk_forward_training(
                     candidate,
                     time_aware_discounting=None,
                 ).identifier,
+                "burn_in_reference_model_id": replace(
+                    candidate,
+                    burn_in_steps=None,
+                ).identifier,
             })
         eligible_runs = [
             run for run in candidate_runs if run["latency_eligible"]
@@ -508,6 +517,7 @@ def run_universe_walk_forward_training(
                 run["parameter_count"],
                 run["active_input_count"],
                 run["optimizer_updates"],
+                int(run["model_spec"].burn_in_steps == 0),
                 int(run["model_spec"].time_aware_discounting is False),
                 run["model_id"],
             ),
@@ -541,6 +551,9 @@ def run_universe_walk_forward_training(
                 "effective_time_aware_discounting": run[
                     "training_config"
                 ].time_aware_discounting,
+                "effective_burn_in_steps": run[
+                    "training_config"
+                ].burn_in_steps,
                 "parameter_count": run["parameter_count"],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
@@ -573,6 +586,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_configured_horizons": None,
                 "validation_score_lift_vs_time_aware_discounting": None,
                 "validation_reward_lift_vs_time_aware_discounting": None,
+                "validation_score_lift_vs_burn_in": None,
+                "validation_reward_lift_vs_burn_in": None,
                 "selection": {
                     "scope": selected["evaluation_scope"],
                     "episode": selected["episode"],
@@ -655,12 +670,30 @@ def run_universe_walk_forward_training(
             ):
                 result[
                     "validation_score_lift_vs_time_aware_discounting"
-                ] = run["validation_selection_score"] - discount_reference
+                ] = (
+                    float(selected["evaluation_selection_score"])
+                    - discount_reference
+                )
                 result[
                     "validation_reward_lift_vs_time_aware_discounting"
                 ] = (
-                    run["validation_total_reward"]
+                    float(selected["evaluation_total_reward"])
                     - validation_rewards[run["discount_reference_model_id"]]
+                )
+            burn_in_reference = validation_scores.get(
+                run["burn_in_reference_model_id"]
+            )
+            if (
+                run["model_spec"].burn_in_steps == 0
+                and burn_in_reference is not None
+            ):
+                result["validation_score_lift_vs_burn_in"] = (
+                    float(selected["evaluation_selection_score"])
+                    - burn_in_reference
+                )
+                result["validation_reward_lift_vs_burn_in"] = (
+                    float(selected["evaluation_total_reward"])
+                    - validation_rewards[run["burn_in_reference_model_id"]]
                 )
             candidate_results.append(result)
 
@@ -762,6 +795,7 @@ def run_universe_walk_forward_training(
                     "parameter_count",
                     "active_input_count",
                     "optimizer_updates",
+                    "burn_in_ablation",
                     "fixed_step_discount_ablation",
                     "model_id",
                 ],
@@ -881,6 +915,7 @@ def main() -> None:
             TrainingConfig(
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
+                burn_in_steps=args.burn_in_steps,
                 gamma=args.gamma,
                 gae_lambda=args.gae_lambda,
                 time_aware_discounting=args.time_aware_discounting,

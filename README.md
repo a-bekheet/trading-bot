@@ -407,6 +407,25 @@ unchanged, and preserve the previous raw-return objective. Validation selection
 penalties below are a separate layer; enabling both is an explicit choice to
 optimize path risk during training and rank checkpoints by validation risk.
 
+v0.45 removes the cold recurrent boundary from sampled training windows. A
+window now starts up to eight snapshots earlier, advances the environment with
+hold actions, and warms the GRU/LSTM state on that causal prefix without
+gradients or reward credit. The optimized rollout still begins at the sampled
+index with zero positions; stable slot history and market memory no longer
+appear from an artificial zero state. The prefix is capped at the available
+history and never leaves the training partition. Configure it with
+`--burn-in-steps`; use `--burn-in-ablation` to add a matched zero-burn-in
+candidate whose validation-only lift is retained in single-ticker and universe
+artifacts. Ties prefer the recurrent-context candidate.
+
+Burn-in observations are evaluated in one recurrent batch and do not construct
+action masks because the discarded actor outputs cannot affect hidden state.
+On the included AAPL data, an eight-step width-128 flat GRU benchmark measured
+194.77 microseconds median for the batched prefix versus 530.21 microseconds for
+eight streaming calls (2.72x faster, one CPU thread, 1,000 paired iterations).
+This changes training only; deployment inference and the feature schema remain
+unchanged. The benchmark is machine-specific and is not evidence of alpha.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
 coverage bit; `dimensionless.v12` log-compresses the interval before it reaches
@@ -513,6 +532,9 @@ robustness controls, not evidence of alpha.
 Training episodes default to reproducible random windows of at most 128
 transitions inside the supplied training partition. This exposes PPO to more
 market regimes and bounds update cost without touching validation or test data.
+Each random window uses up to eight preceding causal hold observations to warm
+the recurrent state by default. Burn-in transitions update neither the optimizer
+trajectory nor its reward totals; actual prefix start/length are persisted.
 Use `--max-steps` to change the window or `--no-random-start --max-steps ...`
 for a fixed prefix; passing the Python API `max_steps=None` trains on the entire
 partition from its first snapshot. In a local 500-snapshot, flat-GRU synthetic

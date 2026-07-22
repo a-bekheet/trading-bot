@@ -328,6 +328,15 @@ Training rollouts default to seeded, uniformly sampled windows of at most 128
 transitions inside the training dataset. Persist each start/end index in episode
 metrics. Random starts may never cross the supplied partition, affect validation
 or test evaluation, or replace the deterministic full-partition selection run.
+Before a sampled nonzero start, warm recurrent state on at most the configured
+number of immediately preceding observations. Advance that prefix only with
+hold actions so the zero-position random-window contract remains coherent;
+exclude its rewards and gradients, batch its recurrent evaluation, and detach
+the resulting hidden state before the first optimized transition. Never cross
+the training boundary or use validation/test context. Persist requested and
+actual burn-in lengths and prefix start indices. Default to eight steps, allow
+zero explicitly, and expose a matched validation-only disabled ablation. On a
+validation tie, prefer the context-aware candidate over the disabled ablation.
 Selection patience counts evaluated checkpoints, not episodes, and may use only
 the configured in-sample or validation selection environment. Persist whether
 each run stopped early, its completed episode count, patience, and minimum

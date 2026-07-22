@@ -97,6 +97,18 @@ class UniverseWalkForwardTests(TestCase):
                 "gru",
                 "flat",
                 hidden_size=4,
+                burn_in_steps=0,
+            ),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
+                time_aware_discounting=False,
+            ),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
                 auxiliary_coefficient=0.0,
                 auxiliary_horizons=(1, 2),
             ),
@@ -220,6 +232,25 @@ class UniverseWalkForwardTests(TestCase):
         self.assertIsNotNone(
             horizon_ablation[
                 "validation_score_lift_vs_configured_horizons"
+            ]
+        )
+        burn_in_ablation = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["model"]["burn_in_steps"] == 0
+        )
+        self.assertEqual(burn_in_ablation["effective_burn_in_steps"], 0)
+        self.assertIsNotNone(
+            burn_in_ablation["validation_score_lift_vs_burn_in"]
+        )
+        discount_ablation = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["model"]["time_aware_discounting"] is False
+        )
+        self.assertIsNotNone(
+            discount_ablation[
+                "validation_score_lift_vs_time_aware_discounting"
             ]
         )
         self.assertEqual(len(manifest["training_environments"]), 2)
