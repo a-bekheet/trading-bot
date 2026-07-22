@@ -223,7 +223,7 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v13` transform. Prices, strikes, and average entry price are
+`dimensionless.v14` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
@@ -504,9 +504,36 @@ current 84-contract AAPL sample, median no-op transition time improved again
 from 1.63 ms to 1.41 ms. These are same-machine throughput measurements; policy
 inputs, actions, rewards, checkpoints, and evidence for alpha are unchanged.
 
+v0.50 adds four current-snapshot, bid/ask-aware static-arbitrage diagnostics to
+each contract node. Adjacent same-expiry calls and puts expose the larger of an
+executable monotonicity violation and a vertical-spread payoff-bound violation.
+Adjacent strike triples expose an executable convexity violation using the
+correct weights for uneven strike spacing. Both scores are divided by spot and
+paired with separate coverage bits; only positive, non-crossed bid/ask quotes
+participate, duplicate strikes use the deterministic first quote, and missing
+coverage stays distinct from an observed zero. The fractional uneven-strike
+butterfly is a surface-consistency diagnostic, not a claim that an integer-lot
+arbitrage can always be filled. Calendar constraints are intentionally deferred
+because these American equity options and the current data do not provide a
+clean European forward surface.
+
+The `static_arbitrage` ablation masks the two scores while retaining coverage.
+The resulting `dimensionless.v14` layout has 37 contract fields and 1,261
+flattened inputs at 32 slots. Across the current 12-snapshot AAPL sample, 50.35%
+of 2,028 contract rows had adjacent executable-quote coverage and none showed a
+positive vertical or butterfly violation. Feature engineering on one 84-row
+snapshot measured 24.54 ms median and 26.75 ms p95; 10,000 policy-vector calls
+measured 30.71 microseconds median. Width-128 GRU medians were 125.25
+microseconds for `flat`, 185.15 for zero-neighbor `graph_set`, and 389.08 for
+`attention_set`, with 566,594, 96,885, and 112,917 parameters respectively.
+A one-episode matched smoke tied both feature candidates at zero validation
+score and selected the masked candidate through the 1,197-versus-1,261 active
+input tie-break. These are integration, coverage, and machine-latency results;
+they do not establish mispricing or alpha.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v13` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v14` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters
@@ -903,9 +930,10 @@ is no ceiling, so timing does not affect selection unless explicitly requested.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are
-`slot_identity`, `position_state`, `time_context`, `price_trend`, `surface_wings`,
-`term_structure`, `surface_dynamics`, `volatility_regime`, `data_quality`, and
-`derived_contract_surface`. Masking happens inside the
+`slot_identity`, `position_state`, `contract_dynamics`, `static_arbitrage`,
+`time_context`, `price_trend`, `surface_wings`, `term_structure`,
+`surface_dynamics`, `volatility_regime`, `volatility_normalization`,
+`data_quality`, and `derived_contract_surface`. Masking happens inside the
 checkpointed model after
 the versioned transform, so training, restored inference, and all encoders use
 the same ablation. Artifacts report each ablated candidate's validation

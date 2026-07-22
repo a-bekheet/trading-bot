@@ -7,6 +7,7 @@ import pandas as pd
 
 from trading_bot.training.dataset import SnapshotDataset
 from trading_bot.training.features import (
+    CONTRACT_ARBITRAGE_FEATURES,
     CONTRACT_DYNAMICS_FEATURES,
     ENGINEERED_FEATURES,
     MARKET_ENGINEERED_FEATURES,
@@ -352,6 +353,10 @@ class FeatureSequenceTests(TestCase):
             ("volatility_normalization",),
             2,
         )
+        arbitrage_indices = feature_ablation_indices(
+            ("static_arbitrage",),
+            2,
+        )
 
         self.assertEqual(len(wing_indices), 3)
         self.assertEqual(len(quality_indices), 2)
@@ -366,6 +371,28 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(len(time_indices), 2)
         self.assertEqual(len(trend_indices), 2)
         self.assertEqual(len(normalization_indices), 2)
+        self.assertEqual(len(arbitrage_indices), 4)
+        self.assertEqual(set(arbitrage_indices), {
+            len(MARKET_FEATURES)
+            + slot * len(CONTRACT_FEATURES)
+            + CONTRACT_FEATURES.index(feature)
+            for slot in range(2)
+            for feature in (
+                "verticalArbitrageViolationPct",
+                "butterflyArbitrageViolationPct",
+            )
+        })
+        for feature in (
+            "verticalArbitrageCoverage",
+            "butterflyArbitrageCoverage",
+        ):
+            for slot in range(2):
+                self.assertNotIn(
+                    len(MARKET_FEATURES)
+                    + slot * len(CONTRACT_FEATURES)
+                    + CONTRACT_FEATURES.index(feature),
+                    arbitrage_indices,
+                )
         self.assertEqual(set(normalization_indices), {
             MARKET_FEATURES.index("frontAtmIvZScore16"),
             MARKET_FEATURES.index("volatilityRiskPremiumZScore16"),
@@ -499,6 +526,117 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(engineered.loc["C1", "ivChangeCoverage"], 1)
         np.testing.assert_allclose(
             engineered.loc[["C2", "C3"], CONTRACT_DYNAMICS_FEATURES],
+            0.0,
+        )
+
+    @staticmethod
+    def arbitrage_surface(
+        option_type: str,
+        quotes: tuple[tuple[float, float, float], ...],
+        *,
+        scale: float = 1.0,
+    ) -> pd.DataFrame:
+        return pd.DataFrame([
+            {
+                "collectedAt": "2026-07-21T14:00:00Z",
+                "contractSymbol": f"{option_type}-{strike:g}",
+                "expiration": "2026-08-21",
+                "optionType": option_type,
+                "strike": strike * scale,
+                "bid": bid * scale,
+                "ask": ask * scale,
+                "lastPrice": (bid + ask) * scale / 2,
+                "underlyingPrice": 100 * scale,
+                "impliedVolatility": 0.2,
+            }
+            for strike, bid, ask in quotes
+        ])
+
+    def test_call_vertical_and_butterfly_violations_use_executable_quotes(self):
+        engineered = engineer_snapshot(self.arbitrage_surface(
+            "call",
+            ((90, 10, 11), (100, 12, 13), (110, 1, 2)),
+        )).set_index("strike")
+
+        np.testing.assert_allclose(
+            engineered["verticalArbitrageViolationPct"],
+            (0.01, 0.01, 0.0),
+        )
+        np.testing.assert_allclose(
+            engineered["verticalArbitrageCoverage"],
+            1.0,
+        )
+        np.testing.assert_allclose(
+            engineered["butterflyArbitrageViolationPct"],
+            0.055,
+        )
+        np.testing.assert_allclose(
+            engineered["butterflyArbitrageCoverage"],
+            1.0,
+        )
+
+    def test_put_vertical_uses_the_put_monotonicity_direction(self):
+        engineered = engineer_snapshot(self.arbitrage_surface(
+            "put",
+            ((90, 12, 13), (100, 10, 11)),
+        ))
+
+        np.testing.assert_allclose(
+            engineered["verticalArbitrageViolationPct"],
+            0.01,
+        )
+        np.testing.assert_allclose(
+            engineered["verticalArbitrageCoverage"],
+            1.0,
+        )
+        np.testing.assert_allclose(
+            engineered[[
+                "butterflyArbitrageViolationPct",
+                "butterflyArbitrageCoverage",
+            ]],
+            0.0,
+        )
+
+    def test_vertical_detects_executable_payoff_width_violation(self):
+        engineered = engineer_snapshot(self.arbitrage_surface(
+            "call",
+            ((90, 25, 26), (100, 1, 2)),
+        ))
+
+        np.testing.assert_allclose(
+            engineered["verticalArbitrageViolationPct"],
+            0.13,
+        )
+
+    def test_butterfly_weights_support_uneven_strikes_and_price_scaling(self):
+        quotes = ((90, 8, 9), (100, 10, 11), (120, 1, 3))
+        first = engineer_snapshot(self.arbitrage_surface("call", quotes))
+        second = engineer_snapshot(self.arbitrage_surface(
+            "call",
+            quotes,
+            scale=2,
+        ))
+
+        expected = (10 - (2 / 3) * 9 - (1 / 3) * 3) / 100
+        np.testing.assert_allclose(
+            first["butterflyArbitrageViolationPct"],
+            expected,
+        )
+        np.testing.assert_allclose(
+            first[list(CONTRACT_ARBITRAGE_FEATURES)],
+            second[list(CONTRACT_ARBITRAGE_FEATURES)],
+        )
+
+    def test_arbitrage_coverage_requires_valid_same_expiry_quotes(self):
+        rows = self.arbitrage_surface(
+            "call",
+            ((90, 8, 9), (100, 0, 11), (110, 1, 2)),
+        )
+        rows.loc[2, "expiration"] = np.nan
+        engineered = engineer_snapshot(rows)
+
+        np.testing.assert_allclose(
+            engineered[list(CONTRACT_ARBITRAGE_FEATURES)],
             0.0,
         )
 
@@ -732,7 +870,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v13")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v14")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

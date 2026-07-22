@@ -57,14 +57,128 @@ CONTRACT_DYNAMICS_FEATURES = (
     "ivChange",
     "ivChangeCoverage",
 )
+CONTRACT_ARBITRAGE_FEATURES = (
+    "verticalArbitrageViolationPct",
+    "verticalArbitrageCoverage",
+    "butterflyArbitrageViolationPct",
+    "butterflyArbitrageCoverage",
+)
 ENGINEERED_FEATURES = (
     "midPrice", "spread", "spreadPct", "logMoneyness", "dteDays",
     "volumeLog", "openInterestLog", "quoteAgeSeconds",
     *CONTRACT_DYNAMICS_FEATURES,
+    *CONTRACT_ARBITRAGE_FEATURES,
     "forwardLogMoneyness", "extrinsicValuePct", "atmIv", "ivSkew",
     "atmTermSlope", "putCallIvSpread", "parityResidual",
     *MARKET_ENGINEERED_FEATURES,
 )
+
+
+def _executable_arbitrage_features(result: pd.DataFrame) -> None:
+    """Add current-snapshot bid/ask-aware strike-arbitrage diagnostics."""
+    values = {
+        name: np.zeros(len(result), dtype=np.float64)
+        for name in CONTRACT_ARBITRAGE_FEATURES
+    }
+    required = {
+        "expiration", "optionType", "strike", "underlyingPrice", "bid", "ask",
+    }
+    if not required.issubset(result.columns) or result.empty:
+        for name, feature_values in values.items():
+            result[name] = feature_values
+        return
+
+    surface = pd.DataFrame({
+        "position": np.arange(len(result)),
+        "expiration": result["expiration"].astype(str).to_numpy(),
+        "optionType": result["optionType"].astype(str).str.lower().to_numpy(),
+        "strike": pd.to_numeric(result["strike"], errors="coerce").to_numpy(),
+        "spot": pd.to_numeric(
+            result["underlyingPrice"],
+            errors="coerce",
+        ).to_numpy(),
+        "bid": pd.to_numeric(result["bid"], errors="coerce").to_numpy(),
+        "ask": pd.to_numeric(result["ask"], errors="coerce").to_numpy(),
+    })
+    surface = surface[
+        ~surface["expiration"].str.strip().str.lower().isin(
+            ("", "nan", "nat", "none")
+        )
+        & surface["optionType"].isin(("call", "put"))
+        & np.isfinite(surface["strike"])
+        & (surface["strike"] > 0)
+        & np.isfinite(surface["spot"])
+        & (surface["spot"] > 0)
+        & np.isfinite(surface["bid"])
+        & np.isfinite(surface["ask"])
+        & (surface["bid"] > 0)
+        & (surface["ask"] > 0)
+        & (surface["bid"] <= surface["ask"])
+    ].drop_duplicates(
+        ["expiration", "optionType", "strike"],
+        keep="first",
+    )
+
+    vertical = values["verticalArbitrageViolationPct"]
+    vertical_coverage = values["verticalArbitrageCoverage"]
+    butterfly = values["butterflyArbitrageViolationPct"]
+    butterfly_coverage = values["butterflyArbitrageCoverage"]
+    for (_, option_type), group in surface.groupby(
+        ["expiration", "optionType"],
+        sort=False,
+    ):
+        ordered = group.sort_values("strike", kind="mergesort")
+        positions = ordered["position"].to_numpy(dtype=np.int64)
+        strikes = ordered["strike"].to_numpy(dtype=np.float64)
+        bids = ordered["bid"].to_numpy(dtype=np.float64)
+        asks = ordered["ask"].to_numpy(dtype=np.float64)
+        spot_scale = max(
+            abs(float(np.median(ordered["spot"].to_numpy(dtype=np.float64)))),
+            1e-8,
+        )
+
+        if len(ordered) >= 2:
+            widths = strikes[1:] - strikes[:-1]
+            left_positions = positions[:-1]
+            right_positions = positions[1:]
+            vertical_coverage[left_positions] = 1.0
+            vertical_coverage[right_positions] = 1.0
+            if option_type == "call":
+                ordering_violation = bids[1:] - asks[:-1]
+                width_violation = bids[:-1] - asks[1:] - widths
+            else:
+                ordering_violation = bids[:-1] - asks[1:]
+                width_violation = bids[1:] - asks[:-1] - widths
+            violation = np.maximum.reduce((
+                ordering_violation,
+                width_violation,
+                np.zeros_like(widths),
+            )) / spot_scale
+            np.maximum.at(vertical, left_positions, violation)
+            np.maximum.at(vertical, right_positions, violation)
+
+        if len(ordered) >= 3:
+            full_widths = strikes[2:] - strikes[:-2]
+            left_weights = (strikes[2:] - strikes[1:-1]) / full_widths
+            right_weights = (strikes[1:-1] - strikes[:-2]) / full_widths
+            left_positions = positions[:-2]
+            middle_positions = positions[1:-1]
+            right_positions = positions[2:]
+            butterfly_coverage[left_positions] = 1.0
+            butterfly_coverage[middle_positions] = 1.0
+            butterfly_coverage[right_positions] = 1.0
+            violation = np.maximum(
+                bids[1:-1]
+                - left_weights * asks[:-2]
+                - right_weights * asks[2:],
+                0.0,
+            ) / spot_scale
+            np.maximum.at(butterfly, left_positions, violation)
+            np.maximum.at(butterfly, middle_positions, violation)
+            np.maximum.at(butterfly, right_positions, violation)
+
+    for name, feature_values in values.items():
+        result[name] = feature_values
 
 
 def _contract_dynamics_features(
@@ -694,6 +808,7 @@ def engineer_snapshot(
         current_spot = float(spot.iloc[0]) if np.isfinite(spot.iloc[0]) else previous_spot
         result["underlyingReturn"] = current_spot / previous_spot - 1 if previous_spot else 0.0
     _contract_dynamics_features(result, previous)
+    _executable_arbitrage_features(result)
     for name, value in snapshot_gap_features(result, previous).items():
         result[name] = value
     for name, value in realized_volatility_features(spot_history).items():

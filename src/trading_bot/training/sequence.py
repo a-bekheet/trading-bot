@@ -24,6 +24,10 @@ FEATURE_ABLATION_GROUPS = {
         "positionUnrealizedReturn",
     ),
     "contract_dynamics": CONTRACT_DYNAMICS_FEATURES,
+    "static_arbitrage": (
+        "verticalArbitrageViolationPct",
+        "butterflyArbitrageViolationPct",
+    ),
     "time_context": (
         "snapshotGapSeconds",
         "snapshotGapCoverage",

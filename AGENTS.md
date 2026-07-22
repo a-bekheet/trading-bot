@@ -231,7 +231,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v13`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v14`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in
@@ -242,6 +242,16 @@ must not be reintroduced beside their log features without ablation evidence.
 Any transform change requires a new feature-vector schema, scale-invariance and
 finite-value tests, and a checkpoint-schema bump; old weights must never be
 silently loaded against a changed feature layout.
+
+Static-arbitrage diagnostics must remain current-snapshot, bid/ask-aware data
+quality signals. Compare only positive, non-crossed quotes with the same
+expiration and option side; sort unique strikes deterministically and retain
+the first duplicate. Normalize violation magnitudes by spot, keep explicit
+coverage bits, and ablate scores without masking coverage. Do not label a
+positive score as free or fillable alpha: American exercise, dividends,
+fractional uneven-strike weights, stale quotes, and missing depth remain outside
+this diagnostic. Do not add calendar constraints until the data contract has a
+point-in-time forward/dividend surface suitable for them.
 Transform-only optimizations must preserve the exact versioned numerical
 contract, including NaN-to-zero and infinity clipping at plus/minus 10. Prefer
 batched column operations and direct float32 output assembly; do not restore
