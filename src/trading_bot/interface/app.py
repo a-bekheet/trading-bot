@@ -27,6 +27,7 @@ from trading_bot.interface.results import (
     evidence_summary,
     feature_ablation_results,
     heldout_results,
+    load_arena_watch_status,
     promotion_assessment,
     trade_ledger,
 )
@@ -102,12 +103,47 @@ agent_tab, market_tab, portfolio_tab, history_tab = st.tabs(
 
 with agent_tab:
     runs = discover_agent_runs(DATA_DIR)
+    watch_status = load_arena_watch_status(DATA_DIR)
     arena_manifests = discover_agent_arena_manifests(DATA_DIR)
     readiness = (
-        arena_readiness_overview(arena_manifests[0])
+        arena_readiness_overview({"preflight": watch_status.get("readiness", [])})
+        if watch_status
+        else arena_readiness_overview(arena_manifests[0])
         if arena_manifests
         else pd.DataFrame()
     )
+    if watch_status:
+        automation_columns = st.columns(4)
+        automation_state = str(watch_status.get("status", "unknown"))
+        automation_columns[0].metric(
+            "Training automation",
+            automation_state.replace("_", " ").title(),
+        )
+        automation_columns[1].metric(
+            "Ready tickers",
+            f"{int(watch_status.get('ready_count', 0))}/"
+            f"{int(watch_status.get('ticker_total', 0))}",
+        )
+        automation_columns[2].metric(
+            "Target session",
+            str(watch_status.get("target_session_date") or "Waiting"),
+        )
+        automation_columns[3].metric(
+            "Last trained session",
+            str(watch_status.get("last_completed_session_date") or "None"),
+        )
+        st.caption(
+            f"Watcher heartbeat: {watch_status.get('last_heartbeat_at', 'Unknown')} · "
+            f"{watch_status.get('message', 'No status message')}"
+        )
+        if automation_state == "error":
+            st.error("Automated arena training failed; inspect arena-watch.stderr.log.")
+        elif automation_state == "running":
+            st.info("The locked GRU/LSTM/mixture and surface-GNN arena is training.")
+        elif automation_state in {"complete", "up_to_date"}:
+            st.success(
+                "The recurrent and surface-GNN arena is current for this session."
+            )
     if not readiness.empty:
         ready_count = int((readiness["Ready"] == "Yes").sum())
         readiness_columns = st.columns(3)

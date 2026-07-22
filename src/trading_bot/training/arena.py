@@ -33,6 +33,46 @@ DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE = 1e-4
 DEFAULT_ARENA_LATEST_FOLD_ONLY = True
 DEFAULT_ARENA_REQUIRE_READY_TAIL = True
 DEFAULT_ARENA_OUTPUT_ROOT = Path("data/agent_runs/recurrent-arena")
+DEFAULT_ARENA_MIN_TRAIN_SIZE = 6
+DEFAULT_ARENA_VALIDATION_SIZE = 3
+DEFAULT_ARENA_TEST_SIZE = 4
+DEFAULT_ARENA_EMBARGO = 0
+DEFAULT_ARENA_STEP_SIZE = 100
+
+
+def arena_walk_forward_config(
+    *,
+    min_train_size: int = DEFAULT_ARENA_MIN_TRAIN_SIZE,
+    validation_size: int = DEFAULT_ARENA_VALIDATION_SIZE,
+    test_size: int = DEFAULT_ARENA_TEST_SIZE,
+    embargo: int = DEFAULT_ARENA_EMBARGO,
+    step_size: int = DEFAULT_ARENA_STEP_SIZE,
+    training_seed_offsets: tuple[int, ...] = DEFAULT_ARENA_TRAINING_SEED_OFFSETS,
+    selection_score_tolerance: float = DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE,
+    activation_min_score_advantage: float = (
+        DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE
+    ),
+    bootstrap_samples: int = 200,
+    bootstrap_min_observations: int = 2,
+    latency_warmup_iterations: int = 3,
+    latency_measured_iterations: int = 20,
+) -> WalkForwardConfig:
+    """Build the shared default/CLI/watch latest-fold arena contract."""
+    return WalkForwardConfig(
+        min_train_size=min_train_size,
+        validation_size=validation_size,
+        test_size=test_size,
+        embargo=embargo,
+        step_size=step_size,
+        latest_fold_only=DEFAULT_ARENA_LATEST_FOLD_ONLY,
+        training_seed_offsets=training_seed_offsets,
+        selection_score_tolerance=selection_score_tolerance,
+        activation_min_score_advantage=activation_min_score_advantage,
+        bootstrap_samples=bootstrap_samples,
+        bootstrap_min_observations=bootstrap_min_observations,
+        latency_warmup_iterations=latency_warmup_iterations,
+        latency_measured_iterations=latency_measured_iterations,
+    )
 
 
 def default_arena_output_dir(
@@ -343,11 +383,15 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         help="repeat to select tickers; defaults to five representative leaders",
     )
-    parser.add_argument("--min-train-size", type=int, default=6)
-    parser.add_argument("--validation-size", type=int, default=3)
-    parser.add_argument("--test-size", type=int, default=4)
-    parser.add_argument("--embargo", type=int, default=0)
-    parser.add_argument("--step-size", type=int, default=100)
+    parser.add_argument(
+        "--min-train-size", type=int, default=DEFAULT_ARENA_MIN_TRAIN_SIZE
+    )
+    parser.add_argument(
+        "--validation-size", type=int, default=DEFAULT_ARENA_VALIDATION_SIZE
+    )
+    parser.add_argument("--test-size", type=int, default=DEFAULT_ARENA_TEST_SIZE)
+    parser.add_argument("--embargo", type=int, default=DEFAULT_ARENA_EMBARGO)
+    parser.add_argument("--step-size", type=int, default=DEFAULT_ARENA_STEP_SIZE)
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--hidden-size", type=int, default=8)
     parser.add_argument("--sequence-length", type=int, default=2)
@@ -405,13 +449,12 @@ def main() -> None:
             data_dir=args.data_dir,
             output_dir=output_dir,
             symbols=tuple(args.symbol or DEFAULT_ARENA_SYMBOLS),
-            walk_forward_config=WalkForwardConfig(
+            walk_forward_config=arena_walk_forward_config(
                 min_train_size=args.min_train_size,
                 validation_size=args.validation_size,
                 test_size=args.test_size,
                 embargo=args.embargo,
                 step_size=args.step_size,
-                latest_fold_only=DEFAULT_ARENA_LATEST_FOLD_ONLY,
                 training_seed_offsets=tuple(
                     args.training_seed_offset or DEFAULT_ARENA_TRAINING_SEED_OFFSETS
                 ),

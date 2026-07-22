@@ -15,6 +15,7 @@ from trading_bot.training.arena import (
     DEFAULT_ARENA_TRAINING_SEED_OFFSETS,
     _parser,
     arena_tail_readiness,
+    arena_walk_forward_config,
     default_arena_output_dir,
     recurrent_arena_models,
     run_agent_arena,
@@ -59,6 +60,18 @@ class AgentArenaTests(TestCase):
         self.assertTrue(
             _parser().parse_args(["--allow-unready-tail"]).allow_unready_tail
         )
+
+    def test_shared_default_arena_config_matches_cli_contract(self):
+        config = arena_walk_forward_config()
+        args = _parser().parse_args([])
+
+        self.assertEqual(config.min_train_size, args.min_train_size)
+        self.assertEqual(config.validation_size, args.validation_size)
+        self.assertEqual(config.test_size, args.test_size)
+        self.assertEqual(config.embargo, args.embargo)
+        self.assertEqual(config.step_size, args.step_size)
+        self.assertTrue(config.latest_fold_only)
+        self.assertEqual(config.training_seed_offsets, (0, 1, 2))
 
     def test_tail_readiness_requires_regular_fresh_executable_partitions(self):
         config = WalkForwardConfig(3, 2, 2, latest_fold_only=True)

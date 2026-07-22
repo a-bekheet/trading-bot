@@ -16,6 +16,7 @@ from trading_bot.interface.results import (
     evidence_summary,
     feature_ablation_results,
     heldout_results,
+    load_arena_watch_status,
     promotion_assessment,
     trade_ledger,
 )
@@ -118,6 +119,23 @@ def result_summary():
 
 
 class InterfaceResultTests(TestCase):
+    def test_loads_valid_arena_watch_status_and_ignores_invalid_files(self):
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            path = data_dir / "_arena_watch_status.json"
+            self.assertIsNone(load_arena_watch_status(data_dir))
+            path.write_text("{", encoding="utf-8")
+            self.assertIsNone(load_arena_watch_status(data_dir))
+            path.write_text(json.dumps({"schema_version": "wrong"}), encoding="utf-8")
+            self.assertIsNone(load_arena_watch_status(data_dir))
+            expected = {
+                "schema_version": "research-demo.arena-watch.status.v1",
+                "status": "waiting",
+            }
+            path.write_text(json.dumps(expected), encoding="utf-8")
+
+            self.assertEqual(load_arena_watch_status(data_dir), expected)
+
     def test_projects_tangible_agent_roster_and_guarded_decision_tape(self):
         summary = result_summary()
         summary["_run_name"] = "latest-arena"

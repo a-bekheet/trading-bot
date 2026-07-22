@@ -16,6 +16,24 @@ AGENT_LABELS = {
     "mixture": "Gated Mixture Agent",
 }
 
+ARENA_WATCH_STATUS_FILENAME = "_arena_watch_status.json"
+
+
+def load_arena_watch_status(data_dir: Path) -> dict[str, Any] | None:
+    """Load the latest training-automation heartbeat without ML imports."""
+    path = data_dir / ARENA_WATCH_STATUS_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not str(
+        payload.get("schema_version", "")
+    ).startswith("research-demo.arena-watch.status."):
+        return None
+    return payload
+
 
 def discover_agent_runs(data_dir: Path) -> list[dict[str, Any]]:
     """Load valid walk-forward summaries, newest first."""

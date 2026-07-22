@@ -468,6 +468,17 @@ velocity pairs at zero on a PRE tail and selected a 105.4-microsecond flat GRU;
 the locked command then rejected all five tickers in 1.6 seconds. This verifies
 integration and gate preservation only, not the feature hypothesis.
 
+The v0.83 automation layer closes the gap between continuous collection and a
+tangible trained-agent result. A lightweight watcher applies the exact locked
+arena readiness contract every minute and launches the isolated 21-candidate,
+three-seed tournament only when all five tickers share a ready New York session
+tail. Completion is keyed by session, ordered ticker set, and run-contract
+version, so later collector cycles do not spend another 315 training replicas.
+An atomic heartbeat exposes waiting, running, error, complete, and up-to-date
+states in the Agent Lab while retaining the last successful artifact. This
+improves operational reproducibility and time-to-result; it does not weaken the
+regular/fresh/executable gate or constitute return evidence.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

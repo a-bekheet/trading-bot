@@ -37,6 +37,8 @@ does not place live trades.
   GRU/LSTM/gated-mixture comparison contract across independent tickers, writes
   one normal walk-forward summary per ticker, and records partial failures in a
   small arena index; it must not merge ticker timelines or peek across tests.
+  `arena_watch.py` owns readiness polling and once-per-session invocation;
+  `arena_service.py` is only the macOS LaunchAgent lifecycle wrapper.
 - `tests/`: offline tests; market-data calls must be mocked here.
 - `data/`: generated append-only CSVs, one per ticker; intentionally git-ignored.
 
@@ -405,6 +407,17 @@ bounds. Readiness-only failures are expected status, not a crashed job, and must
 remain visible in Streamlit while the most recent successful agents stay
 inspectable. `--allow-unready-tail` is an explicit plumbing override and must
 never support an economic or alpha claim.
+
+`arena-watch` must reuse `arena_walk_forward_config()` so readiness and the
+launched job cannot drift. It may launch the strict arena only when all watched
+tickers are ready and resolve to the same New York session date. Persist an
+atomic heartbeat before and after training, retain the latest successful
+artifact across waiting/errors, and key completion by session, ordered symbol
+set, and watcher run-contract version. Never pass `--allow-unready-tail`. Hold
+one advisory lock for the watcher lifetime so manual and LaunchAgent instances
+cannot train the same session concurrently. The service checks frequently but
+trains at most once per completed contract/session; Streamlit only reads its
+status file and must not initiate training.
 
 Validation selection does not automatically authorize sandbox execution. After
 the research winner is fixed, evaluate deterministic no-op on validation only
@@ -973,6 +986,8 @@ collect-options
 collector-status
 collector-status --json
 collector-service install
+arena-watch --once
+arena-service install
 streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
@@ -997,6 +1012,13 @@ the virtual-environment launcher path without resolving its interpreter
 symlink. The LaunchAgent restarts nonzero exits; the collector's advisory lock
 prevents duplicate writers. `collector-service uninstall` is intentionally an
 explicit operation.
+
+`arena-service install` similarly writes a user LaunchAgent with absolute
+repository, interpreter, data, and log paths. Its watcher performs cheap raw
+readiness checks, records `data/_arena_watch_status.json`, and launches the
+locked default arena only once per eligible New York session. Keep training in
+a subprocess so a failed or memory-heavy tournament cannot corrupt the watcher;
+`arena-service uninstall` is the explicit teardown.
 
 ## Verification expectations
 

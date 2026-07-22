@@ -122,6 +122,19 @@ underlying timestamp, and contain an executable option quote. An unready run
 writes a readiness manifest and exits successfully without training; use
 `--allow-unready-tail` only for an explicit plumbing experiment.
 
+On macOS, the readiness-aware training loop can run without an open terminal:
+
+```bash
+arena-service install
+```
+
+It checks the same strict five-ticker gate every 60 seconds, trains the full
+315-replica arena once for each New York market session whose tails become
+ready, and records its heartbeat in `data/_arena_watch_status.json`. It will not
+retrain on every collector cycle. The Agent Results tab displays whether it is
+waiting, running, complete, or already current. `arena-watch --once` performs a
+single check; `arena-service uninstall` stops and removes the LaunchAgent.
+
 For a one-ticker drill-down with explicit settings:
 
 ```bash

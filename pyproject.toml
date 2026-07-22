@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trading-bot"
-version = "0.82.0"
+version = "0.83.0"
 description = "A starting point for an options trading bot"
 requires-python = ">=3.11"
 dependencies = [
@@ -23,6 +23,8 @@ train-demo = "trading_bot.training.trainer:main"
 train-walk-forward = "trading_bot.training.walk_forward:main"
 train-universe-walk-forward = "trading_bot.training.universe_walk_forward:main"
 agent-arena = "trading_bot.training.arena:main"
+arena-watch = "trading_bot.training.arena_watch:main"
+arena-service = "trading_bot.training.arena_service:main"
 
 [project.optional-dependencies]
 ml = ["torch>=2.2"]
