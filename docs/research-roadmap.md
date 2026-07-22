@@ -470,10 +470,12 @@ integration and gate preservation only, not the feature hypothesis.
 
 The v0.83 automation layer closes the gap between continuous collection and a
 tangible trained-agent result. A lightweight watcher applies the exact locked
-arena readiness contract every minute and launches the isolated 21-candidate,
+arena readiness contract every minute and launches the isolated 24-candidate,
 three-seed tournament only when all five tickers share a ready New York session
-tail. Completion is keyed by session, ordered ticker set, and run-contract
-version, so later collector cycles do not spend another 315 training replicas.
+tail. Matched single-leg PPO and Monte-Carlo REINFORCE GRU/LSTM/mixture controls
+test algorithmic lift on validation without changing the deployment graph.
+Completion is keyed by session, ordered ticker set, and run-contract version,
+so later collector cycles do not spend another 360 training replicas.
 An atomic heartbeat exposes waiting, running, error, complete, and up-to-date
 states in the Agent Lab while retaining the last successful artifact. This
 improves operational reproducibility and time-to-result; it does not weaken the

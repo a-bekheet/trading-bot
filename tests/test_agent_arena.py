@@ -289,7 +289,18 @@ class AgentArenaTests(TestCase):
             },
             {(32, 2, 3)},
         )
-        self.assertEqual(len({model.identifier for model in models}), 21)
+        self.assertEqual(
+            [
+                (model.kind, model.algorithm, model.action_decoder)
+                for model in models[21:]
+            ],
+            [
+                ("gru", "reinforce", "single_leg"),
+                ("lstm", "reinforce", "single_leg"),
+                ("mixture", "reinforce", "single_leg"),
+            ],
+        )
+        self.assertEqual(len({model.identifier for model in models}), 24)
 
     def test_runs_unique_symbols_and_records_per_ticker_failures(self):
         summary = {

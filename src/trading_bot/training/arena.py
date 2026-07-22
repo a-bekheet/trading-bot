@@ -25,7 +25,7 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v10"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v11"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 DEFAULT_ARENA_TRAINING_SEED_OFFSETS = (0, 1, 2)
 DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE = 1e-4
@@ -335,11 +335,23 @@ def recurrent_arena_models(
 
     smile_residual_ablations = sparse_feature_ablations("contract_smile_residual")
     surface_velocity_ablations = sparse_feature_ablations("surface_velocity")
+    monte_carlo_controls = tuple(
+        ModelSpec(
+            kind=kind,
+            encoder="flat",
+            hidden_size=hidden_size,
+            initial_hold_bias=initial_hold_bias,
+            algorithm="reinforce",
+            action_decoder="single_leg",
+        )
+        for kind in ("gru", "lstm", "mixture")
+    )
     return (
         flat_controls
         + surface_gnn_agents
         + smile_residual_ablations
         + surface_velocity_ablations
+        + monte_carlo_controls
     )
 
 

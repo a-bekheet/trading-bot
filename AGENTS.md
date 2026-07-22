@@ -414,7 +414,11 @@ families, split sizes, training budget, costs, and risk rules identical across
 its tickers unless the changed contract is explicit in the artifact. Every flat
 GRU/LSTM/gated-mixture family receives both factorized multi-leg and exact
 single-leg candidates so action sparsity is validation-selected rather than
-silently fixed. The default arena also includes GRU/LSTM/gated-mixture
+silently fixed. The default arena also includes matched flat single-leg
+Monte-Carlo REINFORCE GRU/LSTM/gated-mixture controls beside their PPO
+counterparts; algorithm selection must remain validation-only and must not
+change the eventual actor graph or inference budget. The default arena also
+includes GRU/LSTM/gated-mixture
 `surface_graph_set` candidates with one same-side surface neighbor,
 opposite-side counterpart edges, and the exact single-leg decoder. Preserve the
 six flat candidates as measured controls; do not report a GNN validation win

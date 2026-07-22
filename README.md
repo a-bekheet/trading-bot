@@ -129,8 +129,9 @@ multi-leg and exact sparse single-leg policies. Three additional
 `surface_graph_set` agents pair the sparse decoder with local strike/expiry and
 opposite-side message passing. Six matched sparse agents remove only the causal
 contract-level smile residual across flat/surface-GNN and GRU/LSTM/mixture
-families. Six more remove only cadence-normalized surface velocity, for 21
-candidates per ticker. Repeat
+families. Six more remove only cadence-normalized surface velocity. Three
+matched flat single-leg Monte-Carlo REINFORCE challengers add GRU, LSTM, and
+gated-mixture algorithm controls, for 24 candidates per ticker. Repeat
 `--symbol` to choose another set. The command keeps identical budgets and split
 rules across tickers and uses the latest possible chronological fold, assigning
 all earlier eligible history to training. Each invocation gets a timestamped
