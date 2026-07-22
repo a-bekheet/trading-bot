@@ -619,6 +619,7 @@ class OptionsEnv:
                         })
 
         for slot, encoded in enumerate(orders[:self.slot_count]):
+            encoded = int(encoded)
             if encoded == 0:
                 continue
             if encoded < 0 or encoded > 2 * self.max_quantity:

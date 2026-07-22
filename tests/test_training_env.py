@@ -1,3 +1,4 @@
+import json
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -889,6 +890,7 @@ class OptionsEnvTests(TestCase):
 
         self.assertEqual(next_observation.timestamp, "2026-07-21T14:01:00+00:00")
         self.assertEqual(info["executions"][0]["price"], 1.2)
+        json.dumps(info["executions"], allow_nan=False)
         self.assertEqual(info["invalid_action_count"], 0)
         self.assertFalse(terminated)
         self.assertTrue(truncated)

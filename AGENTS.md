@@ -105,6 +105,8 @@ Create those packages only when implementing their first real behavior.
     diagnostics, not calibrated profit probabilities. Activation must clear
     the no-op margin for both the seed-robust group score and the exact deployed
     representative checkpoint.
+    Execution dictionaries must contain only JSON-native scalars; convert
+    encoded NumPy action quantities before fills reach the agent store.
 11. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
    `reset`/`step` API. It is `research_demo` only and must not be used as a
    historical-performance benchmark.

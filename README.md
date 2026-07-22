@@ -101,6 +101,10 @@ size or modification timestamp changes while inputs load. A later ticker can
 therefore no longer observe a newer collection cycle merely because earlier
 ticker models took longer to train.
 
+v0.89.1 makes option execution records JSON-safe at the environment boundary.
+Encoded NumPy action quantities are converted to Python integers before fills,
+so an activated paper agent can atomically persist its first sandbox order.
+
 ## Explore data
 
 ```bash
