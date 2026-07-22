@@ -269,11 +269,11 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["initial_hold_bias"], 5.0)
         self.assertEqual(sidecar["model"]["masked_input_indices"], [0])
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v10")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v11")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
-        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v8")
+        self.assertEqual(sidecar["feature_vector_schema"], "dimensionless.v9")
         self.assertEqual(sidecar["provenance"], {})
         self.assertEqual(
             checkpoint["manifest"]["environment_fingerprint"],

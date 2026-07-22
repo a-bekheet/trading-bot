@@ -10,6 +10,7 @@ from trading_bot.training.features import (
     ENGINEERED_FEATURES,
     MARKET_ENGINEERED_FEATURES,
     engineer_snapshot,
+    realized_volatility_features,
     snapshot_gap_features,
 )
 from trading_bot.training.env import CONTRACT_FEATURES, MARKET_FEATURES, OptionsEnv
@@ -184,6 +185,8 @@ class FeatureSequenceTests(TestCase):
         dynamics_indices = feature_ablation_indices(("surface_dynamics",), 2)
         identity_indices = feature_ablation_indices(("slot_identity",), 2)
         time_indices = feature_ablation_indices(("time_context",), 2)
+        trend_indices = feature_ablation_indices(("price_trend",), 2)
+        volatility_indices = feature_ablation_indices(("volatility_regime",), 2)
 
         self.assertEqual(len(wing_indices), 3)
         self.assertEqual(len(quality_indices), 2)
@@ -191,6 +194,7 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(len(dynamics_indices), 7)
         self.assertEqual(len(identity_indices), 2)
         self.assertEqual(len(time_indices), 2)
+        self.assertEqual(len(trend_indices), 2)
         self.assertEqual(
             len(contract_indices),
             2 * len(FEATURE_ABLATION_GROUPS["derived_contract_surface"]),
@@ -198,10 +202,22 @@ class FeatureSequenceTests(TestCase):
         self.assertFalse(set(wing_indices) & set(quality_indices))
         self.assertFalse(set(term_indices) & set(dynamics_indices))
         self.assertFalse(set(time_indices) & set(dynamics_indices))
+        self.assertFalse(set(trend_indices) & set(time_indices))
+        self.assertFalse(set(trend_indices) & set(term_indices))
+        for window in (4, 16):
+            coverage_index = MARKET_FEATURES.index(f"realizedVol{window}Coverage")
+            self.assertNotIn(coverage_index, trend_indices)
+            self.assertNotIn(coverage_index, volatility_indices)
         self.assertTrue(all(index < len(MARKET_FEATURES) for index in time_indices))
+        self.assertTrue(all(index < len(MARKET_FEATURES) for index in trend_indices))
         self.assertTrue(all(index < len(MARKET_FEATURES) for index in wing_indices))
         self.assertTrue(all(index >= len(MARKET_FEATURES) for index in contract_indices))
         self.assertTrue(all(index >= len(MARKET_FEATURES) for index in identity_indices))
+        seen: set[int] = set()
+        for group in FEATURE_ABLATION_GROUPS:
+            indices = set(feature_ablation_indices((group,), 2))
+            self.assertFalse(seen & indices, group)
+            seen.update(indices)
         with self.assertRaisesRegex(ValueError, "unknown"):
             feature_ablation_indices(("future_leak",), 2)
 
@@ -251,6 +267,28 @@ class FeatureSequenceTests(TestCase):
             snapshot_gap_features(pd.DataFrame({"other": [1]}), previous),
             {"snapshotGapSeconds": 0.0, "snapshotGapCoverage": 0.0},
         )
+
+    def test_price_history_trend_uses_only_valid_observed_intervals(self):
+        start = pd.Timestamp("2026-07-21T14:00:00Z")
+        history = tuple(zip(
+            (start + pd.Timedelta(minutes=15 * index) for index in range(5)),
+            (100.0, 101.0, np.nan, 102.0, 103.0),
+            strict=True,
+        ))
+
+        features = realized_volatility_features(history)
+
+        self.assertEqual(features["realizedVol4Coverage"], 0.5)
+        self.assertEqual(features["realizedVol16Coverage"], 0.125)
+        self.assertAlmostEqual(
+            features["underlyingLogReturn4"],
+            np.log(101 / 100) + np.log(103 / 102),
+        )
+        self.assertEqual(
+            features["underlyingLogReturn4"],
+            features["underlyingLogReturn16"],
+        )
+        self.assertGreater(features["realizedVol4"], 0)
 
     def test_sequence_windows_are_chronological_and_fixed_shape(self):
         observations = [
@@ -409,7 +447,7 @@ class FeatureSequenceTests(TestCase):
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v8")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v9")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)
@@ -421,6 +459,8 @@ class FeatureSequenceTests(TestCase):
         market[MARKET_FEATURES.index("snapshotGapSeconds")] = 900
         market[MARKET_FEATURES.index("snapshotGapCoverage")] = 1
         market[MARKET_FEATURES.index("realizedVol4")] = 0.2
+        market[MARKET_FEATURES.index("underlyingLogReturn4")] = 0.01
+        market[MARKET_FEATURES.index("underlyingLogReturn16")] = -0.02
         market[MARKET_FEATURES.index("frontAtmIv")] = 0.25
         market[MARKET_FEATURES.index("frontAtmIvCoverage")] = 1
         market[MARKET_FEATURES.index("front25DeltaRiskReversal")] = -0.04
@@ -455,6 +495,14 @@ class FeatureSequenceTests(TestCase):
         self.assertEqual(
             vector[MARKET_FEATURES.index("snapshotGapCoverage")],
             1,
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("underlyingLogReturn4")],
+            np.log1p(1.0),
+        )
+        self.assertAlmostEqual(
+            vector[MARKET_FEATURES.index("underlyingLogReturn16")],
+            -np.log1p(2.0),
         )
 
         self.assertAlmostEqual(
@@ -597,9 +645,18 @@ class FeatureSequenceTests(TestCase):
                     prefix.snapshots[index].frame.iloc[0][name],
                 )
         self.assertEqual(full.snapshots[0].frame.iloc[0]["realizedVol4Coverage"], 0)
+        self.assertEqual(full.snapshots[0].frame.iloc[0]["underlyingLogReturn4"], 0)
         self.assertEqual(full.snapshots[4].frame.iloc[0]["realizedVol4Coverage"], 1)
         self.assertEqual(full.snapshots[16].frame.iloc[0]["realizedVol16Coverage"], 1)
         self.assertGreater(full.snapshots[16].frame.iloc[0]["realizedVol16"], 0)
+        self.assertAlmostEqual(
+            full.snapshots[4].frame.iloc[0]["underlyingLogReturn4"],
+            4 * np.log(1.001),
+        )
+        self.assertAlmostEqual(
+            full.snapshots[16].frame.iloc[0]["underlyingLogReturn16"],
+            16 * np.log(1.001),
+        )
         fourth = full.snapshots[4].frame.iloc[0]
         self.assertAlmostEqual(
             fourth["atmIvMinusRealizedVol4"],
@@ -617,5 +674,7 @@ class FeatureSequenceTests(TestCase):
         self.assertIn("front25DeltaButterfly", MARKET_FEATURES)
         self.assertIn("snapshotGapSeconds", MARKET_FEATURES)
         self.assertIn("snapshotGapCoverage", MARKET_FEATURES)
+        self.assertIn("underlyingLogReturn4", MARKET_FEATURES)
+        self.assertIn("underlyingLogReturn16", MARKET_FEATURES)
         self.assertIn("executableQuoteCoverage", MARKET_FEATURES)
         self.assertTrue(np.isfinite(observation_vector(observation)).all())

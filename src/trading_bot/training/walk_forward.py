@@ -12,10 +12,12 @@ from typing import Any, Sequence
 
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
+    UnderlyingTrendConfig,
     buy_first_then_delta_hedge,
     first_feasible,
     long_volatility_delta_hedge,
     no_op,
+    underlying_trend,
 )
 from trading_bot.training.dataset import SnapshotDataset
 from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
@@ -46,7 +48,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v24"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v25"
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,10 @@ class WalkForwardConfig:
     long_volatility_min_coverage: float = 0.75
     long_volatility_min_edge: float = 0.02
     long_volatility_quantity: int = 1
+    trend_window: int = 16
+    trend_min_coverage: float = 0.75
+    trend_min_abs_log_return: float = 0.0
+    trend_quantity: int = 1
     latency_warmup_iterations: int = 10
     latency_measured_iterations: int = 100
     max_median_inference_latency_us: float | None = None
@@ -103,6 +109,12 @@ class WalkForwardConfig:
             min_coverage=self.long_volatility_min_coverage,
             min_volatility_edge=self.long_volatility_min_edge,
             quantity=self.long_volatility_quantity,
+        )
+        UnderlyingTrendConfig(
+            return_window=self.trend_window,
+            min_coverage=self.trend_min_coverage,
+            min_abs_log_return=self.trend_min_abs_log_return,
+            quantity=self.trend_quantity,
         )
 
 
@@ -315,6 +327,12 @@ def run_walk_forward_training(
         min_coverage=walk_forward_config.long_volatility_min_coverage,
         min_volatility_edge=walk_forward_config.long_volatility_min_edge,
         quantity=walk_forward_config.long_volatility_quantity,
+    )
+    trend_config = UnderlyingTrendConfig(
+        return_window=walk_forward_config.trend_window,
+        min_coverage=walk_forward_config.trend_min_coverage,
+        min_abs_log_return=walk_forward_config.trend_min_abs_log_return,
+        quantity=walk_forward_config.trend_quantity,
     )
     fold_results = []
     resolved_configs: dict[str, tuple[RecurrentConfig, int]] = {}
@@ -611,6 +629,14 @@ def run_walk_forward_training(
                 )
                 for seed in walk_forward_config.test_seeds
             ],
+            "underlying_trend": [
+                run_episode_trace(
+                    test_env,
+                    underlying_trend(trend_config),
+                    seed,
+                )
+                for seed in walk_forward_config.test_seeds
+            ],
         }
         baseline_reports = {
             name: [trace.report for trace in traces]
@@ -733,6 +759,7 @@ def run_walk_forward_training(
             },
             "baseline_configuration": {
                 "long_volatility_delta_hedge": asdict(long_volatility_config),
+                "underlying_trend": asdict(trend_config),
             },
             "statistical_comparisons": statistical_comparisons,
             "cost_stress": {
@@ -806,6 +833,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--long-volatility-min-edge", type=float, default=0.02)
     parser.add_argument("--long-volatility-quantity", type=int, default=1)
+    parser.add_argument("--trend-window", type=int, choices=(4, 16), default=16)
+    parser.add_argument("--trend-min-coverage", type=float, default=0.75)
+    parser.add_argument("--trend-min-abs-log-return", type=float, default=0.0)
+    parser.add_argument("--trend-quantity", type=int, default=1)
     parser.add_argument("--latency-warmup-iterations", type=int, default=10)
     parser.add_argument("--latency-measured-iterations", type=int, default=100)
     parser.add_argument("--max-median-inference-latency-us", type=float)
@@ -1010,6 +1041,10 @@ def main() -> None:
                 long_volatility_min_coverage=args.long_volatility_min_coverage,
                 long_volatility_min_edge=args.long_volatility_min_edge,
                 long_volatility_quantity=args.long_volatility_quantity,
+                trend_window=args.trend_window,
+                trend_min_coverage=args.trend_min_coverage,
+                trend_min_abs_log_return=args.trend_min_abs_log_return,
+                trend_quantity=args.trend_quantity,
                 latency_warmup_iterations=args.latency_warmup_iterations,
                 latency_measured_iterations=args.latency_measured_iterations,
                 max_median_inference_latency_us=(

@@ -18,8 +18,10 @@ MARKET_ENGINEERED_FEATURES = (
     "snapshotGapCoverage",
     "realizedVol4",
     "realizedVol4Coverage",
+    "underlyingLogReturn4",
     "realizedVol16",
     "realizedVol16Coverage",
+    "underlyingLogReturn16",
     "frontAtmIv",
     "frontAtmIvCoverage",
     "front25DeltaRiskReversal",
@@ -53,13 +55,17 @@ ENGINEERED_FEATURES = (
 def realized_volatility_features(
     spot_history: Sequence[tuple[pd.Timestamp, float]],
 ) -> dict[str, float]:
-    """Annualized backward-only realized volatility and history coverage."""
+    """Backward-only return/volatility summaries and history coverage."""
     result = {
         f"realizedVol{window}": 0.0
         for window in REALIZED_VOL_WINDOWS
     }
     result.update({
         f"realizedVol{window}Coverage": 0.0
+        for window in REALIZED_VOL_WINDOWS
+    })
+    result.update({
+        f"underlyingLogReturn{window}": 0.0
         for window in REALIZED_VOL_WINDOWS
     })
     if len(spot_history) < 2:
@@ -86,6 +92,7 @@ def realized_volatility_features(
         if not count:
             continue
         returns = log_returns[-window:][window_valid]
+        result[f"underlyingLogReturn{window}"] = float(returns.sum())
         years = elapsed_seconds[-window:][window_valid].sum() / seconds_per_year
         if years > 0:
             result[f"realizedVol{window}"] = float(

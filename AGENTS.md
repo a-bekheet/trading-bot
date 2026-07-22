@@ -183,7 +183,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v8`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v9`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares are represented by NAV weight, DTE
 is expressed in years, and heavy-tailed fields are compressed and clipped. Raw
@@ -202,11 +202,17 @@ Keep these factors once in `MARKET_FEATURES`, not repeated per contract, and
 route `term_structure` and `surface_dynamics` through named walk-forward
 ablations before attributing lift.
 
-Underlying return and 4/16-snapshot realized-volatility estimates are market
-features, not contract features; never duplicate global state across every
-slot. Realized volatility uses only timestamped prices at or before the current
-snapshot, annualizes by actual elapsed time, and carries a coverage fraction so
-zero history cannot masquerade as zero volatility.
+Underlying return, 4/16-snapshot cumulative log returns, and 4/16-snapshot
+realized-volatility estimates are market features, not contract features;
+never duplicate global state across every slot. Both multi-snapshot summaries
+use only valid timestamped prices at or before the current snapshot and share
+the same explicit coverage. Realized volatility annualizes by actual elapsed
+time. Partial history must never masquerade as a complete trend or volatility
+estimate. Route only the cumulative-return values through the named
+`price_trend` ablation so their marginal value is separable from volatility and
+history availability. Keep the shared history-coverage scalars unmasked in both
+`price_trend` and `volatility_regime` comparisons; duplicating coverage inputs
+or hiding availability while leaving a dependent signal would be misleading.
 
 `snapshotGapSeconds` is the positive elapsed wall time from the immediately
 prior snapshot and is log-compressed at the policy boundary. Pair it with
@@ -336,6 +342,13 @@ negative-Delta legs, enter once, then hedge residual Delta on later snapshots.
 Persist its horizon, threshold, coverage, and quantity in each fold. Do not call
 it a straddle when the nearest feasible call and put have different strikes,
 and do not infer a short-volatility result from a long-only environment.
+
+The underlying-trend baseline is also causal: require configured price-history
+coverage, derive direction from the selected 4/16-snapshot cumulative log
+return, and rebalance toward a bounded share target through the environment's
+feasible underlying actions. Never buy again when already at target. Persist
+its window, threshold, coverage, and quantity in every fold and include it in
+the same timestamp-paired held-out comparisons as other baselines.
 
 Underlying fills use the captured spot with explicit synthetic slippage and
 per-share commission because the current CSV has no underlying bid/ask. Keep

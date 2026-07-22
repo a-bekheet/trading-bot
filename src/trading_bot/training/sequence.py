@@ -19,6 +19,10 @@ FEATURE_ABLATION_GROUPS = {
         "snapshotGapSeconds",
         "snapshotGapCoverage",
     ),
+    "price_trend": (
+        "underlyingLogReturn4",
+        "underlyingLogReturn16",
+    ),
     "surface_wings": (
         "front25DeltaRiskReversal",
         "front25DeltaButterfly",
@@ -41,9 +45,7 @@ FEATURE_ABLATION_GROUPS = {
     ),
     "volatility_regime": (
         "realizedVol4",
-        "realizedVol4Coverage",
         "realizedVol16",
-        "realizedVol16Coverage",
         "frontAtmIv",
         "frontAtmIvCoverage",
         "atmIvMinusRealizedVol4",
@@ -166,6 +168,11 @@ def _dimensionless_components(
             volatility_index = market_indices[f"realizedVol{window}"]
             market[volatility_index] = np.log1p(
                 max(market[volatility_index], 0.0)
+            )
+            trend_index = market_indices[f"underlyingLogReturn{window}"]
+            trend = market[trend_index]
+            market[trend_index] = (
+                np.sign(trend) * np.log1p(abs(trend) * 100.0)
             )
         front_iv_index = market_indices["frontAtmIv"]
         market[front_iv_index] = np.log1p(max(market[front_iv_index], 0.0))

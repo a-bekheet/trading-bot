@@ -184,3 +184,76 @@ def long_volatility_delta_hedge(
 ) -> LongVolatilityThenDeltaHedge:
     """Return fresh long-volatility benchmark state for one episode."""
     return LongVolatilityThenDeltaHedge(config)
+
+
+@dataclass(frozen=True)
+class UnderlyingTrendConfig:
+    """Causal target-position rule for the underlying trend benchmark."""
+
+    return_window: int = 16
+    min_coverage: float = 0.75
+    min_abs_log_return: float = 0.0
+    quantity: int = 1
+
+    def __post_init__(self) -> None:
+        if self.return_window not in {4, 16}:
+            raise ValueError("return_window must be 4 or 16")
+        if not 0 <= self.min_coverage <= 1:
+            raise ValueError("min_coverage must be between zero and one")
+        if (
+            not np.isfinite(self.min_abs_log_return)
+            or self.min_abs_log_return < 0
+        ):
+            raise ValueError("min_abs_log_return must be finite and nonnegative")
+        if self.quantity < 1:
+            raise ValueError("quantity must be positive")
+
+
+class UnderlyingTrend:
+    """Rebalance shares toward a small position signed by causal price trend."""
+
+    def __init__(self, config: UnderlyingTrendConfig | None = None) -> None:
+        self.config = config or UnderlyingTrendConfig()
+
+    def __call__(self, observation: Observation) -> np.ndarray:
+        action = no_op(observation)
+        underlying_slot = len(observation.contract_ids)
+        quantities = np.asarray(observation.underlying_action_quantities, dtype=int)
+        maximum_quantity = (len(quantities) - 1) // 2
+        if (
+            observation.market.size != len(MARKET_FEATURES)
+            or observation.portfolio.size < 8
+            or underlying_slot >= observation.action_mask.shape[0]
+            or self.config.quantity > maximum_quantity
+        ):
+            return action
+        coverage = float(observation.market[MARKET_FEATURES.index(
+            f"realizedVol{self.config.return_window}Coverage"
+        )])
+        trend = float(observation.market[MARKET_FEATURES.index(
+            f"underlyingLogReturn{self.config.return_window}"
+        )])
+        if not np.isfinite((coverage, trend)).all() or coverage < self.config.min_coverage:
+            return action
+
+        magnitude = int(abs(quantities[self.config.quantity]))
+        threshold = self.config.min_abs_log_return
+        target = magnitude if trend > threshold else -magnitude if trend < -threshold else 0
+        current = float(observation.portfolio[7])
+        if not np.isfinite(current):
+            return action
+        feasible = np.flatnonzero(observation.action_mask[underlying_slot])
+        if not len(feasible):
+            return action
+        distances = np.abs(current + quantities[feasible] - target)
+        best = int(feasible[np.argmin(distances)])
+        if distances.min() + 1e-12 < abs(current - target):
+            action[underlying_slot] = best
+        return action
+
+
+def underlying_trend(
+    config: UnderlyingTrendConfig | None = None,
+) -> UnderlyingTrend:
+    """Return a deterministic causal underlying-trend comparator."""
+    return UnderlyingTrend(config)

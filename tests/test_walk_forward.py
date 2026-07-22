@@ -176,6 +176,7 @@ class WalkForwardTrainingTests(TestCase):
                 "first_feasible",
                 "buy_first_then_delta_hedge",
                 "long_volatility_delta_hedge",
+                "underlying_trend",
             },
         )
         self.assertEqual(set(fold["cost_stress"]), {"base", "double_costs"})
@@ -186,6 +187,7 @@ class WalkForwardTrainingTests(TestCase):
                 "first_feasible",
                 "buy_first_then_delta_hedge",
                 "long_volatility_delta_hedge",
+                "underlying_trend",
             },
         )
         self.assertEqual(
@@ -194,6 +196,15 @@ class WalkForwardTrainingTests(TestCase):
                 "realized_window": 16,
                 "min_coverage": 0.75,
                 "min_volatility_edge": 0.02,
+                "quantity": 1,
+            },
+        )
+        self.assertEqual(
+            fold["baseline_configuration"]["underlying_trend"],
+            {
+                "return_window": 16,
+                "min_coverage": 0.75,
+                "min_abs_log_return": 0.0,
                 "quantity": 1,
             },
         )

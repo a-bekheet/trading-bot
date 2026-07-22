@@ -14,10 +14,12 @@ import numpy as np
 from trading_bot.market_data.universe import TOP_50_TICKERS
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
+    UnderlyingTrendConfig,
     buy_first_then_delta_hedge,
     first_feasible,
     long_volatility_delta_hedge,
     no_op,
+    underlying_trend,
 )
 from trading_bot.training.dataset import SnapshotDataset
 from trading_bot.training.env import OptionsEnv
@@ -48,7 +50,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v8"
+    "research-demo.universe-walk-forward.v9"
 )
 
 
@@ -151,6 +153,7 @@ def _heldout_symbol_evidence(
     training_config: TrainingConfig,
     walk_forward_config: WalkForwardConfig,
     long_volatility_config: LongVolatilityConfig,
+    trend_config: UnderlyingTrendConfig,
     *,
     fold_index: int,
     symbol_index: int,
@@ -184,6 +187,14 @@ def _heldout_symbol_evidence(
             run_episode_trace(
                 environment,
                 long_volatility_delta_hedge(long_volatility_config),
+                seed,
+            )
+            for seed in walk_forward_config.test_seeds
+        ],
+        "underlying_trend": [
+            run_episode_trace(
+                environment,
+                underlying_trend(trend_config),
                 seed,
             )
             for seed in walk_forward_config.test_seeds
@@ -316,6 +327,12 @@ def run_universe_walk_forward_training(
         min_coverage=walk_forward_config.long_volatility_min_coverage,
         min_volatility_edge=walk_forward_config.long_volatility_min_edge,
         quantity=walk_forward_config.long_volatility_quantity,
+    )
+    trend_config = UnderlyingTrendConfig(
+        return_window=walk_forward_config.trend_window,
+        min_coverage=walk_forward_config.trend_min_coverage,
+        min_abs_log_return=walk_forward_config.trend_min_abs_log_return,
+        quantity=walk_forward_config.trend_quantity,
     )
     resolved_configs = {}
     fold_results = []
@@ -599,6 +616,7 @@ def run_universe_walk_forward_training(
                 selected_training,
                 walk_forward_config,
                 long_volatility_config,
+                trend_config,
                 fold_index=fold.fold,
                 symbol_index=index,
             )
@@ -698,6 +716,7 @@ def run_universe_walk_forward_training(
                 "long_volatility_delta_hedge": asdict(
                     long_volatility_config
                 ),
+                "underlying_trend": asdict(trend_config),
             },
         }
         checkpoint = output_dir / (

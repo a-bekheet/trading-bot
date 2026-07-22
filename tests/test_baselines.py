@@ -6,9 +6,11 @@ import pandas as pd
 
 from trading_bot.training.baselines import (
     LongVolatilityConfig,
+    UnderlyingTrendConfig,
     buy_first_then_delta_hedge,
     delta_neutral,
     long_volatility_delta_hedge,
+    underlying_trend,
 )
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
 from trading_bot.training.env import MARKET_FEATURES, OptionsEnv
@@ -152,3 +154,56 @@ class BaselineTests(TestCase):
             LongVolatilityConfig(min_coverage=1.1)
         with self.assertRaisesRegex(ValueError, "min_volatility_edge"):
             LongVolatilityConfig(min_volatility_edge=-0.01)
+
+    def test_underlying_trend_targets_direction_without_repeated_buying(self):
+        env = OptionsEnv(
+            self._long_volatility_dataset(),
+            slot_count=2,
+            max_quantity=2,
+            starting_cash=100_000,
+            underlying_lot_size=25,
+        )
+        observation, _ = env.reset()
+        policy = underlying_trend(UnderlyingTrendConfig(
+            return_window=16,
+            min_coverage=0.75,
+            min_abs_log_return=0.01,
+            quantity=1,
+        ))
+        covered = observation.market.copy()
+        covered[MARKET_FEATURES.index("realizedVol16Coverage")] = 1
+        positive = covered.copy()
+        positive[MARKET_FEATURES.index("underlyingLogReturn16")] = 0.02
+        negative = covered.copy()
+        negative[MARKET_FEATURES.index("underlyingLogReturn16")] = -0.02
+
+        np.testing.assert_array_equal(policy(observation), np.array([0, 0, 0]))
+        unavailable = underlying_trend(UnderlyingTrendConfig(quantity=3))
+        np.testing.assert_array_equal(
+            unavailable(replace(observation, market=positive)),
+            np.array([0, 0, 0]),
+        )
+        entry = policy(replace(observation, market=positive))
+        np.testing.assert_array_equal(entry, np.array([0, 0, 1]))
+        observation, _, _, _, _ = env.step(entry)
+        self.assertEqual(observation.portfolio[7], 25)
+        np.testing.assert_array_equal(
+            policy(replace(observation, market=positive)),
+            np.array([0, 0, 0]),
+        )
+        reversal = policy(replace(observation, market=negative))
+        np.testing.assert_array_equal(reversal, np.array([0, 0, 4]))
+        observation, _, _, truncated, info = env.step(reversal)
+        self.assertTrue(truncated)
+        self.assertEqual(observation.portfolio[7], -25)
+        self.assertEqual(info["executions"][0]["quantity"], 50)
+
+    def test_underlying_trend_configuration_is_validated(self):
+        with self.assertRaisesRegex(ValueError, "return_window"):
+            UnderlyingTrendConfig(return_window=8)
+        with self.assertRaisesRegex(ValueError, "min_coverage"):
+            UnderlyingTrendConfig(min_coverage=-0.1)
+        with self.assertRaisesRegex(ValueError, "min_abs_log_return"):
+            UnderlyingTrendConfig(min_abs_log_return=np.nan)
+        with self.assertRaisesRegex(ValueError, "quantity"):
+            UnderlyingTrendConfig(quantity=0)

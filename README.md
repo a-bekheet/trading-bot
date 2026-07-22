@@ -138,10 +138,15 @@ env = OptionsEnv.from_directory(
 Snapshot loading adds causal engineered features such as relative spread,
 forward log-moneyness, DTE, extrinsic value, quote age, liquidity logs, IV
 change/skew, ATM term slope, put-call IV spread, and put-call parity residual.
-Underlying return, elapsed seconds from the causal prior snapshot, and
-annualized realized volatility over 4- and 16-snapshot windows live once in the
-market vector rather than being repeated for every contract. Explicit gap
-coverage distinguishes a missing or invalid timestamp from a genuine interval.
+Underlying return, cumulative log return over 4- and 16-snapshot windows,
+elapsed seconds from the causal prior snapshot, and annualized realized
+volatility over the same windows live once in the market vector rather than
+being repeated for every contract. The trend and volatility summaries share
+the exact causal history-coverage masks, while explicit gap coverage
+distinguishes a missing or invalid timestamp from a genuine interval.
+Shared price-history coverage remains visible in both `price_trend` and
+`volatility_regime` ablations so a removed signal never removes the policy's
+knowledge that history is sparse.
 Front-expiry ATM IV and its difference from both realized-volatility
 horizons provide a compact volatility-risk-premium regime signal. The same
 snapshot-level vector carries executable front-expiry 25-delta risk reversal
@@ -170,12 +175,13 @@ a different option after a cross-sectional rank reversal. Use
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v8` transform. Prices and strikes are divided by spot, contract
+`dimensionless.v9` transform. Prices and strikes are divided by spot, contract
 Gamma represents a 10% spot move, Greek exposures are scaled by spot and NAV,
 the underlying position is scaled by its NAV weight, portfolio values become
 ratios, DTE is in years, and heavy-tailed age/liquidity/gap fields are
-log-compressed. The `time_context` walk-forward ablation can mask both gap
-fields without changing model shape.
+log-compressed. Cumulative log returns use the same signed bounded transform as
+one-step return. The `time_context` and `price_trend` walk-forward ablations can
+mask the new market context without changing model shape.
 Raw volume and
 open interest are omitted because their causal log features contain the useful
 ordering at a much better numerical scale. The transform is fitted on no data,
@@ -262,7 +268,7 @@ smaller-parameter tie-break.
 
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
-coverage bit; `dimensionless.v8` log-compresses the interval before it reaches
+coverage bit; `dimensionless.v9` log-compresses the interval before it reaches
 the recurrent layer. On the current 22-snapshot AAPL integration sample, 21
 intervals were covered, ranging from 53.37 to 967.26 seconds with a 963.26-second
 median. A hidden-size-128 flat hybrid grew from 983,406 to 985,202 parameters
@@ -272,6 +278,19 @@ run-to-run variation of the earlier layout. A one-episode matched
 `time_context` walk-forward smoke produced zero validation reward for both
 variants and selected the masked candidate through the active-input tie-break;
 that verifies the comparison path but provides no evidence of alpha.
+
+The 4/16-snapshot cumulative-return extension reuses the realized-volatility
+history pass and adds two market inputs, not contract-node fields. On the same
+AAPL sample, 18 snapshots had complete four-step history and six had complete
+sixteen-step history, but every retained quote was after the close and spot
+remained 327.74, so every cumulative return was zero. A hidden-size-128 flat
+hybrid added 1,796 parameters (985,202 to 986,998) and measured 188.33
+microseconds median and 203.17 microseconds p95 over 1,000 local streaming
+iterations. In the final one-episode smoke, full and `price_trend`-masked GRUs
+both scored zero on validation; the masked candidate won the active-input
+tie-break, and the trend comparator correctly made no held-out trades. This is
+negative integration evidence, not support for retaining the signal in a paper
+strategy.
 
 Train one ticker-invariant shared policy across the collected top-50 universe:
 
@@ -548,8 +567,9 @@ is no ceiling, so timing does not affect selection unless explicitly requested.
 
 Repeat `--ablation GROUP` to add one matched feature-removal candidate per
 architecture while retaining each full-feature candidate. Available groups are
-`slot_identity`, `surface_wings`, `term_structure`, `surface_dynamics`,
-`volatility_regime`, `data_quality`, and `derived_contract_surface`. Masking happens inside the
+`slot_identity`, `time_context`, `price_trend`, `surface_wings`,
+`term_structure`, `surface_dynamics`, `volatility_regime`, `data_quality`, and
+`derived_contract_surface`. Masking happens inside the
 checkpointed model after
 the versioned transform, so training, restored inference, and all encoders use
 the same ablation. Artifacts report each ablated candidate's validation
@@ -582,8 +602,15 @@ hedges residual Delta with shares. Its defaults are a 16-snapshot horizon, 75%
 coverage, a 0.02 volatility edge, and one contract per leg; tune them with the
 `--long-volatility-*` flags. The rule is long-only and holds the pair for the
 episode, so it is a benchmark rather than a complete volatility strategy. This
-improves the evaluation boundary; Yahoo snapshots and these baselines still do
-not establish alpha.
+is joined by a causal underlying-trend comparator that targets a small long,
+flat, or short share position from the covered 4/16-snapshot cumulative return.
+It rebalances toward the target rather than buying repeatedly, obeys the same
+action masks and synthetic underlying costs as the agent, and is configured by
+`--trend-window`, `--trend-min-coverage`,
+`--trend-min-abs-log-return`, and `--trend-quantity`. The current execution
+model does not include borrow, margin, funding, or dividends, so the short leg
+remains research-only. These comparators improve the evaluation boundary;
+Yahoo snapshots and the baselines still do not establish alpha.
 
 Held-out agent and baseline paths are also compared with a paired circular
 moving-block bootstrap over cumulative log-return difference. Pairing uses the

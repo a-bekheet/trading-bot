@@ -30,7 +30,7 @@ Every candidate must eventually pass:
 | [Deep Reinforcement Learning Algorithms for Option Hedging (2025)](https://arxiv.org/abs/2504.05521) | PPO is competitive, but Monte-Carlo policy gradients can be a strong hedge benchmark and sparse terminal rewards matter. | Keep PPO; add delta-hedge and Monte-Carlo policy-gradient comparisons before claiming algorithmic lift. |
 | [Risk-Sensitive Contract-unified RL for Option Hedging (2024)](https://arxiv.org/abs/2411.09659) | Learning tail risk of terminal hedging P&L can improve the objective beyond mean reward and allow a policy to span contract conditions. | Add CVaR or learned P&L-distribution objectives only after explicit short-option liability episodes and enough independent paths exist; the current tiny research demo cannot identify tail risk. |
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Add causal realized-volatility horizons and a formal walk-forward runner. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v8`, compact ATM-IV-minus-realized-volatility and term/dynamics state, stable contract identity, Greek budgets, and paired moving-block intervals implement the state/risk lesson. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, combine IV term structure/skew with realized volatility, enforce realistic limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v9`, compact ATM-IV-minus-realized-volatility and term/dynamics state, stable contract identity, Greek budgets, and paired moving-block intervals implement the state/risk lesson. |
 | [IV-surface feedback for deep option hedging (revised 2026)](https://arxiv.org/abs/2407.21138) | A compact surface factorization includes ATM level, maturity and moneyness slopes, smile attenuation, smirk, and their dynamics; bounded recurrent hybrids outperform standalone networks in its numerical study. | Executable 25-delta risk-reversal/butterfly, ATM term slope/curvature, and one-snapshot factor changes now have explicit coverage once per market snapshot; test them through named tournament ablations. |
 | [Shortfall-aware RL option hedging (2026)](https://arxiv.org/abs/2601.01709) | Better static IV fit need not produce better dynamic hedging; replication-error and shortfall objectives under costs are separate evidence. | Keep realized path diagnostics primary. Defer shortfall/CVaR training until explicit option-liability episodes and enough independent paths exist. |
 | [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Use a sparse trainable hold prior now. Benchmark an autoregressive multi-leg option policy later; never post-process sampled rows in a way that breaks PPO likelihoods. |
@@ -39,6 +39,8 @@ Every candidate must eventually pass:
 | [When does Self-Prediction help? Understanding Auxiliary Tasks in Reinforcement Learning (2024)](https://arxiv.org/abs/2406.17718) | Predictive auxiliary objectives can improve RL representations, but their value depends on observation structure and distractions rather than being universal. | A masked multi-horizon Smooth-L1 head now supervises the shared recurrent encoder only on training transitions. Keep it only through matched one-step and disabled validation ablations. |
 | [Data-Efficient RL with Self-Predictive Representations (2020)](https://arxiv.org/abs/2007.05929) | Predicting multiple future steps can improve representation learning under limited interaction, though its evidence comes from visual-control domains rather than markets. | Support predeclared cumulative snapshot horizons with endpoint masks and compare multi-horizon, one-step, and disabled heads using validation only. |
 | [Still Competitive: Revisiting Recurrent Models for Irregular Time Series Prediction (2025)](https://arxiv.org/abs/2510.16161) | Explicit time-triggered mechanisms can make simple recurrent models competitive on irregular series at low overhead. | Add causal prior-snapshot elapsed time plus coverage once in the market vector before considering a continuous-time recurrent cell; validate through the named `time_context` ablation. |
+| [Multi-Horizon Echo State Network Prediction of Intraday Stock Returns (2025)](https://arxiv.org/abs/2504.19623) | Compact recurrent models can predict intraday returns at multiple horizons without the cost of a large generic architecture. | Expose causal 4/16-snapshot cumulative log returns to the existing GRU/LSTM families before adding another recurrent family; require the named `price_trend` ablation. |
+| [A New Option Momentum: The Role of the Systematic Component (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4404190) | Transaction-cost-robust option momentum is concentrated in a systematic component, while past prices have limited influence relative to risk and quality characteristics. | Treat price trend as a small optional state contribution, keep surface risk/quality features, and remove trend unless it earns validation lift after costs. |
 
 This is not an exclusive reading list. Profiling, microstructure knowledge,
 negative experimental results, and newly published work should change the
@@ -117,6 +119,28 @@ history coverage. PPO training samples seeded bounded windows across the
 training partition instead of replaying only its first regime. Both choices
 improve sample efficiency; their value still requires walk-forward ablation.
 
+The same backward-only price history now supplies 4/16-snapshot cumulative log
+returns. They reuse the volatility windows and coverage masks, add no per-node
+state, and are signed-log transformed at the policy boundary. The
+`price_trend` candidate masks just these two values, preserving history
+availability and volatility context so validation measures their marginal
+contribution. The volatility removal candidate likewise leaves the shared
+history-availability scalars intact rather than duplicating or hiding them.
+
+The current AAPL integration sample cannot test the trend hypothesis: all
+retained snapshots were after the close, spot remained 327.74, and both return
+horizons were zero. A tiny matched walk-forward smoke tied at zero validation
+reward, selected the `price_trend`-masked GRU by active-input count, and produced
+no trend-baseline trades. The implementation is ready for market-hours data,
+but this negative result provides no reason to promote the inputs.
+
+A deterministic underlying-trend comparator consumes the same covered return,
+targets a bounded long/flat/short share position, and rebalances only when the
+target changes. It uses the environment's action masks, slippage, commission,
+and position limits. This makes any learned directional benefit compete against
+a cheap implementable rule, although missing borrow, funding, and dividend
+accounting keep its short leg research-only.
+
 The recurrent state now also receives the positive elapsed time from the
 immediately prior snapshot plus explicit availability. This disambiguates
 irregular collection gaps with two market scalars and no continuous-time model
@@ -175,18 +199,22 @@ a simple underpriced-volatility rule rather than a complete volatility book.
 - Retain the implemented long-volatility IV-versus-realized rule; add a
   collateralized short-volatility/carry comparator only after margin, assignment,
   and option-liability accounting exist.
+- Retain the implemented underlying-trend comparator so a recurrent policy
+  cannot receive credit for reproducing a trivial covered-return rule.
 - Retain the implemented recurrent Monte-Carlo REINFORCE-with-value-baseline
   trainer as an algorithmic comparator to PPO.
 
 ### 3. Improve the state without inflating latency
 
-- Keep the 26-field contract state under `dimensionless.v8` as the minimum model;
+- Keep the 26-field contract state under `dimensionless.v9` as the minimum model;
   volatility-regime state belongs once in the market vector.
 - Retain prior-snapshot elapsed time only if its named `time_context` removal
   candidate does not win validation; do not silently reinterpret snapshot
   horizons as wall-clock horizons.
 - Extend the implemented realized-volatility state only through ablation-tested
   regime features.
+- Retain 4/16-snapshot cumulative return only if the `price_trend` removal
+  candidate fails to improve validation selection score after costs.
 - Retain the implemented ATM/wing, executable-quote, and Greek coverage instead
   of substituting plausible-looking market values.
 - Ablate the implemented executable ATM term slope/curvature and prior-snapshot
