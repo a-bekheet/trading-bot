@@ -13,7 +13,7 @@ except ImportError:
     torch = None
 
 from trading_bot.training.dataset import Snapshot, SnapshotDataset
-from trading_bot.training.env import OptionsEnv
+from trading_bot.training.env import CONTRACT_FEATURES, OptionsEnv
 from trading_bot.training.recurrent import build_recurrent_actor_critic
 from trading_bot.training.sequence import feature_ablation_indices
 from trading_bot.training.trainer import (
@@ -509,6 +509,8 @@ class WalkForwardTrainingTests(TestCase):
             "graph_set:mixture:ppo:0:single_leg",
             "--candidate",
             "attention_set:gru:ppo:factorized",
+            "--candidate",
+            "surface_graph_set:lstm:ppo:2:factorized",
             "--attention-heads",
             "2",
         ])
@@ -517,13 +519,36 @@ class WalkForwardTrainingTests(TestCase):
 
         self.assertEqual(
             [spec.action_decoder for spec in specs],
-            ["factorized", "single_leg", "factorized"],
+            ["factorized", "single_leg", "factorized", "factorized"],
         )
         self.assertEqual(specs[1].graph_neighbors, 0)
         self.assertEqual(specs[2].encoder, "attention_set")
         self.assertEqual(specs[2].attention_heads, 2)
         self.assertEqual(specs[2].graph_neighbors, 0)
+        self.assertEqual(specs[3].encoder, "surface_graph_set")
+        self.assertEqual(specs[3].graph_neighbors, 2)
         self.assertNotEqual(specs[0].identifier, specs[1].identifier)
+
+    def test_surface_graph_uses_coordinates_not_implied_volatility_for_topology(self):
+        env = OptionsEnv(walk_forward_dataset(), slot_count=1)
+
+        config = ModelSpec(
+            encoder="surface_graph_set",
+            graph_neighbors=1,
+        ).build(env)
+
+        self.assertEqual(config.graph_relation_indices, (
+            CONTRACT_FEATURES.index("forwardLogMoneyness"),
+            CONTRACT_FEATURES.index("dteDays"),
+        ))
+        self.assertEqual(
+            config.graph_option_side_index,
+            CONTRACT_FEATURES.index("delta"),
+        )
+        self.assertNotIn(
+            CONTRACT_FEATURES.index("impliedVolatility"),
+            config.graph_relation_indices,
+        )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_runner_selects_on_validation_then_reports_held_out_test(self):

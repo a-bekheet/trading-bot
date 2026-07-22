@@ -56,6 +56,7 @@ from trading_bot.training.trainer import (
     selection_score,
     train_actor_critic,
 )
+from trading_bot.training.walk_forward import ModelSpec
 from tests.test_training_env import demo_dataset, three_snapshot_dataset
 
 
@@ -289,6 +290,44 @@ class TrainerTests(TestCase):
         self.assertEqual(restored.config.graph_neighbors, 0)
         self.assertIsNotNone(restored.mixture_gate)
         self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
+        self.assertTrue(all(
+            torch.isfinite(parameter).all()
+            for parameter in restored.parameters()
+        ))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_surface_graph_lstm_trains_with_reinforce_and_round_trips(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        recurrent = ModelSpec(
+            kind="lstm",
+            encoder="surface_graph_set",
+            hidden_size=4,
+            graph_hidden_size=4,
+            graph_layers=1,
+            graph_neighbors=1,
+            algorithm="reinforce",
+        ).build(env)
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            algorithm="reinforce",
+            evaluation_interval=1,
+            seed=45,
+        )
+
+        model, metrics = train_actor_critic(env, recurrent, training)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "surface-graph-set.pt"
+            save_checkpoint(path, model, env, recurrent, training, metrics)
+            restored, _ = load_checkpoint(path)
+
+        self.assertEqual(restored.config.encoder, "surface_graph_set")
+        self.assertEqual(restored.config.kind, "lstm")
+        self.assertEqual(restored.config.graph_neighbors, 1)
+        self.assertTrue(any(
+            ".neighbor." in name
+            for name, _ in restored.named_parameters()
+        ))
         self.assertTrue(all(
             torch.isfinite(parameter).all()
             for parameter in restored.parameters()

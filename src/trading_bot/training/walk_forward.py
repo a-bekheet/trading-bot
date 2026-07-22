@@ -59,7 +59,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v51"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v52"
 
 
 @dataclass(frozen=True)
@@ -199,10 +199,11 @@ class ModelSpec:
                 "model kind must be gru, lstm, hybrid, or mixture"
             )
         if self.encoder not in {
-            "flat", "graph", "graph_set", "attention_set",
+            "flat", "graph", "graph_set", "surface_graph_set", "attention_set",
         }:
             raise ValueError(
-                "model encoder must be flat, graph, graph_set, or attention_set"
+                "model encoder must be flat, graph, graph_set, "
+                "surface_graph_set, or attention_set"
             )
         if min(
             self.hidden_size,
@@ -351,11 +352,20 @@ class ModelSpec:
             graph_relation_indices=tuple(
                 CONTRACT_FEATURES.index(name)
                 for name in (
-                    "impliedVolatility",
-                    "delta",
-                    "logMoneyness",
-                    "dteDays",
+                    ("forwardLogMoneyness", "dteDays")
+                    if self.encoder == "surface_graph_set"
+                    else (
+                        "impliedVolatility",
+                        "delta",
+                        "logMoneyness",
+                        "dteDays",
+                    )
                 )
+            ),
+            graph_option_side_index=(
+                CONTRACT_FEATURES.index("delta")
+                if self.encoder == "surface_graph_set"
+                else None
             ),
         )
 
@@ -1504,7 +1514,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--encoder",
-        choices=("flat", "graph", "graph_set", "attention_set"),
+        choices=(
+            "flat", "graph", "graph_set", "surface_graph_set", "attention_set",
+        ),
         default="flat",
     )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")

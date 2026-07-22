@@ -32,7 +32,7 @@ from trading_bot.training.sequence import (
 )
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v47"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v48"
 CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION = (
     "research-demo.critic-balance-diagnostic.v1"
 )
@@ -2571,7 +2571,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--encoder",
-        choices=("flat", "graph", "graph_set", "attention_set"),
+        choices=(
+            "flat", "graph", "graph_set", "surface_graph_set", "attention_set",
+        ),
         default="flat",
     )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
@@ -2801,7 +2803,18 @@ def main() -> None:
         action_decoder=args.action_decoder,
         graph_relation_indices=tuple(
             CONTRACT_FEATURES.index(name)
-            for name in ("impliedVolatility", "delta", "logMoneyness", "dteDays")
+            for name in (
+                ("forwardLogMoneyness", "dteDays")
+                if args.encoder == "surface_graph_set"
+                else (
+                    "impliedVolatility", "delta", "logMoneyness", "dteDays",
+                )
+            )
+        ),
+        graph_option_side_index=(
+            CONTRACT_FEATURES.index("delta")
+            if args.encoder == "surface_graph_set"
+            else None
         ),
         graph_hidden_size=args.graph_hidden_size,
         graph_layers=args.graph_layers,

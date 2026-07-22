@@ -32,6 +32,7 @@ class RecurrentConfig:
     graph_neighbors: int = 3
     attention_heads: int = 4
     graph_relation_indices: tuple[int, ...] = ()
+    graph_option_side_index: int | None = None
     initial_hold_bias: float = 5.0
     action_decoder: str = "factorized"
     masked_input_indices: tuple[int, ...] = ()
@@ -102,13 +103,23 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         raise ValueError(
             "kind must be 'gru', 'lstm', 'hybrid', or 'mixture'"
         )
-    graph_encoder = config.encoder in {"graph", "graph_set", "attention_set"}
-    set_encoder = config.encoder in {"graph_set", "attention_set"}
-    fixed_graph_encoder = config.encoder in {"graph", "graph_set"}
+    graph_encoder = config.encoder in {
+        "graph", "graph_set", "surface_graph_set", "attention_set",
+    }
+    set_encoder = config.encoder in {
+        "graph_set", "surface_graph_set", "attention_set",
+    }
+    fixed_graph_encoder = config.encoder in {
+        "graph", "graph_set", "surface_graph_set",
+    }
+    surface_graph_encoder = config.encoder == "surface_graph_set"
     single_leg = config.action_decoder == "single_leg"
-    if config.encoder not in {"flat", "graph", "graph_set", "attention_set"}:
+    if config.encoder not in {
+        "flat", "graph", "graph_set", "surface_graph_set", "attention_set",
+    }:
         raise ValueError(
-            "encoder must be 'flat', 'graph', 'graph_set', or 'attention_set'"
+            "encoder must be flat, graph, graph_set, surface_graph_set, "
+            "or attention_set"
         )
     if graph_encoder and config.contract_feature_count is None:
         raise ValueError("graph encoder requires contract_feature_count")
@@ -117,6 +128,14 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         for index in config.graph_relation_indices
     ):
         raise ValueError("graph_relation_indices are outside the contract feature layout")
+    if surface_graph_encoder and not config.graph_relation_indices:
+        raise ValueError("surface_graph_set requires graph relation coordinates")
+    if surface_graph_encoder and (
+        config.graph_option_side_index is None
+        or config.graph_option_side_index < 0
+        or config.graph_option_side_index >= config.contract_feature_count
+    ):
+        raise ValueError("surface_graph_set requires a valid option-side index")
     if (
         config.encoder == "attention_set"
         and config.graph_hidden_size % config.attention_heads
@@ -252,7 +271,10 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                                             bias=False,
                                         )
                                     }
-                                    if effective_graph_neighbors
+                                    if (
+                                        effective_graph_neighbors
+                                        or surface_graph_encoder
+                                    )
                                     else {}
                                 ),
                             }
@@ -368,7 +390,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                         hidden + transformed
                     )
                     hidden *= valid.unsqueeze(-1)
-            elif neighbor_count:
+            elif neighbor_count or surface_graph_encoder:
                 pair_valid = valid.unsqueeze(1) & valid.unsqueeze(2)
                 relation_indices = config.graph_relation_indices or tuple(
                     range(config.contract_feature_count)
@@ -388,25 +410,79 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 diagonal = torch.eye(
                     config.slot_count, dtype=torch.bool, device=hidden.device
                 ).unsqueeze(0)
-                distances = distances.masked_fill(~pair_valid | diagonal, float("inf"))
-                neighbors = distances.topk(neighbor_count, largest=False).indices
-                adjacency = torch.zeros(
-                    batch * steps,
-                    config.slot_count,
-                    config.slot_count,
-                    dtype=hidden.dtype,
-                    device=hidden.device,
-                )
-                adjacency.scatter_(-1, neighbors, 1.0)
-                adjacency *= pair_valid
-                adjacency = torch.maximum(adjacency, adjacency.transpose(1, 2))
-                adjacency += torch.diag_embed(valid.to(hidden.dtype))
+                local_pairs = pair_valid & ~diagonal
+                if surface_graph_encoder:
+                    assert config.graph_option_side_index is not None
+                    option_side = torch.signbit(
+                        contracts[:, :, config.graph_option_side_index]
+                    )
+                    same_side = option_side.unsqueeze(1).eq(
+                        option_side.unsqueeze(2)
+                    )
+                    local_pairs &= same_side
+                    counterpart_pairs = pair_valid & ~diagonal & ~same_side
+                    counterpart_distances = distances.masked_fill(
+                        ~counterpart_pairs,
+                        float("inf"),
+                    )
+                    counterpart_distance, counterpart = (
+                        counterpart_distances.min(dim=-1, keepdim=True)
+                    )
+                    counterpart_adjacency = torch.zeros(
+                        batch * steps,
+                        config.slot_count,
+                        config.slot_count,
+                        dtype=hidden.dtype,
+                        device=hidden.device,
+                    )
+                    counterpart_adjacency.scatter_(
+                        -1,
+                        counterpart,
+                        torch.isfinite(counterpart_distance).to(hidden.dtype),
+                    )
+                    counterpart_adjacency = torch.maximum(
+                        counterpart_adjacency,
+                        counterpart_adjacency.transpose(1, 2),
+                    )
+
+                adjacency = torch.diag_embed(valid.to(hidden.dtype))
+                if neighbor_count:
+                    local_distances = distances.masked_fill(
+                        ~local_pairs,
+                        float("inf"),
+                    )
+                    neighbor_distance, neighbors = local_distances.topk(
+                        neighbor_count,
+                        largest=False,
+                    )
+                    neighbor_adjacency = torch.zeros(
+                        batch * steps,
+                        config.slot_count,
+                        config.slot_count,
+                        dtype=hidden.dtype,
+                        device=hidden.device,
+                    )
+                    neighbor_adjacency.scatter_(
+                        -1,
+                        neighbors,
+                        torch.isfinite(neighbor_distance).to(hidden.dtype),
+                    )
+                    neighbor_adjacency = torch.maximum(
+                        neighbor_adjacency,
+                        neighbor_adjacency.transpose(1, 2),
+                    )
+                    adjacency = torch.maximum(adjacency, neighbor_adjacency)
+                if surface_graph_encoder:
+                    adjacency = torch.maximum(
+                        adjacency,
+                        counterpart_adjacency,
+                    )
                 degree = adjacency.sum(dim=-1, keepdim=True).clamp_min(1.0)
 
             if fixed_graph_encoder:
                 for layer in self.graph_message_layers:
                     transformed = layer["self"](hidden)
-                    if neighbor_count:
+                    if neighbor_count or surface_graph_encoder:
                         neighbor_mean = adjacency.bmm(hidden) / degree
                         transformed = transformed + layer["neighbor"](neighbor_mean)
                     hidden = torch.nn.functional.gelu(transformed)

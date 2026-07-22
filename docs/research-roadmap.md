@@ -36,7 +36,7 @@ Every candidate must eventually pass:
 | Evidence | Useful idea for this repository | Decision |
 | --- | --- | --- |
 | [Latency and the Look-Ahead Bias in Trade and Quote Data (2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5907665) and [Co-Movements of Index Options and Futures Quotes](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=690722) | Event reporting latency can reorder trade/quote observations and stale option quotes can distort price and hedge inputs. Neither paper validates Yahoo timestamps or a profitable age threshold. | Persist session-matched underlying price/time provenance. Expose causal quote age with coverage, independently mask explicitly stale new risk, and retain a configurable threshold plus `data_freshness` ablation. Treat missing legacy timestamps as unknown rather than fresh. |
-| [Operator Deep Smoothing for Implied Volatility (2024)](https://arxiv.org/abs/2406.11520) | A graph neural operator can map dynamically sampled intraday option observations to smooth no-arbitrage surfaces and remain robust to input subsampling. Reconstruction quality does not establish trading alpha. | Keep the current observed-contract GNN candidate and explicit coverage/arbitrage inputs. Consider a separately validated surface-reconstruction auxiliary task only after timestamp provenance and sufficient intraday history exist; never feed reconstructed quotes into execution. |
+| [Operator Deep Smoothing for Implied Volatility (ICLR 2025)](https://arxiv.org/abs/2406.11520) | A graph neural operator can map dynamically sampled intraday option observations to smooth no-arbitrage surfaces and remain robust to input subsampling. Reconstruction quality does not establish trading alpha. | The implemented `surface_graph_set` now tests a smaller observed-contract hypothesis: local forward-log-moneyness/DTE edges plus nearest opposite-side coordinate counterparts. It neither reconstructs quotes nor enforces parity. Defer a reconstruction auxiliary task until sufficient timestamped intraday history exists, and never feed reconstructed quotes into execution. |
 | [A Closer Look at Invalid Action Masking in Policy Gradient Algorithms (2020)](https://arxiv.org/abs/2006.14171), [Excluding the Irrelevant (2024)](https://arxiv.org/abs/2406.03704), and [Improving Stochastic Action-Constrained RL via Truncated Distributions (2025)](https://arxiv.org/abs/2511.22406) | Action constraints change the policy distribution whose log probability and entropy must be optimized; state-specific relevant sets can improve learning efficiency. None establishes option-trading alpha or the repository's normalization rule. | Keep exact masked categorical likelihoods. Normalize actor advantages and aggregate policy, entropy, KL, and clipping only where the decoder has multiple feasible choices. Retain every transition for recurrent context, returns, critic learning, and available auxiliary targets. Preserve raw explorable entropy and require a matched entropy ablation. |
 | [Dimension-Wise Importance Sampling Weight Clipping for Sample-Efficient Reinforcement Learning (ICML 2019)](https://proceedings.mlr.press/v97/han19b.html) | Per-dimension PPO clipping is a distinct high-dimensional control algorithm intended to trade variance against clipping bias; it is not the likelihood ratio of the complete sampled action. | Make the exact product-policy joint ratio the factorized PPO default and retain dimension-wise clipping only as a named validation ablation. Use the exact joint score function for REINFORCE and record the ratio count in every run. |
 | [SANOS: A Strictly Arbitrage-Free Neural Option Surface (2026)](https://arxiv.org/abs/2601.11209) | Bid/ask spreads belong directly in no-arbitrage constraints; midpoint-only checks can manufacture violations that cannot be traded. | Add causal bid/ask-aware adjacent-strike vertical and convexity diagnostics with explicit coverage. Treat them as state-quality signals and test their marginal value through `static_arbitrage`; do not automatically trade or reward them. |
@@ -275,7 +275,7 @@ still requires sufficient market paths and seed-robust validation.
 An optional exact single-leg decoder now replaces the 33 independent row
 categoricals with one masked categorical over hold or one row/action pair. It
 trains under both PPO and REINFORCE with GRU, LSTM, hybrid, mixture, flat,
-graph, graph-set, and attention-set encoders; set-policy option scores remain
+graph, graph-set, surface-graph-set, and attention-set encoders; set-policy option scores remain
 permutation equivariant. It
 reduces the default flat-hybrid head by 8,224 parameters but measured roughly
 11% slower in batch-one deterministic inference because the joint category must
@@ -293,6 +293,16 @@ tied the zero-neighbor and attention candidates at zero validation reward and
 selected the smaller Deep Sets model, while the 32-slot attention benchmark was
 materially slower. The implementation enables a controlled hypothesis test; it
 does not promote attention or establish surface-reconstruction quality.
+
+The optional `surface_graph_set` encoder adds an interpretable topology between
+the similarity graph and global attention. Same-side neighbors are selected only
+in standardized forward-log-moneyness/DTE coordinates, and each valid contract
+adds its nearest opposite-side coordinate counterpart. IV remains node content,
+the union uses one shared message operator, and all graph-set permutation,
+padding, recurrent, action-decoder, and empty-surface guarantees remain intact.
+At zero local neighbors the counterpart relation remains; zero-neighbor
+`graph_set` is the true Deep Sets control. This representation does not impose
+put-call parity or make a surface-reconstruction or alpha claim.
 
 The gated recurrent mixture keeps independent GRU and LSTM causal states but
 compresses their outputs through one state-dependent scalar convex gate before
@@ -475,7 +485,7 @@ retaining the reweighting. This is a regime-coverage hypothesis, not alpha.
 
 ### 4. Earn relational and surface complexity
 
-The dense GNN connects valid contracts by IV, delta, log-moneyness, and DTE
+The similarity GNN connects valid contracts by IV, delta, log-moneyness, and DTE
 before the GRU/LSTM temporal layer. Its role is cross-contract structure; the
 recurrent layer handles time. The implemented `graph_set` variant replaces the
 slot-dependent flattened policy with validity-masked mean/max pooling and a
@@ -492,6 +502,8 @@ should compare:
 - Flat GRU versus GNN-GRU at matched parameter and latency budgets.
 - Zero-neighbor Deep Sets versus neighbor-message graph sets in the same
   validation-only tournament.
+- Similarity `graph_set` versus `surface_graph_set` at matched width and
+  neighbors, with separate parameter and streaming-latency gates.
 - Fixed-neighbor `graph_set` versus the implemented masked `attention_set` under
   matched parameter and latency budgets.
 - Per-ticker training versus the shared graph-set policy with ticker/regime
@@ -499,7 +511,7 @@ should compare:
 - Raw normalized surface features versus causal PCA, then a compact VAE or
   neural-process surface latent only after the data volume supports it.
 
-The flat, flattened-graph, graph-set, attention-set, and recurrent-family tournament plumbing,
+The flat, flattened-graph, graph-set, surface-graph-set, attention-set, and recurrent-family tournament plumbing,
 exact parameter-cap matching, and a standardized streaming batch-one inference
 benchmark are implemented. Each fold reports median, p95, and mean latency with
 runtime context from a training observation. Timing is informational by default; a

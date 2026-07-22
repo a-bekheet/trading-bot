@@ -623,6 +623,30 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.65 adds `surface_graph_set`, an opt-in, permutation-equivariant graph policy
+whose topology follows the option surface rather than quote values. It builds
+same-side nearest-neighbor edges in standardized forward-log-moneyness and DTE,
+then links every valid contract to its nearest opposite-side coordinate
+counterpart. Implied volatility remains node content and cannot rewire the
+graph. One shared neighbor transform handles both edge classes, keeping the
+representation compact; this is a trading-policy representation hypothesis,
+not put-call-parity enforcement or evidence of alpha.
+
+The design is motivated by the irregular quote geometry and dynamic sampling
+studied in
+[Operator Deep Smoothing for Implied Volatility](https://arxiv.org/abs/2406.11520),
+but it consumes only observed contracts and never reconstructs executable
+quotes. The original IV/delta/moneyness/DTE similarity graph and zero-neighbor
+Deep Sets path remain explicit ablations. On the current 32-slot AAPL layout, a
+matched batch-one CPU benchmark measured 298.75 microseconds median for the
+structured graph versus 273.83 for the similarity graph and 179.13 for Deep
+Sets. Sharing one message operator cut the structured version by about 7.7% and
+2,336 parameters relative to a two-operator prototype. These are machine-specific
+engineering measurements; the structured encoder must win validation after costs
+and satisfy the existing latency gate. Checkpoint, single-ticker walk-forward,
+and universe walk-forward schemas advance to v48, v52, and v36; environment and
+feature schemas remain v24 and `dimensionless.v19`.
+
 v0.64 makes underlying price provenance and freshness causal. Yahoo's explicit
 `PRE`, `REGULAR`, and `POST` states now select the matching provider price/time
 pair instead of always attaching `regularMarketPrice` to every session. CSVs
@@ -1065,13 +1089,15 @@ an otherwise matched uniform-start candidate using validation only. This changes
 training exposure, not the policy architecture or inference latency.
 
 Add `--encoder graph` to run masked message passing over the option surface,
-`--encoder graph_set` to use a permutation-equivariant fixed-graph set policy,
-or `--encoder attention_set` to learn masked cross-contract relations before
-temporal encoding:
+`--encoder graph_set` to use a permutation-equivariant similarity-graph set
+policy, `--encoder surface_graph_set` to use causal surface-coordinate
+relations, or `--encoder attention_set` to learn masked cross-contract relations
+before temporal encoding:
 
 ```bash
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
+train-demo --symbol AAPL --encoder surface_graph_set --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder attention_set --attention-heads 4 --kind hybrid --episodes 25
 ```
 
@@ -1093,6 +1119,17 @@ shares policy parameters across slots and tickers. This dense implementation
 avoids a separate graph-framework dependency at the default 32 slots. Keep
 `flat` and flattened `graph` as measured baselines rather than assuming more
 relational structure is automatically better.
+
+`surface_graph_set` keeps the same masked pooling and shared scoring contract,
+but constructs local edges only between calls or only between puts using
+`forwardLogMoneyness` and `dteDays`. Each node also selects its closest valid
+opposite-side contract in those coordinates; the union is symmetrized and
+passed through one shared neighbor projection. Delta's sign identifies option
+side, including negative-zero puts, while IV is message content rather than an
+edge coordinate. With `--graph-neighbors 0`, this encoder retains counterpart
+edges; use zero-neighbor `graph_set` for the true no-adjacency Deep Sets
+baseline. The counterpart edge is structural context only because these equity
+options may be American-style and the environment does not impose exact parity.
 
 `attention_set` retains those set-policy symmetries but replaces hand-built
 nearest-neighbor edges with global learned multi-head attention among valid
@@ -1285,6 +1322,7 @@ train-walk-forward \
   --candidate graph:hybrid:ppo \
   --candidate graph_set:hybrid:ppo \
   --candidate graph_set:hybrid:ppo:0 \
+  --candidate surface_graph_set:hybrid:ppo:3 \
   --candidate attention_set:hybrid:ppo \
   --candidate flat:gru:ppo:single_leg \
   --candidate graph_set:hybrid:ppo:0:single_leg \
