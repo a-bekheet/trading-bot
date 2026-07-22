@@ -24,6 +24,8 @@ from trading_bot.training.trainer import (
     CHECKPOINT_SCHEMA_VERSION,
     TrainingConfig,
     _discounted_returns,
+    _duration_adjusted_factors,
+    _elapsed_seconds,
     _generalized_advantages,
     _parser,
     _sample_rollout_bounds,
@@ -197,6 +199,8 @@ class TrainerTests(TestCase):
         self.assertTrue(all(math.isfinite(item["evaluation_selection_score"]) for item in metrics))
         self.assertTrue(all(0 <= item["requested_action_rate"] <= 1 for item in metrics))
         self.assertTrue(all(0 <= item["slot_churn_rate"] <= 1 for item in metrics))
+        self.assertTrue(all(item["transition_seconds_mean"] == 60 for item in metrics))
+        self.assertTrue(all(item["effective_gamma_mean"] > 0.99 for item in metrics))
         self.assertTrue(all(
             math.isclose(
                 item["entropy_bonus"],
@@ -231,6 +235,12 @@ class TrainerTests(TestCase):
                 "mode": "stateful_tbptt",
                 "chunk_length": 2,
                 "padding": "right_only_ignored",
+                "discounting": {
+                    "mode": "elapsed_wall_clock",
+                    "gamma_per_reference_interval": 0.99,
+                    "gae_lambda_per_reference_interval": 0.95,
+                    "reference_seconds": 900.0,
+                },
             },
         )
         self.assertEqual(sidecar["auxiliary_prediction"], {
@@ -475,6 +485,10 @@ class TrainerTests(TestCase):
             TrainingConfig(selection_drawdown_penalty=-1)
         with self.assertRaisesRegex(ValueError, "risk penalties"):
             TrainingConfig(selection_cross_ticker_std_penalty=-1)
+        with self.assertRaisesRegex(ValueError, "time_aware_discounting"):
+            TrainingConfig(time_aware_discounting=1)
+        with self.assertRaisesRegex(ValueError, "discount_reference_seconds"):
+            TrainingConfig(discount_reference_seconds=0)
         for invalid in (-0.1, 1.1, float("nan")):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(
                 ValueError,
@@ -884,13 +898,13 @@ class TrainerTests(TestCase):
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_generalized_advantage_matches_terminal_return_vector(self):
-        config = TrainingConfig(episodes=1, gamma=1.0, gae_lambda=1.0)
         advantages, returns = _generalized_advantages(
             torch.tensor([1.0, 1.0]),
             torch.tensor([0.5, 0.25]),
             next_value=99.0,
             terminal=True,
-            config=config,
+            discounts=torch.ones(2),
+            trace_discounts=torch.ones(2),
             torch=torch,
         )
 
@@ -901,11 +915,64 @@ class TrainerTests(TestCase):
     def test_discounted_monte_carlo_returns_handle_terminal_and_bootstrap(self):
         rewards = torch.tensor([1.0, 1.0])
 
-        terminal = _discounted_returns(rewards, 99.0, True, 0.5, torch)
-        bounded = _discounted_returns(rewards, 2.0, False, 0.5, torch)
+        discounts = torch.full((2,), 0.5)
+        terminal = _discounted_returns(
+            rewards,
+            99.0,
+            True,
+            discounts,
+            torch,
+        )
+        bounded = _discounted_returns(
+            rewards,
+            2.0,
+            False,
+            discounts,
+            torch,
+        )
 
         torch.testing.assert_close(terminal, torch.tensor([1.5, 1.0]))
         torch.testing.assert_close(bounded, torch.tensor([2.0, 2.0]))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_generalized_advantage_uses_each_transition_duration(self):
+        advantages, returns = _generalized_advantages(
+            torch.tensor([1.0, 1.0]),
+            torch.zeros(2),
+            next_value=99.0,
+            terminal=True,
+            discounts=torch.tensor([0.5, 0.25]),
+            trace_discounts=torch.ones(2),
+            torch=torch,
+        )
+
+        torch.testing.assert_close(advantages, torch.tensor([1.5, 1.0]))
+        torch.testing.assert_close(returns, torch.tensor([1.5, 1.0]))
+
+    def test_duration_adjusted_discounting_composes_in_physical_time(self):
+        adjusted = _duration_adjusted_factors(
+            [450.0, 900.0, 1_800.0],
+            base=0.9,
+            reference_seconds=900.0,
+            time_aware=True,
+        )
+        fixed = _duration_adjusted_factors(
+            [450.0, 900.0, 1_800.0],
+            base=0.9,
+            reference_seconds=900.0,
+            time_aware=False,
+        )
+
+        np.testing.assert_allclose(adjusted, [0.9**0.5, 0.9, 0.9**2])
+        np.testing.assert_allclose(fixed, [0.9, 0.9, 0.9])
+        self.assertEqual(
+            _elapsed_seconds(
+                "2026-07-22T14:00:00+00:00",
+                "2026-07-22T14:15:00+00:00",
+            ),
+            900.0,
+        )
+        self.assertEqual(_elapsed_seconds("1", "3.5"), 2.5)
 
     def test_rollout_segments_are_seeded_bounded_and_regime_diverse(self):
         first_rng = np.random.default_rng(31)

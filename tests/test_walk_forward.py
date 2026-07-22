@@ -56,6 +56,22 @@ def walk_forward_dataset() -> SnapshotDataset:
 
 
 class WalkForwardTrainingTests(TestCase):
+    def test_cli_builds_matched_fixed_step_discount_ablation(self):
+        args = _parser().parse_args(["--fixed-step-discount-ablation"])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(len(specs), 2)
+        self.assertIsNone(specs[0].time_aware_discounting)
+        self.assertFalse(specs[1].time_aware_discounting)
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--no-time-aware-discounting",
+                "--fixed-step-discount-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "time_aware_discounting"):
+            ModelSpec(time_aware_discounting=1)
+
     def test_cli_builds_matched_auxiliary_loss_ablation(self):
         args = _parser().parse_args([
             "--auxiliary-coefficient",
@@ -339,6 +355,7 @@ class WalkForwardTrainingTests(TestCase):
                 "parameter_count",
                 "active_input_count",
                 "optimizer_updates",
+                "fixed_step_discount_ablation",
                 "model_id",
             ],
         )
@@ -486,6 +503,60 @@ class WalkForwardTrainingTests(TestCase):
             one_step["selection"]["validation_total_reward"]
             - enabled["selection"]["validation_total_reward"],
         )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_discount_ablation_reports_validation_only_lift(self):
+        candidates = (
+            ModelSpec(kind="gru", encoder="flat", hidden_size=4),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                time_aware_discounting=False,
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            summary = run_walk_forward_training(
+                walk_forward_dataset(),
+                WalkForwardConfig(
+                    min_train_size=3,
+                    validation_size=2,
+                    test_size=2,
+                    test_seeds=(53,),
+                    latency_warmup_iterations=1,
+                    latency_measured_iterations=2,
+                ),
+                candidates,
+                TrainingConfig(
+                    episodes=1,
+                    sequence_length=2,
+                    ppo_epochs=1,
+                    minibatch_size=4,
+                    evaluation_interval=1,
+                    seed=31,
+                ),
+                Path(directory),
+                env_kwargs={"slot_count": 1, "starting_cash": 1_000},
+            )
+
+        time_aware, fixed = summary["folds"][0]["model_selection"][
+            "candidates"
+        ]
+        self.assertTrue(time_aware["effective_time_aware_discounting"])
+        self.assertFalse(fixed["effective_time_aware_discounting"])
+        self.assertAlmostEqual(
+            fixed["validation_score_lift_vs_time_aware_discounting"],
+            fixed["selection"]["validation_selection_score"]
+            - time_aware["selection"]["validation_selection_score"],
+        )
+        if (
+            fixed["selection"]["validation_selection_score"]
+            == time_aware["selection"]["validation_selection_score"]
+        ):
+            self.assertEqual(
+                summary["folds"][0]["model_selection"]["selected_model_id"],
+                candidates[0].identifier,
+            )
 
     def test_cli_expands_each_architecture_with_requested_ablation(self):
         args = _parser().parse_args([

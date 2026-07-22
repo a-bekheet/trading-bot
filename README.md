@@ -266,6 +266,21 @@ on-policy optimizer pass through contiguous recurrent chunks. PPO remains the
 default and retains clipped multi-epoch updates. Metrics distinguish PPO,
 REINFORCE, and total optimizer updates so their compute is auditable.
 
+Both algorithms use duration-adjusted continuation and eligibility factors by
+default. With the default 900-second reference interval, a transition lasting
+`dt` seconds uses `gamma ** (dt / 900)`; PPO applies the same composition to
+GAE lambda. This preserves one physical-time objective when collection gaps
+vary instead of treating a one-minute and one-hour interval as equivalent.
+Configure the reference with `--discount-reference-seconds`, set the base
+factors with `--gamma` and `--gae-lambda`, or request legacy fixed-transition
+semantics with `--no-time-aware-discounting`. Episode metrics and checkpoints
+record observed durations and effective gamma/lambda ranges. These operations
+run only while constructing training targets and do not enter agent inference.
+A local 5,000-episode microbenchmark over 128 transitions measured about 62
+microseconds per episode, or 0.48 microseconds per transition, for timestamp
+parsing plus both factor vectors. Treat that as machine-specific engineering
+evidence, not a portable guarantee.
+
 Sparse portfolio reward does not have to be the recurrent encoder's only
 learning signal. Enable train-only multi-horizon market prediction:
 
@@ -655,8 +670,16 @@ For multi-horizon experiments, add `--auxiliary-horizon-ablation` to include a
 matched one-step candidate in the same validation tournament. Artifacts retain
 effective horizons and the one-step candidate's lift relative to the configured
 multi-horizon model.
-Only the validation winner reaches test, so the auxiliary task cannot be kept
-because it happened to look good on the held-out range.
+Add `--fixed-step-discount-ablation` to include otherwise matched candidates
+whose gamma and GAE lambda apply once per snapshot rather than per elapsed
+wall-clock interval. The artifact records effective semantics and the fixed-step
+candidate's validation lift versus time-aware discounting. Because it does not
+reduce inference parameters or latency, an exact tie retains the time-aware
+reference. This is a training objective comparison, separate from the
+`time_context` input ablation.
+Only the validation winner reaches test, so neither an auxiliary task nor a
+discounting convention can be kept because it happened to look good on the
+held-out range.
 
 Each fold trains only on its training range and touches the test range only
 after both architecture and checkpoint selection. It writes a safe checkpoint

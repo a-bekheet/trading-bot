@@ -50,7 +50,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v11"
+    "research-demo.universe-walk-forward.v12"
 )
 
 
@@ -367,6 +367,11 @@ def run_universe_walk_forward_training(
                     if candidate.auxiliary_coefficient is None
                     else candidate.auxiliary_coefficient
                 ),
+                time_aware_discounting=(
+                    fold_training.time_aware_discounting
+                    if candidate.time_aware_discounting is None
+                    else candidate.time_aware_discounting
+                ),
             )
             model, metrics = train_actor_critic(
                 train_envs,
@@ -440,6 +445,10 @@ def run_universe_walk_forward_training(
                     candidate,
                     auxiliary_horizons=fold_training.auxiliary_horizons,
                 ).identifier,
+                "discount_reference_model_id": replace(
+                    candidate,
+                    time_aware_discounting=None,
+                ).identifier,
             })
         eligible_runs = [
             run for run in candidate_runs if run["latency_eligible"]
@@ -462,6 +471,7 @@ def run_universe_walk_forward_training(
                 run["parameter_count"],
                 run["active_input_count"],
                 run["optimizer_updates"],
+                int(run["model_spec"].time_aware_discounting is False),
                 run["model_id"],
             ),
         )
@@ -491,6 +501,9 @@ def run_universe_walk_forward_training(
                 "effective_auxiliary_horizons": list(
                     run["training_config"].auxiliary_horizons
                 ),
+                "effective_time_aware_discounting": run[
+                    "training_config"
+                ].time_aware_discounting,
                 "parameter_count": run["parameter_count"],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
@@ -521,6 +534,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_auxiliary_enabled": None,
                 "validation_score_lift_vs_configured_horizons": None,
                 "validation_reward_lift_vs_configured_horizons": None,
+                "validation_score_lift_vs_time_aware_discounting": None,
+                "validation_reward_lift_vs_time_aware_discounting": None,
                 "selection": {
                     "scope": selected["evaluation_scope"],
                     "episode": selected["episode"],
@@ -593,6 +608,22 @@ def run_universe_walk_forward_training(
                     - validation_rewards[
                         run["auxiliary_horizon_reference_model_id"]
                     ]
+                )
+            discount_reference = validation_scores.get(
+                run["discount_reference_model_id"]
+            )
+            if (
+                run["model_spec"].time_aware_discounting is False
+                and discount_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_time_aware_discounting"
+                ] = run["validation_selection_score"] - discount_reference
+                result[
+                    "validation_reward_lift_vs_time_aware_discounting"
+                ] = (
+                    run["validation_total_reward"]
+                    - validation_rewards[run["discount_reference_model_id"]]
                 )
             candidate_results.append(result)
 
@@ -693,6 +724,7 @@ def run_universe_walk_forward_training(
                     "parameter_count",
                     "active_input_count",
                     "optimizer_updates",
+                    "fixed_step_discount_ablation",
                     "model_id",
                 ],
                 "latency_constraint": {
@@ -833,6 +865,10 @@ def main() -> None:
             TrainingConfig(
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
+                gamma=args.gamma,
+                gae_lambda=args.gae_lambda,
+                time_aware_discounting=args.time_aware_discounting,
+                discount_reference_seconds=args.discount_reference_seconds,
                 max_steps=args.max_steps,
                 random_start=args.random_start,
                 evaluation_interval=args.evaluation_interval,

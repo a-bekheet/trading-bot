@@ -8,6 +8,7 @@ import math
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v25"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v26"
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ class TrainingConfig:
     learning_rate: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
+    time_aware_discounting: bool = True
+    discount_reference_seconds: float = 900.0
     clip_ratio: float = 0.2
     value_clip: float = 0.2
     ppo_epochs: int = 4
@@ -63,6 +66,15 @@ class TrainingConfig:
             raise ValueError("episodes and sequence_length must be positive")
         if not 0 <= self.gamma <= 1 or not 0 <= self.gae_lambda <= 1:
             raise ValueError("gamma and gae_lambda must be between zero and one")
+        if not isinstance(self.time_aware_discounting, bool):
+            raise ValueError("time_aware_discounting must be a boolean")
+        if (
+            not math.isfinite(self.discount_reference_seconds)
+            or self.discount_reference_seconds <= 0
+        ):
+            raise ValueError(
+                "discount_reference_seconds must be finite and positive"
+            )
         if self.learning_rate <= 0 or self.gradient_clip <= 0:
             raise ValueError("learning_rate and gradient_clip must be positive")
         if self.clip_ratio <= 0 or self.value_clip <= 0 or self.target_kl <= 0:
@@ -378,9 +390,11 @@ def _generalized_advantages(
     values,
     next_value: float,
     terminal: bool,
-    config: TrainingConfig,
+    discounts,
+    trace_discounts,
     torch,
 ):
+    """GAE with one continuation and trace discount per transition."""
     advantages = torch.zeros_like(values)
     advantage = torch.tensor(0.0)
     following_value = torch.tensor(float(next_value))
@@ -388,12 +402,15 @@ def _generalized_advantages(
         nonterminal = 0.0 if terminal and index == len(rewards) - 1 else 1.0
         delta = (
             rewards[index]
-            + config.gamma * following_value * nonterminal
+            + discounts[index] * following_value * nonterminal
             - values[index]
         )
         advantage = (
             delta
-            + config.gamma * config.gae_lambda * nonterminal * advantage
+            + discounts[index]
+            * trace_discounts[index]
+            * nonterminal
+            * advantage
         )
         advantages[index] = advantage
         following_value = values[index]
@@ -404,16 +421,55 @@ def _discounted_returns(
     rewards,
     next_value: float,
     terminal: bool,
-    gamma: float,
+    discounts,
     torch,
 ):
-    """Causal Monte-Carlo returns with bootstrap for bounded rollouts."""
+    """Causal variable-duration returns with bounded-rollout bootstrap."""
     returns = torch.zeros_like(rewards)
     running = torch.tensor(0.0 if terminal else float(next_value))
     for index in range(len(rewards) - 1, -1, -1):
-        running = rewards[index] + gamma * running
+        running = rewards[index] + discounts[index] * running
         returns[index] = running
     return returns
+
+
+def _elapsed_seconds(start: str, stop: str) -> float:
+    """Return a positive duration from ISO-8601 or numeric fixture timestamps."""
+    try:
+        elapsed = (
+            datetime.fromisoformat(stop.replace("Z", "+00:00"))
+            - datetime.fromisoformat(start.replace("Z", "+00:00"))
+        ).total_seconds()
+    except (AttributeError, TypeError, ValueError):
+        try:
+            elapsed = float(stop) - float(start)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "observation timestamps must be ISO-8601 or numeric"
+            ) from error
+    if not math.isfinite(elapsed) or elapsed <= 0:
+        raise ValueError("observation timestamps must increase strictly")
+    return elapsed
+
+
+def _duration_adjusted_factors(
+    elapsed_seconds: Sequence[float],
+    base: float,
+    reference_seconds: float,
+    time_aware: bool,
+) -> np.ndarray:
+    """Convert a per-reference-interval factor to each transition duration."""
+    elapsed = np.asarray(elapsed_seconds, dtype=np.float64)
+    if elapsed.ndim != 1 or not len(elapsed):
+        raise ValueError("elapsed_seconds must be a non-empty vector")
+    if not np.isfinite(elapsed).all() or np.any(elapsed <= 0):
+        raise ValueError("elapsed_seconds must be finite and positive")
+    if not math.isfinite(base) or not 0 <= base <= 1:
+        raise ValueError("base discount must be finite and in [0, 1]")
+    if not math.isfinite(reference_seconds) or reference_seconds <= 0:
+        raise ValueError("reference_seconds must be finite and positive")
+    exponents = elapsed / reference_seconds if time_aware else np.ones_like(elapsed)
+    return np.power(base, exponents)
 
 
 def _sample_rollout_bounds(
@@ -585,6 +641,7 @@ def train_actor_critic(
         action_masks = []
         actions = []
         rewards = []
+        transition_seconds = []
         old_log_probabilities = []
         old_values = []
         auxiliary_observations = [observation] if auxiliary_target_contract else []
@@ -616,8 +673,12 @@ def train_actor_critic(
             )
             requested_underlying_orders += int(action_array[-1] != 0)
 
+            previous_timestamp = observation.timestamp
             observation, reward, terminated, truncated, info = episode_env.step(
                 action_array
+            )
+            transition_seconds.append(
+                _elapsed_seconds(previous_timestamp, observation.timestamp)
             )
             if auxiliary_target_contract:
                 auxiliary_observations.append(observation)
@@ -657,6 +718,22 @@ def train_actor_critic(
         old_log_probs_tensor = torch.stack(old_log_probabilities)
         old_values_tensor = torch.stack(old_values)
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
+        discounts_tensor = torch.from_numpy(
+            _duration_adjusted_factors(
+                transition_seconds,
+                config.gamma,
+                config.discount_reference_seconds,
+                config.time_aware_discounting,
+            ).astype(np.float32)
+        )
+        trace_discounts_tensor = torch.from_numpy(
+            _duration_adjusted_factors(
+                transition_seconds,
+                config.gae_lambda,
+                config.discount_reference_seconds,
+                config.time_aware_discounting,
+            ).astype(np.float32)
+        )
         if auxiliary_target_contract:
             auxiliary_values, auxiliary_available = (
                 multi_horizon_auxiliary_targets(
@@ -675,7 +752,8 @@ def train_actor_critic(
                 old_values_tensor,
                 next_value,
                 final_terminal,
-                config,
+                discounts_tensor,
+                trace_discounts_tensor,
                 torch,
             )
         else:
@@ -683,7 +761,7 @@ def train_actor_critic(
                 rewards_tensor,
                 next_value,
                 final_terminal,
-                config.gamma,
+                discounts_tensor,
                 torch,
             )
             advantages = returns_tensor - old_values_tensor
@@ -955,6 +1033,15 @@ def train_actor_critic(
                 "rollout_start_index": rollout_start,
                 "rollout_end_index": rollout_start + steps,
                 "total_reward": float(sum(rewards)),
+                "transition_seconds_mean": float(np.mean(transition_seconds)),
+                "transition_seconds_min": float(np.min(transition_seconds)),
+                "transition_seconds_max": float(np.max(transition_seconds)),
+                "effective_gamma_mean": float(discounts_tensor.mean()),
+                "effective_gamma_min": float(discounts_tensor.min()),
+                "effective_gamma_max": float(discounts_tensor.max()),
+                "effective_lambda_mean": float(trace_discounts_tensor.mean()),
+                "effective_lambda_min": float(trace_discounts_tensor.min()),
+                "effective_lambda_max": float(trace_discounts_tensor.max()),
                 "evaluation_total_reward": evaluation_reward,
                 "evaluation_selection_score": evaluation_selection_score,
                 "evaluation_selection_score_mean": (
@@ -1128,6 +1215,20 @@ def checkpoint_manifest(
             "mode": "stateful_tbptt",
             "chunk_length": training_config.sequence_length,
             "padding": "right_only_ignored",
+            "discounting": {
+                "mode": (
+                    "elapsed_wall_clock"
+                    if training_config.time_aware_discounting
+                    else "fixed_transition"
+                ),
+                "gamma_per_reference_interval": training_config.gamma,
+                "gae_lambda_per_reference_interval": (
+                    training_config.gae_lambda
+                ),
+                "reference_seconds": (
+                    training_config.discount_reference_seconds
+                ),
+            },
         },
         "auxiliary_prediction": {
             "enabled": training_config.auxiliary_coefficient > 0,
@@ -1286,6 +1387,21 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=64)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument(
+        "--time-aware-discounting",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "scale gamma and GAE lambda by wall-clock transition duration"
+        ),
+    )
+    parser.add_argument(
+        "--discount-reference-seconds",
+        type=float,
+        default=900.0,
+        help="interval at which configured gamma and GAE lambda apply",
+    )
     parser.add_argument("--clip-ratio", type=float, default=0.2)
     parser.add_argument("--target-kl", type=float, default=0.03)
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
@@ -1403,7 +1519,10 @@ def main() -> None:
         random_start=args.random_start,
         ppo_epochs=args.ppo_epochs,
         minibatch_size=args.minibatch_size,
+        gamma=args.gamma,
         gae_lambda=args.gae_lambda,
+        time_aware_discounting=args.time_aware_discounting,
+        discount_reference_seconds=args.discount_reference_seconds,
         clip_ratio=args.clip_ratio,
         target_kl=args.target_kl,
         entropy_coefficient=args.entropy_coefficient,

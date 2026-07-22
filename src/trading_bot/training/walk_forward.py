@@ -48,7 +48,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v27"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v28"
 
 
 @dataclass(frozen=True)
@@ -135,6 +135,7 @@ class ModelSpec:
     parameter_budget: int | None = None
     auxiliary_coefficient: float | None = None
     auxiliary_horizons: tuple[int, ...] = (1,)
+    time_aware_discounting: bool | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid"}:
@@ -166,6 +167,13 @@ class ModelSpec:
         ):
             raise ValueError(
                 "model auxiliary_coefficient must be finite and non-negative"
+            )
+        if self.time_aware_discounting is not None and not isinstance(
+            self.time_aware_discounting,
+            bool,
+        ):
+            raise ValueError(
+                "model time_aware_discounting must be a boolean or None"
             )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
@@ -367,6 +375,11 @@ def run_walk_forward_training(
                     if candidate.auxiliary_coefficient is None
                     else candidate.auxiliary_coefficient
                 ),
+                time_aware_discounting=(
+                    fold_training.time_aware_discounting
+                    if candidate.time_aware_discounting is None
+                    else candidate.time_aware_discounting
+                ),
             )
             model, metrics = train_actor_critic(
                 train_env,
@@ -463,6 +476,10 @@ def run_walk_forward_training(
                     candidate,
                     auxiliary_horizons=fold_training.auxiliary_horizons,
                 ).identifier,
+                "discount_reference_model_id": replace(
+                    candidate,
+                    time_aware_discounting=None,
+                ).identifier,
             })
 
         eligible_runs = [
@@ -485,6 +502,7 @@ def run_walk_forward_training(
                 run["parameter_count"],
                 run["active_input_count"],
                 run["optimizer_updates"],
+                int(run["model_spec"].time_aware_discounting is False),
                 run["model_id"],
             ),
         )
@@ -499,6 +517,9 @@ def run_walk_forward_training(
                 "effective_auxiliary_horizons": list(
                     run["training_config"].auxiliary_horizons
                 ),
+                "effective_time_aware_discounting": run[
+                    "training_config"
+                ].time_aware_discounting,
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": run["latency_eligible"],
@@ -527,6 +548,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_auxiliary_enabled": None,
                 "validation_reward_lift_vs_configured_horizons": None,
                 "validation_score_lift_vs_configured_horizons": None,
+                "validation_reward_lift_vs_time_aware_discounting": None,
+                "validation_score_lift_vs_time_aware_discounting": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -593,6 +616,22 @@ def run_walk_forward_training(
                     - validation_rewards[
                         run["auxiliary_horizon_reference_model_id"]
                     ]
+                )
+            discount_reference = validation_scores.get(
+                run["discount_reference_model_id"]
+            )
+            if (
+                run["model_spec"].time_aware_discounting is False
+                and discount_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_time_aware_discounting"
+                ] = run["validation_selection_score"] - discount_reference
+                result[
+                    "validation_reward_lift_vs_time_aware_discounting"
+                ] = (
+                    run["validation_total_reward"]
+                    - validation_rewards[run["discount_reference_model_id"]]
                 )
         model = winning_run["model"]
         metrics = winning_run["metrics"]
@@ -743,6 +782,7 @@ def run_walk_forward_training(
                     "parameter_count",
                     "active_input_count",
                     "optimizer_updates",
+                    "fixed_step_discount_ablation",
                     "model_id",
                 ],
                 "eligibility_constraint": {
@@ -915,6 +955,20 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
     )
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument(
+        "--time-aware-discounting",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="scale gamma and GAE lambda by wall-clock transition duration",
+    )
+    parser.add_argument(
+        "--discount-reference-seconds",
+        type=float,
+        default=900.0,
+        help="interval at which configured gamma and GAE lambda apply",
+    )
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument(
         "--auxiliary-coefficient",
@@ -947,6 +1001,11 @@ def _parser() -> argparse.ArgumentParser:
             "add matched one-step candidates for configured multi-horizon "
             "models"
         ),
+    )
+    parser.add_argument(
+        "--fixed-step-discount-ablation",
+        action="store_true",
+        help="add matched candidates that ignore elapsed transition duration",
     )
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument(
@@ -1033,6 +1092,16 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             replace(spec, auxiliary_coefficient=0.0)
             for spec in full_specs
         )
+    if args.fixed_step_discount_ablation:
+        if not args.time_aware_discounting:
+            raise ValueError(
+                "--fixed-step-discount-ablation requires "
+                "--time-aware-discounting"
+            )
+        specs.extend(
+            replace(spec, time_aware_discounting=False)
+            for spec in full_specs
+        )
     return _normalize_model_specs(specs)
 
 
@@ -1073,6 +1142,10 @@ def main() -> None:
             TrainingConfig(
                 episodes=args.episodes,
                 sequence_length=args.sequence_length,
+                gamma=args.gamma,
+                gae_lambda=args.gae_lambda,
+                time_aware_discounting=args.time_aware_discounting,
+                discount_reference_seconds=args.discount_reference_seconds,
                 max_steps=args.max_steps,
                 random_start=args.random_start,
                 evaluation_interval=args.evaluation_interval,

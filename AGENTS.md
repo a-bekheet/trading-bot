@@ -258,7 +258,13 @@ optional `single_leg` decoder uses one exact joint categorical over global hold
 plus every feasible row/non-hold-action pair, structurally permitting at most
 one order per snapshot. It is an explicit lower-complexity action-space
 candidate, not post-processing or an inferred execution cap. PPO uses GAE,
-policy/value clipping, and target-KL stopping. REINFORCE uses discounted trajectory returns,
+policy/value clipping, and target-KL stopping. By default, both algorithms use
+`gamma ** (elapsed_seconds / discount_reference_seconds)` for continuation;
+PPO applies the same physical-time composition to GAE lambda. Never apply one
+fixed discount per irregular snapshot without declaring
+`time_aware_discounting=False`. Persist the reference interval, observed
+transition durations, and effective gamma/lambda ranges; use the matched
+fixed-step discount ablation for comparison. REINFORCE uses discounted trajectory returns,
 bootstraps bounded nonterminal rollouts only, and performs exactly one on-policy
 optimizer pass; never reuse its trajectory across epochs. Both algorithms use
 entropy regularization, gradient clipping, and contiguous recurrent chunks.

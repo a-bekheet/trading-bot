@@ -49,6 +49,7 @@ Every candidate must eventually pass:
 | [When does Self-Prediction help? Understanding Auxiliary Tasks in Reinforcement Learning (2024)](https://arxiv.org/abs/2406.17718) | Predictive auxiliary objectives can improve RL representations, but their value depends on observation structure and distractions rather than being universal. | A masked multi-horizon Smooth-L1 head now supervises the shared recurrent encoder only on training transitions. Keep it only through matched one-step and disabled validation ablations. |
 | [Data-Efficient RL with Self-Predictive Representations (2020)](https://arxiv.org/abs/2007.05929) | Predicting multiple future steps can improve representation learning under limited interaction, though its evidence comes from visual-control domains rather than markets. | Support predeclared cumulative snapshot horizons with endpoint masks and compare multi-horizon, one-step, and disabled heads using validation only. |
 | [Still Competitive: Revisiting Recurrent Models for Irregular Time Series Prediction (2025)](https://arxiv.org/abs/2510.16161) | Explicit time-triggered mechanisms can make simple recurrent models competitive on irregular series at low overhead. | Add causal prior-snapshot elapsed time plus coverage once in the market vector before considering a continuous-time recurrent cell; validate through the named `time_context` ablation. |
+| [Time-Aware Q-Networks (2021)](https://arxiv.org/abs/2105.02580) and [Semi-Markov Offline RL (2022)](https://arxiv.org/abs/2203.09365) | Irregular decision intervals affect both state estimation and the discount applied to future value; treating variable-duration transitions as fixed-step MDP transitions can change the learned objective. | PPO and REINFORCE now compose gamma, and GAE lambda where applicable, over elapsed wall-clock time relative to a declared reference interval. Retain fixed-step semantics as a matched validation ablation. |
 | [Multi-Horizon Echo State Network Prediction of Intraday Stock Returns (2025)](https://arxiv.org/abs/2504.19623) | Compact recurrent models can predict intraday returns at multiple horizons without the cost of a large generic architecture. | Expose causal 4/16-snapshot cumulative log returns to the existing GRU/LSTM families before adding another recurrent family; require the named `price_trend` ablation. |
 | [A New Option Momentum: The Role of the Systematic Component (revised 2026)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4404190) | Transaction-cost-robust option momentum is concentrated in a systematic component, while past prices have limited influence relative to risk and quality characteristics. | Treat price trend as a small optional state contribution, keep surface risk/quality features, and remove trend unless it earns validation lift after costs. |
 
@@ -197,6 +198,13 @@ by a configured edge, then reduces residual Delta with shares. It remains
 long-only and has no lifecycle exit, so it tests whether the learned agent beats
 a simple underpriced-volatility rule rather than a complete volatility book.
 
+Training targets now respect irregular transition duration. PPO/GAE and
+REINFORCE convert their configured per-reference-interval factors to
+`base ** (elapsed_seconds / reference_seconds)`, while inference stays
+unchanged. Each episode records transition-time and effective-factor ranges,
+and walk-forward tournaments can include a matched fixed-step discount
+candidate. This corrects objective semantics; it is not evidence of alpha.
+
 ## Prioritized implementation sequence
 
 ### 1. Make evaluation credible
@@ -234,6 +242,9 @@ a simple underpriced-volatility rule rather than a complete volatility book.
 - Retain prior-snapshot elapsed time only if its named `time_context` removal
   candidate does not win validation; do not silently reinterpret snapshot
   horizons as wall-clock horizons.
+- Retain elapsed-time-aware gamma/lambda only if it survives the separate
+  fixed-step discount ablation; declare the reference interval before training
+  and never tune it on held-out results.
 - Extend the implemented realized-volatility state only through ablation-tested
   regime features.
 - Retain 4/16-snapshot cumulative return only if the `price_trend` removal
