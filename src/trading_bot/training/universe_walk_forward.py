@@ -58,7 +58,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v30"
+    "research-demo.universe-walk-forward.v31"
 )
 
 
@@ -145,7 +145,7 @@ def _universe_latency(
     medians = [item["median_microseconds"] for item in per_symbol.values()]
     p95_values = [item["p95_microseconds"] for item in per_symbol.values()]
     return {
-        "schema_version": "research-demo.universe-inference-latency.v1",
+        "schema_version": "research-demo.universe-inference-latency.v2",
         "scope": "worst_ticker_streaming_batch_1_training_observation",
         "aggregation": "maximum_per_ticker_median",
         "median_microseconds": max(medians),

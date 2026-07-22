@@ -595,7 +595,11 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(candidate["resolved_model"]["hidden_size"], 8)
         self.assertEqual(
             candidate["inference_latency"]["scope"],
-            "streaming_batch_1_training_observation",
+            "actor_only_streaming_batch_1_training_observation",
+        )
+        self.assertEqual(
+            candidate["inference_latency"]["evaluated_heads"],
+            ["policy"],
         )
         self.assertEqual(
             candidate["inference_latency"]["measured_iterations"],

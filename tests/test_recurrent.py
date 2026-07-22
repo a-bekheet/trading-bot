@@ -123,6 +123,89 @@ class RecurrentTests(TestCase):
         torch.testing.assert_close(inference_values, train_values)
 
     @skipUnless(torch is not None, "install the optional ml extra")
+    def test_actor_only_path_preserves_actions_and_skips_unused_heads(self):
+        torch.manual_seed(18)
+        for kind in ("gru", "lstm", "hybrid", "mixture"):
+            with self.subTest(kind=kind):
+                model = build_recurrent_actor_critic(RecurrentConfig(
+                    5,
+                    2,
+                    3,
+                    action_slot_count=3,
+                    hidden_size=8,
+                    kind=kind,
+                    auxiliary_target_count=5,
+                ))
+                model.eval()
+                sequence = torch.randn(4, 3, 5)
+                mask = torch.ones(4, 3, 3, dtype=torch.bool)
+                mask[:, 1, 2] = False
+                full_logits, _, _ = model(sequence, mask)
+                expected = model.actions_from_logits(
+                    full_logits,
+                    deterministic=True,
+                )
+                value_calls = []
+                auxiliary_calls = []
+                value_handle = model.value.register_forward_hook(
+                    lambda *args: value_calls.append(1)
+                )
+                auxiliary_handle = model.auxiliary.register_forward_hook(
+                    lambda *args: auxiliary_calls.append(1)
+                )
+
+                actor_logits, _ = model.policy_sequence(sequence, mask)
+                actual, _ = model.act(
+                    sequence,
+                    mask,
+                    deterministic=True,
+                )
+                value_handle.remove()
+                auxiliary_handle.remove()
+
+                torch.testing.assert_close(actor_logits[:, -1], full_logits)
+                torch.testing.assert_close(actual, expected)
+                self.assertEqual(value_calls, [])
+                self.assertEqual(auxiliary_calls, [])
+
+        for config in (
+            self.graph_set_config(),
+            self.attention_set_config(action_decoder="single_leg"),
+        ):
+            with self.subTest(encoder=config.encoder):
+                model = build_recurrent_actor_critic(config)
+                model.eval()
+                sequence = torch.randn(3, 2, config.input_size)
+                mask = torch.ones(
+                    3,
+                    config.action_slot_count,
+                    config.action_count,
+                    dtype=torch.bool,
+                )
+                full_logits, _, _ = model(sequence, mask)
+                value_calls = []
+                value_handle = model.value.register_forward_hook(
+                    lambda *args: value_calls.append(1)
+                )
+                actor_logits, _ = model.policy_sequence(sequence, mask)
+                actions, _ = model.act(
+                    sequence,
+                    mask,
+                    deterministic=True,
+                )
+                value_handle.remove()
+
+                torch.testing.assert_close(actor_logits[:, -1], full_logits)
+                torch.testing.assert_close(
+                    actions,
+                    model.actions_from_logits(
+                        full_logits,
+                        deterministic=True,
+                    ),
+                )
+                self.assertEqual(value_calls, [])
+
+    @skipUnless(torch is not None, "install the optional ml extra")
     def test_checkpointed_feature_mask_makes_disabled_inputs_invariant(self):
         torch.manual_seed(13)
         model = build_recurrent_actor_critic(RecurrentConfig(

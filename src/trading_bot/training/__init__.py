@@ -31,11 +31,16 @@ from trading_bot.training.sequence import (
 )
 from trading_bot.training.splits import WalkForwardSplit, walk_forward_splits
 from trading_bot.training.trainer import (
+    BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION,
     RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+    BatchedRecurrentPolicyState,
+    BatchedStreamingRecurrentPolicy,
     RecurrentPolicyState,
     StreamingRecurrentPolicy,
     TrainingConfig,
     aggregate_selection_scores,
+    batched_recurrent_policy,
+    benchmark_batched_recurrent_inference,
     benchmark_recurrent_inference,
     evaluate_recurrent_policy,
     load_checkpoint,
@@ -55,7 +60,9 @@ from trading_bot.training.walk_forward import (
 )
 
 __all__ = [
-    "Action", "BootstrapComparison", "CostScenario", "EpisodeReport",
+    "Action", "BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION",
+    "BatchedRecurrentPolicyState", "BatchedStreamingRecurrentPolicy",
+    "BootstrapComparison", "CostScenario", "EpisodeReport",
     "EpisodeTrace", "EnvManifest", "FEATURE_ABLATION_GROUPS",
     "LongVolatilityConfig", "ShortVolatilityConfig", "Observation",
     "ModelSpec", "OptionsEnv", "RecurrentPolicyState",
@@ -63,6 +70,7 @@ __all__ = [
     "TrainingConfig", "Transition",
     "WalkForwardConfig", "WalkForwardSplit",
     "UNIVERSE_WALK_FORWARD_SCHEMA_VERSION",
+    "batched_recurrent_policy", "benchmark_batched_recurrent_inference",
     "benchmark_recurrent_inference",
     "aggregate_selection_scores",
     "buy_first_then_delta_hedge", "cash_secured_short_put_delta_hedge",

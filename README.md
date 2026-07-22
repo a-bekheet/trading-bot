@@ -622,6 +622,47 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.60 adds an actor-only batched runtime for synchronized paper agents and
+counterfactual rollouts. Deployment no longer executes the value or auxiliary
+head when only an action is requested, while training retains the full
+actor-critic path. A fixed batch carries independent GRU, LSTM, hybrid, or
+mixture hidden-state columns through one model forward:
+
+```python
+from trading_bot.training import batched_recurrent_policy, load_checkpoint
+
+model, manifest = load_checkpoint("artifacts/policy.pt")
+agents = batched_recurrent_policy(
+    model,
+    sequence_length=manifest["training"]["sequence_length"],
+    batch_size=3,
+)
+actions = agents((aapl_observation, msft_observation, nvda_observation))
+
+# MSFT starts a new episode; the other two recurrent cursors are unchanged.
+agents.reset([1])
+branch = agents.fork()
+portable_state = agents.snapshot()
+```
+
+Every batch call is transactional with respect to recurrent state: it validates
+batch width, feature layout, model mode, and every cursor's chronology before
+running the actor or advancing any cursor. Partial reset explicitly zeros only
+the selected hidden-state columns. Batched snapshots validate their own v1
+schema, model contract, cursor counts, finite tensor layout, timestamp/step
+consistency, and zero state for reset cursors. All cursors must supply one
+observation per synchronized call; this is not an asynchronous scheduler.
+
+On a local one-thread flat-GRU benchmark over seven matched 3,000-iteration
+runs, skipping the critic reduced median single-agent latency from 93.51 to
+88.76 microseconds, a 5.4% speedup. One batch of eight agents took 316.09
+microseconds versus 716.11 serially (2.27x throughput); 32 agents took 1,076.50
+microseconds versus 2,845.35 serially (2.64x). Per-agent batched latency was
+39.51 and 33.64 microseconds respectively. These machine-specific measurements
+do not imply trading alpha. The batch-one inference schema advances to v2,
+single-ticker walk-forward to v47, and universe walk-forward to v31; checkpoint,
+feature, and environment schemas remain v43, `dimensionless.v17`, and v22.
+
 v0.59 replaces the opaque recurrent evaluation closure with an explicit
 `StreamingRecurrentPolicy` runtime for GRU, LSTM, concatenated-hybrid, and
 gated-mixture agents. It remains callable by the existing environment and adds

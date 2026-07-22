@@ -500,7 +500,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             safe_mask[..., 0] |= empty_slots
             return safe_mask
 
-        def _actor_critic_outputs(
+        def _policy_outputs(
             self,
             encoded,
             sequence,
@@ -572,7 +572,24 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                     logits = logits.masked_fill(~joint_mask, float("-inf"))
                 else:
                     logits = logits.masked_fill(~safe_mask, float("-inf"))
-            return logits, self.value(encoded).squeeze(-1)
+            return logits
+
+        def _actor_critic_outputs(
+            self,
+            encoded,
+            sequence,
+            action_mask,
+            node_embeddings,
+        ):
+            return (
+                self._policy_outputs(
+                    encoded,
+                    sequence,
+                    action_mask,
+                    node_embeddings,
+                ),
+                self.value(encoded).squeeze(-1),
+            )
 
         @staticmethod
         def _categorical(logits):
@@ -693,6 +710,20 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             )
             return logits, values, hidden
 
+        def policy_sequence(self, sequence, action_mask=None, hidden_state=None):
+            """Return actor logits without executing deployment-unused heads."""
+            encoded, hidden, node_embeddings = self._encode_sequence(
+                sequence,
+                hidden_state,
+            )
+            logits = self._policy_outputs(
+                encoded,
+                sequence,
+                action_mask,
+                node_embeddings,
+            )
+            return logits, hidden
+
         def forward_sequence_with_auxiliary(
             self,
             sequence,
@@ -750,5 +781,24 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 deterministic=deterministic,
             )
             return action, value, hidden
+
+        def act(
+            self,
+            sequence,
+            action_mask,
+            deterministic=False,
+            hidden_state=None,
+        ):
+            """Sample an action without evaluating critic or auxiliary heads."""
+            logits, hidden = self.policy_sequence(
+                sequence,
+                action_mask,
+                hidden_state,
+            )
+            action = self.actions_from_logits(
+                logits[:, -1],
+                deterministic=deterministic,
+            )
+            return action, hidden
 
     return ActorCritic()

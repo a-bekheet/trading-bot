@@ -22,8 +22,11 @@ from trading_bot.training.recurrent import (
 )
 from trading_bot.training.sequence import AUXILIARY_TARGET_FEATURES, observation_vector
 from trading_bot.training.trainer import (
+    BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION,
     CHECKPOINT_SCHEMA_VERSION,
     RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+    BatchedRecurrentPolicyState,
+    BatchedStreamingRecurrentPolicy,
     RecurrentPolicyState,
     StreamingRecurrentPolicy,
     TrainingConfig,
@@ -38,6 +41,8 @@ from trading_bot.training.trainer import (
     _symbols_from_args,
     _volatility_stratified_start_pools,
     aggregate_selection_scores,
+    batched_recurrent_policy,
+    benchmark_batched_recurrent_inference,
     benchmark_recurrent_inference,
     evaluate_recurrent_policy,
     load_checkpoint,
@@ -214,8 +219,9 @@ class TrainerTests(TestCase):
         self.assertTrue(model.training)
         self.assertEqual(
             report["schema_version"],
-            "research-demo.inference-latency.v1",
+            "research-demo.inference-latency.v2",
         )
+        self.assertEqual(report["evaluated_heads"], ["policy"])
         self.assertEqual(report["measured_iterations"], 5)
         self.assertGreater(report["median_microseconds"], 0)
         self.assertGreaterEqual(
@@ -238,6 +244,34 @@ class TrainerTests(TestCase):
                 2,
                 measured_iterations=0,
             )
+        with self.assertRaisesRegex(ValueError, "sequence_length"):
+            benchmark_recurrent_inference(model, observation, 0)
+        self.assertTrue(model.training)
+
+        batched = benchmark_batched_recurrent_inference(
+            model,
+            observation,
+            2,
+            batch_size=3,
+            warmup_iterations=1,
+            measured_iterations=5,
+        )
+        self.assertTrue(model.training)
+        self.assertEqual(
+            batched["schema_version"],
+            "research-demo.batched-inference-latency.v1",
+        )
+        self.assertEqual(batched["batch_size"], 3)
+        self.assertEqual(batched["evaluated_heads"], ["policy"])
+        self.assertGreater(batched["median_decisions_per_second"], 0)
+        with self.assertRaisesRegex(ValueError, "batch_size"):
+            benchmark_batched_recurrent_inference(
+                model,
+                observation,
+                2,
+                batch_size=0,
+            )
+        self.assertTrue(model.training)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_streaming_policy_can_reset_snapshot_restore_and_fork_every_kind(self):
@@ -410,6 +444,186 @@ class TrainerTests(TestCase):
         )
         policy.restore(empty_state)
         self.assertEqual(policy.steps, 0)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_batched_policy_matches_isolated_cursors_and_resets_independently(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        first, _ = env.reset(seed=102)
+        hold = np.zeros(env.action_shape[0], dtype=np.int64)
+        second, _, _, _, _ = env.step(hold)
+        third, _, _, _, _ = env.step(hold)
+
+        def tensors(value):
+            if isinstance(value, dict):
+                return tuple(
+                    tensor
+                    for key in sorted(value)
+                    for tensor in tensors(value[key])
+                )
+            if isinstance(value, tuple):
+                return tuple(
+                    tensor for item in value for tensor in tensors(item)
+                )
+            return (value,)
+
+        for kind in ("gru", "lstm", "hybrid", "mixture"):
+            with self.subTest(kind=kind):
+                model = build_recurrent_actor_critic(RecurrentConfig(
+                    input_size=observation_vector(first).size,
+                    slot_count=2,
+                    action_count=env.action_shape[1],
+                    action_slot_count=env.action_shape[0],
+                    hidden_size=4,
+                    layers=2,
+                    dropout=0.5,
+                    kind=kind,
+                ))
+                model.eval()
+                serial = [recurrent_policy(model, 2) for _ in range(3)]
+                batched = batched_recurrent_policy(model, 2, 3)
+                self.assertIsInstance(
+                    batched,
+                    BatchedStreamingRecurrentPolicy,
+                )
+
+                expected = np.stack([policy(first) for policy in serial])
+                np.testing.assert_array_equal(
+                    batched((first, first, first)),
+                    expected,
+                )
+                batched.reset([1])
+                serial[1].reset()
+                observations = (second, first, second)
+                expected = np.stack([
+                    policy(observation)
+                    for policy, observation in zip(
+                        serial,
+                        observations,
+                        strict=True,
+                    )
+                ])
+                np.testing.assert_array_equal(batched(observations), expected)
+                self.assertEqual(batched.steps, (2, 1, 2))
+
+                batch_state = batched.snapshot()
+                self.assertEqual(
+                    batch_state.schema_version,
+                    BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+                )
+                for index, policy in enumerate(serial):
+                    for combined, isolated in zip(
+                        tensors(batch_state.hidden_state),
+                        tensors(policy.snapshot().hidden_state),
+                        strict=True,
+                    ):
+                        self.assertEqual(combined.device.type, "cpu")
+                        torch.testing.assert_close(
+                            combined[:, index:index + 1],
+                            isolated,
+                        )
+
+                branch = batched.fork()
+                final_observations = (third, second, third)
+                expected = batched(final_observations)
+                np.testing.assert_array_equal(
+                    branch(final_observations),
+                    expected,
+                )
+                self.assertEqual(branch.steps, (3, 2, 3))
+
+                batched.restore(batch_state)
+                np.testing.assert_array_equal(
+                    batched(final_observations),
+                    expected,
+                )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_batched_policy_rejects_cross_cursor_contamination(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=1)
+        first, _ = env.reset(seed=104)
+        second, _, _, _, _ = env.step(
+            np.zeros(env.action_shape[0], dtype=np.int64)
+        )
+        model = build_recurrent_actor_critic(RecurrentConfig(
+            input_size=observation_vector(first).size,
+            slot_count=1,
+            action_count=env.action_shape[1],
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+        ))
+        with self.assertRaisesRegex(ValueError, "model.eval"):
+            batched_recurrent_policy(model, 2, 2)
+        model.eval()
+        policy = batched_recurrent_policy(model, 2, 2)
+        policy((first, first))
+        before = policy.snapshot()
+        with self.assertRaisesRegex(ValueError, "increase strictly"):
+            policy((first, second))
+        self.assertEqual(policy.steps, before.steps)
+        self.assertEqual(policy.last_timestamps, before.last_timestamps)
+        with self.assertRaisesRegex(ValueError, "batch_size"):
+            policy((second,))
+
+        policy.reset([1])
+        partial = policy.snapshot()
+        self.assertEqual(partial.steps, (1, 0))
+        self.assertTrue(
+            torch.count_nonzero(partial.hidden_state[:, 1, :]) == 0
+        )
+        contaminated = partial.hidden_state.clone()
+        contaminated[:, 1, :] = 1
+        for state, message in (
+            (
+                replace(partial, schema_version="future.v9"),
+                "schema",
+            ),
+            (
+                replace(partial, batch_size=3),
+                "model contract",
+            ),
+            (
+                replace(partial, hidden_state=contaminated),
+                "zero state",
+            ),
+            (
+                replace(partial, steps=(1, -1)),
+                "non-negative",
+            ),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError,
+                message,
+            ):
+                policy.restore(state)
+        with self.assertRaisesRegex(TypeError, "BatchedRecurrentPolicyState"):
+            policy.restore({})
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            BatchedStreamingRecurrentPolicy(model, 2, 0)
+        for indices in ((0, 0), (-1,), (2,), (True,)):
+            with self.subTest(indices=indices), self.assertRaisesRegex(
+                ValueError,
+                "unique valid",
+            ):
+                policy.reset(indices)
+
+        model.train()
+        with self.assertRaisesRegex(RuntimeError, "training mode"):
+            policy((second, first))
+        model.eval()
+
+        empty = BatchedRecurrentPolicyState(
+            schema_version=BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+            batch_size=2,
+            recurrent_kind="gru",
+            layers=1,
+            hidden_size=4,
+            model_contract=partial.model_contract,
+            steps=(0, 0),
+            last_timestamps=(None, None),
+            hidden_state=None,
+        )
+        policy.restore(empty)
+        self.assertEqual(policy.steps, (0, 0))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_evaluation_restores_model_mode_after_episode_failure(self):

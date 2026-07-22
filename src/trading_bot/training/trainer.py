@@ -31,6 +31,9 @@ from trading_bot.market_data.universe import TOP_50_TICKERS
 
 CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v43"
 RECURRENT_POLICY_STATE_SCHEMA_VERSION = "research-demo.recurrent-policy-state.v1"
+BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION = (
+    "research-demo.batched-recurrent-policy-state.v1"
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,21 @@ class RecurrentPolicyState:
     model_contract: str
     steps: int
     last_timestamp: str | None
+    hidden_state: Any
+
+
+@dataclass(frozen=True)
+class BatchedRecurrentPolicyState:
+    """Device-portable causal state for a fixed batch of agent cursors."""
+
+    schema_version: str
+    batch_size: int
+    recurrent_kind: str
+    layers: int
+    hidden_size: int
+    model_contract: str
+    steps: tuple[int, ...]
+    last_timestamps: tuple[str | None, ...]
     hidden_state: Any
 
 
@@ -312,9 +330,9 @@ def _recurrent_model_contract(config: RecurrentConfig) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _validate_hidden_state(hidden_state, config, torch) -> None:
+def _validate_hidden_state(hidden_state, config, torch, *, batch_size=1) -> None:
     """Reject a snapshot whose nested tensor layout cannot fit the model."""
-    expected_shape = (config.layers, 1, config.hidden_size)
+    expected_shape = (config.layers, batch_size, config.hidden_size)
 
     def tensor(value, name):
         if not torch.is_tensor(value) or tuple(value.shape) != expected_shape:
@@ -345,6 +363,42 @@ def _validate_hidden_state(hidden_state, config, torch) -> None:
             )
         tensor(hidden_state["gru"], "gru")
         lstm(hidden_state["lstm"], "lstm")
+
+
+def _zero_hidden_cursors(hidden_state, indices, torch):
+    """Clone a nested hidden state and zero selected recurrent batch columns."""
+    if hidden_state is None:
+        return None
+    if isinstance(hidden_state, dict):
+        return {
+            name: _zero_hidden_cursors(value, indices, torch)
+            for name, value in hidden_state.items()
+        }
+    if isinstance(hidden_state, tuple):
+        return tuple(
+            _zero_hidden_cursors(value, indices, torch)
+            for value in hidden_state
+        )
+    cloned = hidden_state.detach().clone()
+    cursor_indices = torch.tensor(indices, dtype=torch.long, device=cloned.device)
+    cloned.index_fill_(1, cursor_indices, 0.0)
+    return cloned
+
+
+def _hidden_cursors_are_zero(hidden_state, indices) -> bool:
+    if hidden_state is None:
+        return True
+    if isinstance(hidden_state, dict):
+        return all(
+            _hidden_cursors_are_zero(value, indices)
+            for value in hidden_state.values()
+        )
+    if isinstance(hidden_state, tuple):
+        return all(
+            _hidden_cursors_are_zero(value, indices)
+            for value in hidden_state
+        )
+    return not bool(hidden_state[:, indices, :].count_nonzero())
 
 
 class StreamingRecurrentPolicy:
@@ -462,7 +516,7 @@ class StreamingRecurrentPolicy:
             .to(self._device)
         )
         with self._torch.inference_mode():
-            action, _, hidden_state = self.model.sample_action(
+            action, hidden_state = self.model.act(
                 sequence,
                 action_mask,
                 deterministic=True,
@@ -472,6 +526,204 @@ class StreamingRecurrentPolicy:
         self._last_timestamp = observation.timestamp
         self._steps += 1
         return action.squeeze(0).cpu().numpy()
+
+
+class BatchedStreamingRecurrentPolicy:
+    """One actor-only forward pass over independent recurrent agent cursors."""
+
+    def __init__(
+        self,
+        model,
+        sequence_length: int,
+        batch_size: int,
+        *,
+        enforce_chronology: bool = True,
+    ) -> None:
+        if sequence_length < 1:
+            raise ValueError("sequence_length must be positive")
+        if (
+            not isinstance(batch_size, int)
+            or isinstance(batch_size, bool)
+            or batch_size < 1
+        ):
+            raise ValueError("batch_size must be a positive integer")
+        if not isinstance(enforce_chronology, bool):
+            raise ValueError("enforce_chronology must be a boolean")
+        if model.training:
+            raise ValueError(
+                "batched streaming recurrent policy requires model.eval()"
+            )
+        self.model = model
+        self.sequence_length = sequence_length
+        self.batch_size = batch_size
+        self.enforce_chronology = enforce_chronology
+        self._torch = _torch()
+        self._device = next(model.parameters()).device
+        self._hidden_state = None
+        self._last_timestamps: list[str | None] = [None] * batch_size
+        self._steps = [0] * batch_size
+
+    @property
+    def steps(self) -> tuple[int, ...]:
+        return tuple(self._steps)
+
+    @property
+    def last_timestamps(self) -> tuple[str | None, ...]:
+        return tuple(self._last_timestamps)
+
+    def reset(self, indices: Sequence[int] | None = None) -> None:
+        """Reset all cursors or selected batch indices without model reload."""
+        if indices is None:
+            self._hidden_state = None
+            self._last_timestamps = [None] * self.batch_size
+            self._steps = [0] * self.batch_size
+            return
+        normalized = tuple(indices)
+        if (
+            any(
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or index < 0
+                or index >= self.batch_size
+                for index in normalized
+            )
+            or len(set(normalized)) != len(normalized)
+        ):
+            raise ValueError("reset indices must be unique valid batch indices")
+        if not normalized:
+            return
+        self._hidden_state = _zero_hidden_cursors(
+            self._hidden_state,
+            normalized,
+            self._torch,
+        )
+        for index in normalized:
+            self._last_timestamps[index] = None
+            self._steps[index] = 0
+        if not any(self._steps):
+            self._hidden_state = None
+
+    def snapshot(self) -> BatchedRecurrentPolicyState:
+        """Clone every agent cursor to CPU without sharing tensor storage."""
+        config = self.model.config
+        return BatchedRecurrentPolicyState(
+            schema_version=BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION,
+            batch_size=self.batch_size,
+            recurrent_kind=config.kind,
+            layers=config.layers,
+            hidden_size=config.hidden_size,
+            model_contract=_recurrent_model_contract(config),
+            steps=self.steps,
+            last_timestamps=self.last_timestamps,
+            hidden_state=_clone_hidden_state(self._hidden_state, device="cpu"),
+        )
+
+    def restore(self, state: BatchedRecurrentPolicyState) -> None:
+        """Restore compatible batched cursors without sharing tensor storage."""
+        if not isinstance(state, BatchedRecurrentPolicyState):
+            raise TypeError("state must be a BatchedRecurrentPolicyState")
+        config = self.model.config
+        if state.schema_version != BATCHED_RECURRENT_POLICY_STATE_SCHEMA_VERSION:
+            raise ValueError("batched recurrent policy state schema is incompatible")
+        if (
+            state.batch_size != self.batch_size
+            or state.recurrent_kind != config.kind
+            or state.layers != config.layers
+            or state.hidden_size != config.hidden_size
+            or state.model_contract != _recurrent_model_contract(config)
+        ):
+            raise ValueError(
+                "batched recurrent policy state model contract is incompatible"
+            )
+        if (
+            len(state.steps) != self.batch_size
+            or len(state.last_timestamps) != self.batch_size
+        ):
+            raise ValueError("batched recurrent policy cursor count is incompatible")
+        for steps, timestamp in zip(
+            state.steps,
+            state.last_timestamps,
+            strict=True,
+        ):
+            if (
+                not isinstance(steps, int)
+                or isinstance(steps, bool)
+                or steps < 0
+            ):
+                raise ValueError("batched recurrent policy steps must be non-negative")
+            if (steps == 0) != (timestamp is None):
+                raise ValueError(
+                    "batched recurrent policy timestamps must match step counts"
+                )
+            if steps and (not isinstance(timestamp, str) or not timestamp):
+                raise ValueError(
+                    "batched recurrent policy timestamps must be non-empty"
+                )
+        active = [index for index, steps in enumerate(state.steps) if steps]
+        inactive = [index for index, steps in enumerate(state.steps) if not steps]
+        if active:
+            _validate_hidden_state(
+                state.hidden_state,
+                config,
+                self._torch,
+                batch_size=self.batch_size,
+            )
+            if not _hidden_cursors_are_zero(state.hidden_state, inactive):
+                raise ValueError(
+                    "reset batched recurrent policy cursors must have zero state"
+                )
+        elif state.hidden_state is not None:
+            raise ValueError("unused batched recurrent policy state cannot have hidden state")
+        self._hidden_state = _clone_hidden_state(
+            state.hidden_state,
+            device=self._device,
+        )
+        self._last_timestamps = list(state.last_timestamps)
+        self._steps = list(state.steps)
+
+    def fork(self):
+        """Clone all cursors over the same immutable actor model."""
+        policy = type(self)(
+            self.model,
+            self.sequence_length,
+            self.batch_size,
+            enforce_chronology=self.enforce_chronology,
+        )
+        policy.restore(self.snapshot())
+        return policy
+
+    def __call__(self, observations: Sequence[Any]):
+        if self.model.training:
+            raise RuntimeError(
+                "batched streaming recurrent policy model entered training mode"
+            )
+        observations = tuple(observations)
+        if len(observations) != self.batch_size:
+            raise ValueError("observation batch does not match batch_size")
+        vectors = [observation_vector(item) for item in observations]
+        if any(vector.size != self.model.config.input_size for vector in vectors):
+            raise ValueError("observation feature layout does not match the model")
+        for index, observation in enumerate(observations):
+            previous = self._last_timestamps[index]
+            if self.enforce_chronology and previous is not None:
+                _elapsed_seconds(previous, observation.timestamp)
+        sequence = self._torch.from_numpy(np.stack(vectors)).unsqueeze(1).to(
+            self._device
+        )
+        action_mask = self._torch.from_numpy(np.stack([
+            observation.action_mask for observation in observations
+        ])).to(self._device)
+        with self._torch.inference_mode():
+            actions, hidden_state = self.model.act(
+                sequence,
+                action_mask,
+                deterministic=True,
+                hidden_state=self._hidden_state,
+            )
+        self._hidden_state = _detach_hidden(hidden_state)
+        self._last_timestamps = [item.timestamp for item in observations]
+        self._steps = [steps + 1 for steps in self._steps]
+        return actions.cpu().numpy()
 
 
 def recurrent_policy(
@@ -493,6 +745,22 @@ def recurrent_policy(
     )
 
 
+def batched_recurrent_policy(
+    model,
+    sequence_length: int,
+    batch_size: int,
+    *,
+    enforce_chronology: bool = True,
+) -> BatchedStreamingRecurrentPolicy:
+    """Create synchronized independent cursors evaluated in one actor pass."""
+    return BatchedStreamingRecurrentPolicy(
+        model,
+        sequence_length,
+        batch_size,
+        enforce_chronology=enforce_chronology,
+    )
+
+
 def benchmark_recurrent_inference(
     model,
     observation,
@@ -510,17 +778,17 @@ def benchmark_recurrent_inference(
     device = next(model.parameters()).device
     was_training = model.training
     model.eval()
-    policy = recurrent_policy(
-        model,
-        sequence_length,
-        enforce_chronology=False,
-    )
 
     def synchronize() -> None:
         if device.type == "cuda":
             torch.cuda.synchronize(device)
 
     try:
+        policy = recurrent_policy(
+            model,
+            sequence_length,
+            enforce_chronology=False,
+        )
         for _ in range(warmup_iterations):
             policy(observation)
         synchronize()
@@ -536,8 +804,9 @@ def benchmark_recurrent_inference(
     ordered = sorted(durations)
     p95_index = math.ceil(0.95 * len(ordered)) - 1
     return {
-        "schema_version": "research-demo.inference-latency.v1",
-        "scope": "streaming_batch_1_training_observation",
+        "schema_version": "research-demo.inference-latency.v2",
+        "scope": "actor_only_streaming_batch_1_training_observation",
+        "evaluated_heads": ["policy"],
         "device": str(device),
         "torch_version": str(torch.__version__),
         "torch_threads": torch.get_num_threads(),
@@ -549,6 +818,75 @@ def benchmark_recurrent_inference(
         ) / 2.0,
         "p95_microseconds": ordered[p95_index],
         "mean_microseconds": sum(ordered) / len(ordered),
+    }
+
+
+def benchmark_batched_recurrent_inference(
+    model,
+    observation,
+    sequence_length: int,
+    *,
+    batch_size: int = 16,
+    warmup_iterations: int = 10,
+    measured_iterations: int = 100,
+) -> dict[str, Any]:
+    """Measure synchronized actor-only inference for independent cursors."""
+    if warmup_iterations < 0:
+        raise ValueError("warmup_iterations cannot be negative")
+    if measured_iterations < 1:
+        raise ValueError("measured_iterations must be positive")
+    torch = _torch()
+    device = next(model.parameters()).device
+    was_training = model.training
+    model.eval()
+
+    def synchronize() -> None:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    try:
+        policy = batched_recurrent_policy(
+            model,
+            sequence_length,
+            batch_size,
+            enforce_chronology=False,
+        )
+        observations = (observation,) * batch_size
+        for _ in range(warmup_iterations):
+            policy(observations)
+        synchronize()
+        durations = []
+        for _ in range(measured_iterations):
+            started = time.perf_counter_ns()
+            policy(observations)
+            synchronize()
+            durations.append((time.perf_counter_ns() - started) / 1_000.0)
+    finally:
+        model.train(was_training)
+
+    ordered = sorted(durations)
+    p95_index = math.ceil(0.95 * len(ordered)) - 1
+    median_batch = (
+        ordered[(len(ordered) - 1) // 2]
+        + ordered[len(ordered) // 2]
+    ) / 2.0
+    mean_batch = sum(ordered) / len(ordered)
+    return {
+        "schema_version": "research-demo.batched-inference-latency.v1",
+        "scope": "actor_only_synchronized_agent_cursors",
+        "evaluated_heads": ["policy"],
+        "device": str(device),
+        "torch_version": str(torch.__version__),
+        "torch_threads": torch.get_num_threads(),
+        "batch_size": batch_size,
+        "warmup_iterations": warmup_iterations,
+        "measured_iterations": measured_iterations,
+        "median_batch_microseconds": median_batch,
+        "p95_batch_microseconds": ordered[p95_index],
+        "mean_batch_microseconds": mean_batch,
+        "median_per_agent_microseconds": median_batch / batch_size,
+        "mean_per_agent_microseconds": mean_batch / batch_size,
+        "median_decisions_per_second": batch_size * 1_000_000 / median_batch,
     }
 
 

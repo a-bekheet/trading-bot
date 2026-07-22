@@ -264,6 +264,22 @@ state:
   a recurrent state.
 - Keep `reset()` allocation-free. Reusing a policy cursor at a valid episode
   boundary is preferred to rebuilding or reloading the model.
+- Use `BatchedStreamingRecurrentPolicy` only when every fixed batch member can
+  provide one observation per synchronized actor pass. It is a vectorized
+  policy surface, not an asynchronous scheduler.
+- Before reusing a batch column for a new episode or ticker, call
+  `reset([index])`. Partial reset must zero only that hidden-state column and
+  leave every other cursor unchanged. A batched snapshot with a reset cursor
+  must contain an exactly zero state for that column.
+- Validate every observation and timestamp before batched inference. One bad
+  cursor must fail the whole call without partially advancing any hidden state.
+- Deployment policies use the actor-only `model.act(...)` path. It must remain
+  action-equivalent to deterministic full actor-critic inference and must not
+  execute value or auxiliary heads. Training rollouts still require
+  `sample_action(...)` because GAE and the value loss need critic estimates.
+- Walk-forward latency gates measure actor-only batch-one deployment. Batched
+  throughput is separate operational evidence and must never replace the
+  batch-one gate unless the intended deployment itself has a fixed batch.
 
 An environment manifest hashes only its selected ticker CSV. Do not broaden the
 fingerprint to unrelated ticker files: doing so adds startup I/O and invalidates
@@ -636,9 +652,11 @@ recurrent config, exact parameter count, and budget headroom, and verify the
 trained model matches that count before selection.
 
 Benchmark each candidate's streaming batch-one inference on a training-range
-observation after training. Record median, p95, and mean latency together with
-device, PyTorch version, thread count, warm-up iterations, and measured
-iterations. Restore the model's prior train/eval mode afterward. Timing is
+observation after training using the actor-only deployment path. Do not execute
+the critic or auxiliary head inside this measurement. Record median, p95, and
+mean latency together with device, PyTorch version, thread count, warm-up
+iterations, measured iterations, and evaluated heads. Restore the model's prior
+train/eval mode after success or failure. Timing is
 machine-specific and must never outrank validation evidence. It is the first
 deterministic tie-break only when robust validation scores are exactly equal, so
 a smaller but slower candidate does not win on parameter count. An explicit predeclared median
