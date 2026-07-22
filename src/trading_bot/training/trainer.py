@@ -29,7 +29,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v44"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v45"
 CRITIC_BALANCE_DIAGNOSTIC_SCHEMA_VERSION = (
     "research-demo.critic-balance-diagnostic.v1"
 )

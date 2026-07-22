@@ -238,7 +238,7 @@ per-slot cost.
 Chronological windows are available through `training.sequence`.
 
 Before entering a policy, production-layout observations use the versioned
-`dimensionless.v17` transform. Prices, strikes, and average entry price are
+`dimensionless.v18` transform. Prices, strikes, and average entry price are
 divided by spot, contract Gamma represents a 10% spot move, Greek exposures are
 scaled by spot and NAV, share positions and covered-share reserves are scaled
 by their NAV weights, and cash collateral is divided by NAV. Portfolio values
@@ -621,6 +621,32 @@ streaming inference medians were 124.81 and 120.27 microseconds, and the selecte
 held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
+
+v0.62 adds a causal market-session boundary from Yahoo's option-chain
+[`underlying.marketState`](https://github.com/ranaroussi/yfinance/blob/main/yfinance/ticker.py).
+The collector normalizes and persists the provider
+state, treats state transitions as material snapshots, and atomically adds the
+column to legacy per-ticker CSVs. It does not guess exchange state from a clock,
+timezone, weekday, or holiday calendar.
+
+The policy market vector adds `regularMarketSession` and
+`marketStateCoverage`. An explicit `PRE`, `POST`, `CLOSED`, or other recognized
+non-regular state masks all option and underlying trades while retaining hold;
+the Streamlit sandbox applies the same rule. Legacy rows become `UNKNOWN` with
+zero coverage and remain research-demo tradeable for compatibility, with a
+visible warning. This fallback cannot support paper-alpha claims. The two
+policy inputs have a named `market_session` ablation, but the independent
+execution mask remains active during that ablation. Environment, feature,
+checkpoint, single-ticker walk-forward, and universe walk-forward schemas
+advance to v23, `dimensionless.v18`, v45, v49, and v33.
+
+The post-change live cycle migrated all 50 ticker CSVs, appended 20,538 rows,
+reported `PRE` for every latest snapshot, and completed with zero failures. A
+matched seven-repeat, 10,000-call AAPL policy-vector benchmark measured 33.61
+microseconds median for v0.62 versus 33.77 for committed v0.61 (1,393 versus
+1,391 inputs). The two scalar features therefore added no measurable
+preprocessing regression in this smoke; these timings are machine-local and
+say nothing about strategy return.
 
 v0.61 adds training-only critic-balance diagnostics before introducing another
 normalization method. Every PPO and REINFORCE episode now records reward RMS,

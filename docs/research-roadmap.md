@@ -48,7 +48,7 @@ Every candidate must eventually pass:
 | [ATM S&P 500 options hedging with DRL (2025)](https://arxiv.org/abs/2510.09247) | Moneyness, maturity, realized volatility, current hedge state, walk-forward testing, and transaction-cost stress are central. | Causal realized-volatility horizons, walk-forward evaluation, and explicit per-contract position quantity/cost/P&L state implement this lesson. |
 | [Deep Hedging with Market Impact (2024)](https://arxiv.org/abs/2402.13326) | Under costs and price impact, learned hedges can damp or delay rebalancing instead of following a frictionless target continuously. | Explicit position-age and last-trade-age clocks make holding and rebalance cadence observable and removable through `position_lifecycle`. Current top-of-book data has no depth or impact model, so do not infer optimal no-trade regions yet. |
 | [Excluding the Irrelevant: Focusing RL through Continuous Action Masking (2024)](https://arxiv.org/abs/2406.03704) | State-dependent relevant-action sets can improve PPO learning efficiency and predictability in constrained control tasks, but the paper studies continuous control rather than trading. | Keep exact discrete feasibility masks and expose only compact per-side feasible-bucket fractions to recurrent state and value estimation. Require the `action_feasibility` ablation before attributing sample-efficiency or return lift. |
-| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, include realistic transaction costs and limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v17`, executable net-liquidation wealth, compact volatility and action-capacity state, stable contract/position identity and lifecycle, Greek budgets, collateral, cost stress, and paired moving-block intervals implement the state/risk lesson. |
+| [Deep Hedging with Reinforcement Learning (2025)](https://arxiv.org/abs/2512.12420) | Normalize exposures, include realistic transaction costs and limits, and quantify uncertainty; attractive point estimates often lose significance. | `dimensionless.v18`, executable net-liquidation wealth, compact volatility, session, and action-capacity state, stable contract/position identity and lifecycle, Greek budgets, collateral, cost stress, and paired moving-block intervals implement the state/risk lesson. |
 | [Deep Hedging of Derivatives Using Reinforcement Learning (2021)](https://arxiv.org/abs/2103.16409) | Accounting P&L and cash-flow objectives differ under transaction costs, so the valuation convention is part of the learning problem. | Default every training, selection, baseline, and held-out report to executable net liquidation value. Persist legacy midpoint mode only for declared reproduction, and never compare runs whose valuation contracts differ. |
 | [How Many Random Seeds? Statistical Power Analysis in Deep Reinforcement Learning Experiments (2018)](https://arxiv.org/abs/1806.08295) | Random seeds quantify stochastic training variability and determine statistical power; a seed label does not make an otherwise identical deterministic trajectory independent. | Require one evaluation seed for each deterministic policy/path pair. Add multiple independently trained policies only as a predeclared training-seed experiment, and retain path-level dependence in inference. |
 | [Deep Reinforcement Learning at the Edge of the Statistical Precipice (2021)](https://arxiv.org/abs/2108.13264) | Point estimates from a few expensive training runs hide substantial uncertainty; robust aggregate metrics and intervals are preferable to best-run reporting. | Train predeclared seed replicates, rank architectures with mean/worst/dispersion validation aggregation, and deploy the median-representative checkpoint rather than the best seed. Add intervals only when the run count supports them. |
@@ -294,11 +294,14 @@ inference on both flat and graph-set layouts, so it remains a tournament
 candidate subject to the same latency ceiling rather than replacing GRU or the
 concatenated hybrid.
 
-The `dimensionless.v17` policy transform retains batched signed contract
+The `dimensionless.v18` policy transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
-assembles the float32 vector directly. Those transform mechanics previously
+assembles the float32 vector directly. v18 adds two scalar provider-session
+features without changing the 41-field contract state. Explicit non-regular
+states independently disable execution; the named `market_session` ablation
+tests observability, not that safety rule. Those transform mechanics previously
 reduced local preprocessing median by 37% and cut matched batch-one medians
-across flat and graph-set hybrid/mixture models. v17 deliberately advances the
+across flat and graph-set hybrid/mixture models. v17 previously advanced the
 feature and checkpoint schemas for action-capacity state; the optimized
 mechanics remain latency headroom, not evidence that any model earns more return.
 
@@ -418,7 +421,7 @@ retaining the reweighting. This is a regime-coverage hypothesis, not alpha.
 - Retain the sparse stable-slot and empty-option-portfolio fast paths. Padding
   alone must not trigger repeated ranking, while newly visible contracts and
   every held-option settlement must preserve the full deterministic path.
-- Keep the 41-field contract state under `dimensionless.v17` as the current
+- Keep the 41-field contract state under `dimensionless.v18` as the current
   model: current per-slot quantity, average entry price, and executable
   unrealized return plus opening and last-adjustment clocks prevent portfolio
   and lifecycle aliasing, while matched bid/ask and
@@ -427,6 +430,9 @@ retaining the reweighting. This is a regime-coverage hypothesis, not alpha.
   `position_state`, `position_lifecycle`, `contract_dynamics`, and
   `static_arbitrage` removal candidates;
   volatility-regime state still belongs once in the market vector.
+- Retain explicit provider market-session state and coverage through the named
+  `market_session` ablation. Never infer exchange state from capture timestamps,
+  and never let an ablation disable the independent non-regular execution mask.
 - Retain compact option and underlying buy/sell feasibility fractions only if
   `action_feasibility` does not win validation. The exact mask remains the sole
   execution authority; do not expand the recurrent input with every mask bit

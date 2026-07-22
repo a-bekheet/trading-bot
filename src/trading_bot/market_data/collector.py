@@ -17,7 +17,7 @@ from typing import Iterator
 import pandas as pd
 
 from trading_bot.analytics.greeks import black_scholes_greeks, years_to_expiration
-from trading_bot.market_data.option_chain import fetch_option_chains
+from trading_bot.market_data.option_chain import fetch_option_chain_snapshot
 from trading_bot.market_data.rates import RISK_FREE_RATE_SOURCE, fetch_risk_free_rate
 from trading_bot.market_data.snapshot_identity import (
     material_snapshot_fingerprint,
@@ -30,12 +30,12 @@ CSV_COLUMNS = (
     "collectedAt", "symbol", "expiration", "optionType", "contractSymbol",
     "lastTradeDate", "strike", "lastPrice", "bid", "ask", "change",
     "percentChange", "volume", "openInterest", "impliedVolatility", "inTheMoney",
-    "contractSize", "currency", "underlyingPrice", "riskFreeRate",
+    "contractSize", "currency", "underlyingPrice", "marketState", "riskFreeRate",
     "riskFreeRateSource", "dividendYield", "timeToExpiryYears", "delta", "gamma",
     "theta", "vega", "greekModel",
 )
 COLLECTOR_STATUS_SCHEMA_VERSION = "collector.status.v1"
-SNAPSHOT_STATE_SCHEMA_VERSION = "collector.snapshot-state.v4"
+SNAPSHOT_STATE_SCHEMA_VERSION = "collector.snapshot-state.v5"
 COLLECTOR_STATUS_FILENAME = "_collector_status.json"
 
 
@@ -209,7 +209,10 @@ def save_snapshot(
     expiration_count: int | None = 3,
 ) -> tuple[Path, int]:
     """Append one materially changed surface; return zero rows if unchanged."""
-    chains, spot, dividend_yield = fetch_option_chains(symbol, expiration_count)
+    market_snapshot = fetch_option_chain_snapshot(symbol, expiration_count)
+    chains = market_snapshot.chains
+    spot = market_snapshot.spot
+    dividend_yield = market_snapshot.dividend_yield
     captured = collected_at or datetime.now(timezone.utc)
     frames = []
     for expiration, chain in chains:
@@ -225,6 +228,7 @@ def save_snapshot(
             "symbol": symbol,
             "expiration": expiration,
             "underlyingPrice": spot,
+            "marketState": market_snapshot.market_state,
             "riskFreeRate": risk_free_rate,
             "riskFreeRateSource": RISK_FREE_RATE_SOURCE,
             "dividendYield": dividend_yield,

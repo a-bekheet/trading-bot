@@ -46,6 +46,10 @@ FEATURE_ABLATION_GROUPS = {
         "snapshotGapSeconds",
         "snapshotGapCoverage",
     ),
+    "market_session": (
+        "regularMarketSession",
+        "marketStateCoverage",
+    ),
     "price_trend": (
         "underlyingLogReturn4",
         "underlyingLogReturn16",

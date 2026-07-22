@@ -83,6 +83,49 @@ def surface_snapshot(
 
 
 class FeatureSequenceTests(TestCase):
+    def test_market_state_features_are_explicit_and_causal(self):
+        regular = surface_snapshot(
+            "2026-07-21T14:00:00Z",
+            (0.2, 0.21, 0.22),
+            front_call_wing=0.23,
+            front_put_wing=0.25,
+        )
+        regular["marketState"] = "REGULAR"
+        closed = regular.copy()
+        closed["marketState"] = "CLOSED"
+        unknown = regular.drop(columns="marketState")
+
+        regular_features = engineer_snapshot(regular)
+        closed_features = engineer_snapshot(closed)
+        unknown_features = engineer_snapshot(unknown)
+
+        self.assertEqual(
+            tuple(regular_features.iloc[0][[
+                "regularMarketSession", "marketStateCoverage",
+            ]]),
+            (1.0, 1.0),
+        )
+        self.assertEqual(
+            tuple(closed_features.iloc[0][[
+                "regularMarketSession", "marketStateCoverage",
+            ]]),
+            (0.0, 1.0),
+        )
+        self.assertEqual(
+            tuple(unknown_features.iloc[0][[
+                "regularMarketSession", "marketStateCoverage",
+            ]]),
+            (0.0, 0.0),
+        )
+
+    def test_market_session_ablation_maps_only_the_two_market_inputs(self):
+        indices = feature_ablation_indices(("market_session",), 2)
+
+        self.assertEqual(indices, (
+            MARKET_FEATURES.index("regularMarketSession"),
+            MARKET_FEATURES.index("marketStateCoverage"),
+        ))
+
     def test_dataset_drops_consecutive_stale_quote_surfaces(self):
         base = {
             "contractSymbol": "AAPL-C1",
@@ -863,9 +906,12 @@ class FeatureSequenceTests(TestCase):
             }
             for name, value in values.items():
                 contracts[0, CONTRACT_FEATURES.index(name)] = value
+            market = np.zeros(len(MARKET_FEATURES), dtype=float)
+            market[MARKET_FEATURES.index("underlyingPrice")] = 100 * scale
+            market[MARKET_FEATURES.index("riskFreeRate")] = 0.04
             return Observation(
                 "now",
-                np.array([100 * scale, 0.04]),
+                market,
                 contracts,
                 np.array([
                     80_000 * scale,
@@ -888,7 +934,7 @@ class FeatureSequenceTests(TestCase):
 
         first = observation_vector(make_observation(1.0))
         second = observation_vector(make_observation(2.0))
-        contract_end = 2 + len(CONTRACT_FEATURES)
+        contract_end = len(MARKET_FEATURES) + len(CONTRACT_FEATURES)
 
         np.testing.assert_allclose(first[:contract_end], second[:contract_end])
         np.testing.assert_allclose(
@@ -900,36 +946,36 @@ class FeatureSequenceTests(TestCase):
             (0.5, 0.75),
         )
         self.assertEqual(
-            first[2 + CONTRACT_FEATURES.index("buyFeasibleFraction")],
+            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("buyFeasibleFraction")],
             0.25,
         )
         self.assertAlmostEqual(
-            first[2 + CONTRACT_FEATURES.index("positionQuantity")],
+            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("positionQuantity")],
             np.log1p(2),
         )
         self.assertAlmostEqual(
-            first[2 + CONTRACT_FEATURES.index("midPriceLogReturn")],
+            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("midPriceLogReturn")],
             np.log1p(2),
         )
         self.assertAlmostEqual(
-            first[2 + CONTRACT_FEATURES.index("spreadPctChange")],
+            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("spreadPctChange")],
             -np.log1p(0.3),
         )
         self.assertAlmostEqual(
-            first[2 + CONTRACT_FEATURES.index("ivChange")],
+            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("ivChange")],
             np.log1p(0.4),
         )
         self.assertAlmostEqual(
-            first[2 + CONTRACT_FEATURES.index("positionAgeSteps")],
+            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("positionAgeSteps")],
             np.log(10) / 10,
         )
         self.assertAlmostEqual(
-            first[2 + CONTRACT_FEATURES.index("positionLastTradeAgeSteps")],
+            first[len(MARKET_FEATURES) + CONTRACT_FEATURES.index("positionLastTradeAgeSteps")],
             np.log(100) / 10,
         )
         self.assertLessEqual(float(np.abs(first).max()), 10.0)
         self.assertTrue(np.isfinite(first).all())
-        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v17")
+        self.assertEqual(FEATURE_VECTOR_SCHEMA_VERSION, "dimensionless.v18")
         self.assertNotIn("volume", CONTRACT_FEATURES)
         self.assertNotIn("openInterest", CONTRACT_FEATURES)
         self.assertIn("volumeLog", CONTRACT_FEATURES)

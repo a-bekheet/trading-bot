@@ -163,6 +163,43 @@ def drawdown_dataset() -> SnapshotDataset:
 
 
 class OptionsEnvTests(TestCase):
+    def test_explicit_nonregular_session_masks_every_trade(self):
+        source = demo_dataset()
+        snapshots = []
+        for snapshot in source.snapshots:
+            frame = snapshot.frame.copy()
+            frame["marketState"] = "CLOSED"
+            snapshots.append(Snapshot(snapshot.timestamp, frame))
+        env = OptionsEnv(
+            SnapshotDataset(tuple(snapshots), source.symbol),
+            slot_count=2,
+        )
+
+        observation, info = env.reset()
+
+        self.assertTrue(observation.action_mask[:, 0].all())
+        self.assertFalse(observation.action_mask[:, 1:].any())
+        self.assertEqual(info["market_session"], {
+            "provider_state": "CLOSED",
+            "regular": False,
+            "coverage": 1.0,
+            "trading_enabled": False,
+            "fallback": None,
+        })
+
+    def test_legacy_unknown_session_is_visible_and_remains_tradeable(self):
+        env = OptionsEnv(demo_dataset(), slot_count=2)
+
+        observation, info = env.reset()
+
+        self.assertTrue(observation.action_mask[:, 1:].any())
+        self.assertEqual(info["market_session"]["provider_state"], "UNKNOWN")
+        self.assertTrue(info["market_session"]["trading_enabled"])
+        self.assertEqual(
+            info["market_session"]["fallback"],
+            "legacy_unknown_permits_research_demo_fills",
+        )
+
     def test_path_causal_reward_penalizes_downside_and_new_max_drawdown(self):
         env = OptionsEnv(
             drawdown_dataset(),

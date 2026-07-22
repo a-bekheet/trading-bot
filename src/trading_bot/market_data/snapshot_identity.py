@@ -30,6 +30,7 @@ MATERIAL_SNAPSHOT_COLUMNS = (
     "contractSize",
     "currency",
     "underlyingPrice",
+    "marketState",
     "riskFreeRate",
     "riskFreeRateSource",
     "dividendYield",

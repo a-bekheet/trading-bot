@@ -8,6 +8,8 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
+from trading_bot.market_data.market_state import market_state_features
+
 
 REALIZED_VOL_WINDOWS = (4, 16)
 VOLATILITY_REGIME_WINDOW = 16
@@ -17,6 +19,8 @@ FRONT_ATM_LOG_MONEYNESS_TOLERANCE = 0.10
 FRONT_WING_DELTA_TOLERANCE = 0.15
 MARKET_ENGINEERED_FEATURES = (
     "underlyingReturn",
+    "regularMarketSession",
+    "marketStateCoverage",
     "snapshotGapSeconds",
     "snapshotGapCoverage",
     "realizedVol4",
@@ -804,6 +808,12 @@ def engineer_snapshot(
         previous_spot = float(previous["underlyingPrice"].iloc[0])
         current_spot = float(spot.iloc[0]) if np.isfinite(spot.iloc[0]) else previous_spot
         result["underlyingReturn"] = current_spot / previous_spot - 1 if previous_spot else 0.0
+    market_state = result["marketState"].iloc[0] if "marketState" in result else None
+    regular_market_session, market_state_coverage = market_state_features(
+        market_state
+    )
+    result["regularMarketSession"] = regular_market_session
+    result["marketStateCoverage"] = market_state_coverage
     _contract_dynamics_features(result, previous)
     _executable_arbitrage_features(result)
     for name, value in snapshot_gap_features(result, previous).items():

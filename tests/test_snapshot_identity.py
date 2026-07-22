@@ -25,6 +25,7 @@ class SnapshotIdentityTests(TestCase):
                 "ask": 0.04,
                 "impliedVolatility": 0.9531254687499999,
                 "underlyingPrice": 327.74,
+                "marketState": "REGULAR",
                 "riskFreeRate": 0.037300000190734865,
                 "greekModel": "black-scholes-merton",
                 "timeToExpiryYears": 0.01,
@@ -43,6 +44,7 @@ class SnapshotIdentityTests(TestCase):
                 "ask": 0.22,
                 "impliedVolatility": 0.201234567890625,
                 "underlyingPrice": 327.74,
+                "marketState": "REGULAR",
                 "riskFreeRate": 0.037300000190734865,
                 "greekModel": "black-scholes-merton",
                 "timeToExpiryYears": 0.001,
@@ -73,7 +75,10 @@ class SnapshotIdentityTests(TestCase):
         recomputed["theta"] -= 0.01
         changed_quote = recomputed.copy()
         changed_quote.loc[0, "bid"] += 0.01
+        changed_session = recomputed.copy()
+        changed_session["marketState"] = "CLOSED"
 
         original = material_snapshot_fingerprint(frame)
         self.assertEqual(original, material_snapshot_fingerprint(recomputed))
         self.assertNotEqual(original, material_snapshot_fingerprint(changed_quote))
+        self.assertNotEqual(original, material_snapshot_fingerprint(changed_session))

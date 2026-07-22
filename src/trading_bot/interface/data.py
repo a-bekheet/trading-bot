@@ -4,6 +4,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_bot.market_data.market_state import (
+    market_state_features,
+    normalize_market_state,
+)
+
 
 def available_tickers(data_dir: Path) -> list[str]:
     return sorted(path.stem for path in data_dir.glob("*.csv"))
@@ -14,3 +19,20 @@ def load_latest_snapshot(data_dir: Path, symbol: str) -> pd.DataFrame:
     if data.empty:
         return data
     return data[data["collectedAt"] == data["collectedAt"].iloc[-1]].copy()
+
+
+def market_session_status(snapshot: pd.DataFrame) -> dict[str, object]:
+    """Describe whether a snapshot can support simulated execution."""
+    value = (
+        snapshot["marketState"].iloc[0]
+        if not snapshot.empty and "marketState" in snapshot
+        else None
+    )
+    state = normalize_market_state(value)
+    regular, coverage = market_state_features(value)
+    return {
+        "provider_state": state,
+        "regular": bool(regular),
+        "coverage": coverage,
+        "trading_enabled": coverage < 0.5 or regular >= 0.5,
+    }

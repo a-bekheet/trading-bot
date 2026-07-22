@@ -10,6 +10,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from trading_bot.market_data.market_state import (
+    market_state_features,
+    normalize_market_state,
+)
 from trading_bot.training.dataset import SnapshotDataset
 from trading_bot.training.features import (
     ENGINEERED_FEATURES,
@@ -764,6 +768,22 @@ class OptionsEnv:
         if frame_rows is None:
             frame_rows = _FrameRows(frame)
         nav, exposures = self._portfolio_metrics(frame, frame_rows)
+        first = frame_rows.at(0)
+        raw_regular_session, raw_state_coverage = market_state_features(
+            first.get("marketState")
+        )
+        regular_market_session = float(
+            first.get("regularMarketSession", raw_regular_session) or 0.0
+        )
+        market_state_coverage = float(
+            first.get("marketStateCoverage", raw_state_coverage) or 0.0
+        )
+        if raw_state_coverage >= 0.5:
+            regular_market_session = raw_regular_session
+            market_state_coverage = raw_state_coverage
+        session_tradeable = (
+            market_state_coverage < 0.5 or regular_market_session >= 0.5
+        )
         action_mask = np.zeros(self.action_shape, dtype=bool)
         for index, contract in enumerate(slots):
             if contract is None:
@@ -771,6 +791,8 @@ class OptionsEnv:
             if not valid[index]:
                 continue
             action_mask[index, 0] = True
+            if not session_tradeable:
+                continue
             ask = self._execution_price(contract, "buy")
             bid = self._execution_price(contract, "sell")
             contract_greeks = self._contract_greeks(contract)
@@ -858,7 +880,8 @@ class OptionsEnv:
                     )
                 )
             action_mask[underlying_slot, encoded] = (
-                price > 0
+                session_tradeable
+                and price > 0
                 and fill_allowed
                 and self._risk_allowed(exposures, greek_change)
             )
@@ -876,7 +899,6 @@ class OptionsEnv:
             if negative_underlying.any()
             else 0.0
         )
-        first = frame_rows.at(0)
         market = np.array(
             [float(first.get(name, 0.0) or 0.0) for name in MARKET_FEATURES],
             dtype=np.float64,
@@ -924,6 +946,19 @@ class OptionsEnv:
             "allow_collateralized_option_shorts": (
                 self.allow_collateralized_option_shorts
             ),
+            "market_session": {
+                "provider_state": normalize_market_state(
+                    first.get("marketState")
+                ),
+                "regular": bool(regular_market_session >= 0.5),
+                "coverage": market_state_coverage,
+                "trading_enabled": session_tradeable,
+                "fallback": (
+                    "legacy_unknown_permits_research_demo_fills"
+                    if market_state_coverage < 0.5
+                    else None
+                ),
+            },
             "collateral": {
                 "reserved_cash": reserved_cash,
                 "reserved_covered_shares": reserved_shares,

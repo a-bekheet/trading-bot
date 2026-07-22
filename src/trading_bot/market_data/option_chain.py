@@ -2,8 +2,21 @@
 
 import argparse
 import math
+from dataclasses import dataclass
 
 import yfinance as yf
+
+from trading_bot.market_data.market_state import normalize_market_state
+
+
+@dataclass(frozen=True, slots=True)
+class OptionChainSnapshot:
+    """Shared point-in-time inputs for one multi-expiration surface."""
+
+    chains: tuple
+    spot: float
+    dividend_yield: float
+    market_state: str
 
 
 def _number(value, default: float = 0.0) -> float:
@@ -14,8 +27,11 @@ def _number(value, default: float = 0.0) -> float:
         return default
 
 
-def fetch_option_chains(symbol: str, expiration_count: int | None = 1):
-    """Return selected chains plus shared spot and dividend inputs.
+def fetch_option_chain_snapshot(
+    symbol: str,
+    expiration_count: int | None = 1,
+) -> OptionChainSnapshot:
+    """Return selected chains and shared point-in-time market inputs.
 
     ``expiration_count=None`` selects every listed expiration. The same ticker
     object and shared market inputs are reused across all selected chains.
@@ -43,7 +59,18 @@ def fetch_option_chains(symbol: str, expiration_count: int | None = 1):
 
     # Yahoo's option payload expresses dividendYield in percentage units.
     dividend_yield = _number(underlying.get("dividendYield")) / 100
-    return chains, spot, dividend_yield
+    return OptionChainSnapshot(
+        chains=chains,
+        spot=spot,
+        dividend_yield=dividend_yield,
+        market_state=normalize_market_state(underlying.get("marketState")),
+    )
+
+
+def fetch_option_chains(symbol: str, expiration_count: int | None = 1):
+    """Backward-compatible tuple helper for callers that do not need state."""
+    snapshot = fetch_option_chain_snapshot(symbol, expiration_count)
+    return snapshot.chains, snapshot.spot, snapshot.dividend_yield
 
 
 def fetch_option_chain(symbol: str):

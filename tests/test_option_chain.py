@@ -2,7 +2,11 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
-from trading_bot.market_data.option_chain import fetch_option_chain, fetch_option_chains
+from trading_bot.market_data.option_chain import (
+    fetch_option_chain,
+    fetch_option_chain_snapshot,
+    fetch_option_chains,
+)
 
 
 class FakeTicker:
@@ -18,7 +22,11 @@ class FakeTicker:
         return SimpleNamespace(
             calls=f"calls-{expiration}",
             puts=f"puts-{expiration}",
-            underlying={"regularMarketPrice": 200, "dividendYield": 0.5},
+            underlying={
+                "regularMarketPrice": 200,
+                "dividendYield": 0.5,
+                "marketState": "REGULAR",
+            },
         )
 
 
@@ -44,6 +52,14 @@ class FetchOptionChainTests(TestCase):
         self.assertEqual(FakeTicker.requests, list(FakeTicker.options))
         self.assertEqual(spot, 200)
         self.assertEqual(dividend_yield, 0.005)
+
+    @patch("trading_bot.market_data.option_chain.yf.Ticker", FakeTicker)
+    def test_exposes_normalized_provider_market_state(self):
+        snapshot = fetch_option_chain_snapshot("AAPL", expiration_count=2)
+
+        self.assertEqual(snapshot.market_state, "REGULAR")
+        self.assertEqual(snapshot.spot, 200)
+        self.assertEqual(len(snapshot.chains), 2)
 
     def test_rejects_invalid_expiration_count_before_network_access(self):
         with self.assertRaisesRegex(ValueError, "expiration_count"):

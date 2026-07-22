@@ -52,7 +52,8 @@ Create those packages only when implementing their first real behavior.
 2. `market_data.rates` fetches `^IRX` once per cycle as a short-term risk-free
    proxy.
 3. `market_data.option_chain` retrieves a configurable number of expirations,
-   calls, puts, underlying price, and dividend yield. Collection defaults to
+   calls, puts, underlying price, dividend yield, and the provider's explicit
+   market-session state. Collection defaults to
    three expirations; one is the low-latency mode and zero in the CLI means all.
    Yahoo's option payload reports dividend yield in percentage units, so the
    adapter divides it by 100.
@@ -65,6 +66,8 @@ Create those packages only when implementing their first real behavior.
    continuous-process liveness. `market_data.service` manages the optional
    macOS LaunchAgent used for unattended restart-on-failure collection.
 7. `interface.app` displays the latest saved snapshot; it never fetches markets.
+   It disables paper orders when the provider explicitly reports a non-regular
+   session and warns when legacy data has no session-state coverage.
 8. `execution.paper_broker` stores fake cash, long positions, and fills in
    `data/paper_portfolio.db`; `execution.valuation` marks positions from CSVs.
 9. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
@@ -86,13 +89,18 @@ Do not let recomputation against unchanged stale quotes create a new market
 state. Identity must retain raw quote fields, contract membership, spot,
 dividend yield, and risk-free-rate inputs so any material change is persisted.
 The persisted Greek-model identifier is also material so a deliberate model
-version change can coexist with the older calculation.
+version change can coexist with the older calculation. Provider `marketState`
+is material: a regular-to-closed transition must be stored even when quotes do
+not move. Never infer this field from local clock time, weekdays, or a holiday
+calendar; absent and unrecognized values migrate to the explicit `UNKNOWN`
+fallback.
 The training loader must apply the same rule to consecutive legacy snapshots;
 after filtering, causal gaps are measured from the last materially distinct
 surface. Do not delete old CSV rows as part of this filter.
 
 - `collectedAt`, `symbol`, `expiration`, `optionType`
-- `underlyingPrice`, `riskFreeRate`, `riskFreeRateSource`, `dividendYield`
+- `underlyingPrice`, `marketState`, `riskFreeRate`, `riskFreeRateSource`,
+  `dividendYield`
 - `timeToExpiryYears`, `impliedVolatility`, `greekModel`
 - `delta`, `gamma`, `theta`, `vega`
 
@@ -180,6 +188,13 @@ small and stable:
 - Masks are generated from the pre-step state and include quote validity,
   fee-adjusted affordability, signed position transitions, collateral, and
   optional absolute Greek limits.
+- Explicit provider states other than `REGULAR` mask every option and
+  underlying trade while leaving hold available. Legacy `UNKNOWN` state has
+  zero `marketStateCoverage` and remains tradeable only to keep old research
+  demos loadable; results from that fallback are not paper-alpha evidence.
+  `regularMarketSession` and `marketStateCoverage` belong to the named
+  `market_session` ablation, but masking those policy inputs must never disable
+  the independent execution-safety mask.
 - Multiple orders in one action are revalidated sequentially so cash cannot go
   negative even when individual pre-step actions were affordable.
 - Execute the underlying leg first, then option slots in ascending order. Masks
@@ -287,7 +302,7 @@ otherwise reproducible experiments whenever the collector updates another
 symbol.
 
 `sequence.observation_vector` is the versioned policy boundary. Under
-`dimensionless.v17`, price-like fields are relative to spot, contract Gamma is
+`dimensionless.v18`, price-like fields are relative to spot, contract Gamma is
 the Delta change for a 10% spot move, portfolio and Greek exposures are relative
 to NAV/deployed capital, underlying shares and covered-share reserves are
 represented by NAV weight, cash collateral is NAV-scaled, DTE is expressed in

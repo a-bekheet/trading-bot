@@ -8,7 +8,11 @@ import streamlit as st
 
 from trading_bot.execution import PaperBroker, PaperTradeError
 from trading_bot.execution.valuation import mark_positions
-from trading_bot.interface.data import available_tickers, load_latest_snapshot
+from trading_bot.interface.data import (
+    available_tickers,
+    load_latest_snapshot,
+    market_session_status,
+)
 
 
 DATA_DIR = Path("data")
@@ -28,6 +32,7 @@ symbol = st.sidebar.selectbox("Ticker", tickers)
 option_type = st.sidebar.radio("Option type", ("call", "put"), horizontal=True)
 snapshot = load_latest_snapshot(DATA_DIR, symbol)
 filtered = snapshot[snapshot["optionType"] == option_type].sort_values("strike")
+session = market_session_status(snapshot)
 
 market_tab, portfolio_tab, history_tab = st.tabs(
     ("Market Data & Paper Order", "Paper Portfolio", "Trade History")
@@ -35,11 +40,12 @@ market_tab, portfolio_tab, history_tab = st.tabs(
 
 with market_tab:
     first = snapshot.iloc[0]
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Underlying", f"${first['underlyingPrice']:,.2f}")
     col2.metric("Expiration", first["expiration"])
     col3.metric("Risk-free rate", f"{first['riskFreeRate']:.3%}")
     col4.metric("Contracts", len(filtered))
+    col5.metric("Market session", session["provider_state"])
     st.caption(
         f"Collected at {first['collectedAt']} · Greeks: Black-Scholes-Merton"
     )
@@ -51,6 +57,16 @@ with market_tab:
     st.dataframe(filtered[table_columns], width="stretch", hide_index=True)
 
     st.subheader("Paper order")
+    if not session["trading_enabled"]:
+        st.warning(
+            "Paper orders are disabled because the provider marks this "
+            "snapshot as outside the regular market session."
+        )
+    elif not session["coverage"]:
+        st.warning(
+            "Market-session state is unavailable in this legacy snapshot; "
+            "research-demo orders remain enabled but are not execution evidence."
+        )
     contract_symbol = st.selectbox(
         "Contract",
         filtered["contractSymbol"].tolist(),
@@ -75,7 +91,11 @@ with market_tab:
     }
     if buy_col.button(
         f"Paper buy at ask ${buy_price:,.2f}",
-        disabled=not math.isfinite(buy_price) or buy_price <= 0,
+        disabled=(
+            not session["trading_enabled"]
+            or not math.isfinite(buy_price)
+            or buy_price <= 0
+        ),
         width="stretch",
     ):
         try:
@@ -88,7 +108,11 @@ with market_tab:
 
     if sell_col.button(
         f"Paper sell at bid ${sell_price:,.2f}",
-        disabled=not math.isfinite(sell_price) or sell_price <= 0,
+        disabled=(
+            not session["trading_enabled"]
+            or not math.isfinite(sell_price)
+            or sell_price <= 0
+        ),
         width="stretch",
     ):
         try:
