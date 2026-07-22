@@ -226,6 +226,20 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
         action_policies = sorted(set(heldout["Action policy"]))
         activations = sorted(set(heldout["Activation"]))
         sandbox_policies = sorted(set(heldout["Sandbox policy"]))
+        test_qualities = [
+            fold.get("test_data_quality", {})
+            for fold in run.get("folds", [])
+        ]
+        test_starts = sorted(
+            str(item["first_timestamp"])
+            for item in test_qualities
+            if item.get("first_timestamp")
+        )
+        test_ends = sorted(
+            str(item["last_timestamp"])
+            for item in test_qualities
+            if item.get("last_timestamp")
+        )
         promotion = promotion_assessment(run)
         records.append(
             {
@@ -267,6 +281,8 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
                 ),
                 "Fees": float(heldout["Fees"].sum()),
                 "Steps": int(heldout["Steps"].sum()),
+                "Test start": test_starts[0] if test_starts else "Unknown",
+                "Test end": test_ends[-1] if test_ends else "Unknown",
                 "Evidence": evidence_summary(run)["grade"],
                 "Excess vs no-op": promotion["mean_excess_vs_no_op"],
                 "Double-cost return": promotion["worst_double_cost_return"],

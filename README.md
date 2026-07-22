@@ -100,9 +100,12 @@ opposite-side message passing. Six matched sparse agents remove only the causal
 contract-level smile residual across flat/surface-GNN and GRU/LSTM/mixture
 families, for 15 candidates per ticker. Repeat
 `--symbol` to choose another set. The command keeps identical budgets and split
-rules across tickers, writes one walk-forward artifact per ticker plus
-`agent-arena.json`, and records a per-ticker failure without discarding
-completed runs. It trains each candidate with three deterministic seed
+rules across tickers and uses the latest possible chronological fold, assigning
+all earlier eligible history to training. Each invocation gets a timestamped
+directory under `data/agent_runs/recurrent-arena`, containing one walk-forward
+artifact per ticker plus `agent-arena.json`, so later runs cannot overwrite
+earlier evidence. A per-ticker failure does not discard completed runs. It
+trains each candidate with three deterministic seed
 replicates. Selection retains every policy within one standard error of the raw
 leader, with a one-basis-point materiality floor, then prefers the existing
 ablation, actor-latency, and complexity ordering. A separate validation-only
@@ -835,6 +838,28 @@ samples are engineering and hypothesis-ranking evidence, not fresh alpha.
 Environment, feature-vector, checkpoint, walk-forward, universe, and arena
 schemas advance to v28, `dimensionless.v23`, v55, v62, v45, and v6; package
 version is 0.79.0.
+
+v0.80 fixes a stale-evidence flaw in the fast default arena. Its previous
+100-snapshot step produced only the earliest possible fold, so a growing live
+collector never moved training, validation, or test forward until 100 additional
+deduplicated states existed. The arena now requests one latest chronological
+fold directly: the validation/test tail remains untouched, embargoes are
+preserved, and every earlier eligible state expands training. General single-
+ticker and shared-universe commands expose the same behavior through
+`--latest-fold-only`; ordinary multi-fold walk-forward remains the default.
+
+On the current five files, this moved training from six states to 20-24 and the
+test interval from roughly 02:42-08:08 UTC to 11:49-12:39 UTC. The new tail was
+provider-confirmed pre-market, so every trade was correctly masked, all 30 smile
+comparisons tied at zero, and the simplicity rule selected full-feature flat
+GRUs at about 102 microseconds median actor latency. Both research and sandbox
+paths returned 0% with no fills or fees. This is currentness and safety evidence,
+not alpha or a useful feature comparison; the running collector must accumulate
+regular-session states before economic evaluation. Default arena invocations
+now write collision-resistant timestamped run directories, while the interface
+shows each held-out time range and preserves prior runs for drill-down.
+Walk-forward, universe, and arena schemas advance to v63, v46, and v7; package
+version is 0.80.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The

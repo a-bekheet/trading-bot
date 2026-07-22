@@ -144,6 +144,10 @@ class WalkForwardTrainingTests(TestCase):
             ):
                 WalkForwardConfig(3, 2, 2, training_seed_offsets=offsets)
 
+    def test_latest_fold_only_must_be_boolean(self):
+        with self.assertRaisesRegex(ValueError, "latest_fold_only"):
+            WalkForwardConfig(3, 2, 2, latest_fold_only=1)
+
     def test_selection_score_tolerance_must_be_finite_and_non_negative(self):
         for tolerance in (-1.0, float("nan"), float("inf")):
             with self.subTest(tolerance=tolerance), self.assertRaisesRegex(
@@ -479,6 +483,7 @@ class WalkForwardTrainingTests(TestCase):
             "--training-seed-offset", "1000",
             "--training-seed-worst-weight", "0.4",
             "--training-seed-dispersion-penalty", "0.6",
+            "--latest-fold-only",
             "--reward-drawdown-penalty", "3",
             "--reward-downside-penalty", "4",
         ])
@@ -497,6 +502,7 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(config.training_seed_offsets, (0, 1000))
         self.assertEqual(config.training_seed_worst_weight, 0.4)
         self.assertEqual(config.training_seed_dispersion_penalty, 0.6)
+        self.assertTrue(config.latest_fold_only)
         environment = _environment_kwargs_from_args(args)
         self.assertEqual(environment["reward_drawdown_penalty"], 3)
         self.assertEqual(environment["reward_downside_penalty"], 4)

@@ -62,7 +62,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v62"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v63"
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,7 @@ class WalkForwardConfig:
     embargo: int = 0
     step_size: int | None = None
     max_train_size: int | None = None
+    latest_fold_only: bool = False
     training_seed_offsets: tuple[int, ...] = (0,)
     training_seed_worst_weight: float = 0.25
     training_seed_dispersion_penalty: float = 0.25
@@ -103,6 +104,8 @@ class WalkForwardConfig:
     def __post_init__(self) -> None:
         if min(self.min_train_size, self.validation_size, self.test_size) < 2:
             raise ValueError("walk-forward partitions require at least two snapshots")
+        if not isinstance(self.latest_fold_only, bool):
+            raise ValueError("latest_fold_only must be a boolean")
         if (
             not self.training_seed_offsets
             or len(set(self.training_seed_offsets))
@@ -841,6 +844,7 @@ def run_walk_forward_training(
         embargo=walk_forward_config.embargo,
         step_size=walk_forward_config.step_size,
         max_train_size=walk_forward_config.max_train_size,
+        latest_only=walk_forward_config.latest_fold_only,
     )
     if not folds:
         raise ValueError("dataset is too short for the requested walk-forward split")
@@ -1849,6 +1853,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--step-size", type=int)
     parser.add_argument("--max-train-size", type=int)
     parser.add_argument(
+        "--latest-fold-only",
+        action="store_true",
+        help=(
+            "evaluate only the latest chronological fold, assigning all "
+            "history before its embargoed validation/test tail to training"
+        ),
+    )
+    parser.add_argument(
         "--training-seed-offset",
         action="append",
         type=int,
@@ -2214,6 +2226,7 @@ def _walk_forward_config_from_args(
         embargo=args.embargo,
         step_size=args.step_size,
         max_train_size=args.max_train_size,
+        latest_fold_only=args.latest_fold_only,
         training_seed_offsets=tuple(args.training_seed_offset or (0,)),
         training_seed_worst_weight=args.training_seed_worst_weight,
         training_seed_dispersion_penalty=(

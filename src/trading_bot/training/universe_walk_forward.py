@@ -60,7 +60,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v45"
+    "research-demo.universe-walk-forward.v46"
 )
 
 
@@ -352,6 +352,7 @@ def run_universe_walk_forward_training(
         embargo=walk_forward_config.embargo,
         step_size=walk_forward_config.step_size,
         max_train_size=walk_forward_config.max_train_size,
+        latest_only=walk_forward_config.latest_fold_only,
     )
     if not folds:
         raise ValueError(

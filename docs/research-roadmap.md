@@ -416,6 +416,17 @@ capital-preservation result, not evidence of a positive edge. Future alpha work
 must first produce a policy that activates on locked validation and then passes
 fresh regular-session held-out, no-op, doubled-cost, and statistical gates.
 
+The v0.80 arena now advances with the collector. The former step size of 100
+left the fast single-fold run anchored to the earliest 13 states even after each
+ticker had accumulated substantially more deduplicated history. The default now
+constructs one latest chronological fold, expands training through every earlier
+eligible state, preserves the validation/test tail and embargoes, and stores
+each invocation in a timestamped directory. The first corrected tail was wholly
+provider-confirmed pre-market, so all policies correctly tied at zero with no
+fills. This supersedes the old negative legacy-fallback paths as the current
+operational view but supplies no feature or return evidence; wait for a locked
+regular-session range before the next economic comparison.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

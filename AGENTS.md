@@ -375,6 +375,16 @@ competitive IDs, and score sacrificed in every artifact. Single-ticker and
 universe commands default the materiality floor to zero unless explicitly
 declared; never tune it from held-out results.
 
+The fast default arena must use `latest_fold_only=True`. Build its single split
+backward from the newest available test tail, preserve both embargoes, and assign
+all earlier eligible history to expanding training. Do not recreate this with a
+large step size: that selects the earliest fold and silently leaves newly
+collected states unused. General walk-forward commands remain multi-fold unless
+`--latest-fold-only` is explicit. Persist the mode and exact boundaries in every
+summary, and show test timestamps in the interface. Default `agent-arena` runs
+must use timestamped subdirectories beneath `data/agent_runs/recurrent-arena`;
+an explicit `--output-dir` may reproduce or replace a caller-owned target.
+
 Validation selection does not automatically authorize sandbox execution. After
 the research winner is fixed, evaluate deterministic no-op on validation only
 and require the winner's seed-robust score to strictly exceed the no-op score

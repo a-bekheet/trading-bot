@@ -195,6 +195,11 @@ class InterfaceResultTests(TestCase):
         nvda["folds"][0]["model_selection"]["activation_gate"] = {
             "activated": False,
         }
+        nvda["folds"][0]["test_data_quality"] = {
+            "first_timestamp": "2026-07-22T14:00:00Z",
+            "last_timestamp": "2026-07-22T14:15:00Z",
+            "execution_provenance": "provider_confirmed_regular",
+        }
         nvda["folds"][0]["baselines"] = {
             "no_op": [{"total_return": 0.0, "executions": 0, "fees": 0.0}],
         }
@@ -218,6 +223,8 @@ class InterfaceResultTests(TestCase):
         self.assertEqual(overview.iloc[1]["Sandbox return"], 0.0)
         self.assertAlmostEqual(overview.iloc[1]["Sandbox lift"], -0.01)
         self.assertEqual(overview.iloc[1]["Sandbox executions"], 0)
+        self.assertEqual(overview.iloc[1]["Test start"], "2026-07-22T14:00:00Z")
+        self.assertEqual(overview.iloc[1]["Test end"], "2026-07-22T14:15:00Z")
         self.assertEqual(overview.iloc[1]["Promotion"], "Research only")
 
     def test_feature_ablation_results_expose_validation_only_lift(self):

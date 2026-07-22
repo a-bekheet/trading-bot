@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -7,8 +8,10 @@ from unittest.mock import patch
 from trading_bot.training.arena import (
     AGENT_ARENA_SCHEMA_VERSION,
     DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE,
+    DEFAULT_ARENA_LATEST_FOLD_ONLY,
     DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE,
     DEFAULT_ARENA_TRAINING_SEED_OFFSETS,
+    default_arena_output_dir,
     recurrent_arena_models,
     run_agent_arena,
 )
@@ -17,12 +20,26 @@ from trading_bot.training.walk_forward import WalkForwardConfig
 
 
 class AgentArenaTests(TestCase):
+    def test_default_output_directory_is_timestamped_and_timezone_safe(self):
+        self.assertEqual(
+            default_arena_output_dir(
+                datetime(2026, 7, 22, 13, 40, 5, 123456, tzinfo=timezone.utc)
+            ),
+            Path(
+                "data/agent_runs/recurrent-arena/"
+                "20260722T134005123456Z"
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "timezone-aware"):
+            default_arena_output_dir(datetime(2026, 7, 22))
+
     def test_default_arena_uses_three_training_seeds(self):
         self.assertEqual(DEFAULT_ARENA_TRAINING_SEED_OFFSETS, (0, 1, 2))
         self.assertEqual(DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE, 1e-4)
         self.assertEqual(
             DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE, 1e-4
         )
+        self.assertTrue(DEFAULT_ARENA_LATEST_FOLD_ONLY)
 
     def test_fixed_arena_adds_surface_gnns_and_matched_signal_ablations(self):
         models = recurrent_arena_models(hidden_size=12)

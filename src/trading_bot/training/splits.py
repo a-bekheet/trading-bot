@@ -43,6 +43,7 @@ def walk_forward_splits(
     embargo: int = 0,
     step_size: int | None = None,
     max_train_size: int | None = None,
+    latest_only: bool = False,
 ) -> tuple[WalkForwardSplit, ...]:
     """Build expanding or rolling chronological folds with partition embargoes."""
     sizes = (length, min_train_size, validation_size, test_size)
@@ -55,6 +56,31 @@ def walk_forward_splits(
         raise ValueError("step_size must be positive")
     if max_train_size is not None and max_train_size < min_train_size:
         raise ValueError("max_train_size cannot be smaller than min_train_size")
+    if not isinstance(latest_only, bool):
+        raise ValueError("latest_only must be a boolean")
+
+    if latest_only:
+        train_end = length - validation_size - test_size - 2 * embargo
+        if train_end < min_train_size:
+            return ()
+        train_start = (
+            max(0, train_end - max_train_size)
+            if max_train_size is not None
+            else 0
+        )
+        validation_start = train_end + embargo
+        validation_end = validation_start + validation_size
+        test_start = validation_end + embargo
+        return (WalkForwardSplit(
+            fold=0,
+            train_start=train_start,
+            train_end=train_end,
+            validation_start=validation_start,
+            validation_end=validation_end,
+            test_start=test_start,
+            test_end=length,
+            embargo=embargo,
+        ),)
 
     folds = []
     train_end = min_train_size

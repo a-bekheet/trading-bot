@@ -120,8 +120,11 @@ with agent_tab:
         if len(arena) > 1:
             st.subheader("Cross-ticker agent arena")
             st.caption(
-                "Newest run per ticker. Each row uses its own validation "
-                "tournament and separately selected held-out policy."
+                "Newest run per ticker. The default arena uses the latest "
+                "available chronological fold, with all earlier eligible "
+                "history assigned to training. Each row has an independent "
+                "validation tournament and held-out policy. Timestamped run "
+                "directories preserve earlier experiments for drill-down."
             )
             arena_columns = st.columns(8)
             arena_columns[0].metric("Tickers evaluated", len(arena))

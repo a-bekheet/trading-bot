@@ -18,11 +18,26 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v6"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v7"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
 DEFAULT_ARENA_TRAINING_SEED_OFFSETS = (0, 1, 2)
 DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE = 1e-4
 DEFAULT_ARENA_ACTIVATION_MIN_SCORE_ADVANTAGE = 1e-4
+DEFAULT_ARENA_LATEST_FOLD_ONLY = True
+DEFAULT_ARENA_OUTPUT_ROOT = Path("data/agent_runs/recurrent-arena")
+
+
+def default_arena_output_dir(
+    created_at: datetime | None = None,
+) -> Path:
+    """Return a timestamped run directory so prior evidence is never overwritten."""
+    timestamp = created_at or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        raise ValueError("arena output timestamp must be timezone-aware")
+    run_id = timestamp.astimezone(timezone.utc).strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+    return DEFAULT_ARENA_OUTPUT_ROOT / run_id
 
 
 def recurrent_arena_models(
@@ -180,7 +195,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/agent_runs/recurrent-arena"),
+        help=(
+            "exact run directory; defaults to a timestamped directory under "
+            "data/agent_runs/recurrent-arena"
+        ),
     )
     parser.add_argument(
         "--symbol",
@@ -237,10 +255,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    output_dir = args.output_dir or default_arena_output_dir()
     try:
         result = run_agent_arena(
             data_dir=args.data_dir,
-            output_dir=args.output_dir,
+            output_dir=output_dir,
             symbols=tuple(args.symbol or DEFAULT_ARENA_SYMBOLS),
             walk_forward_config=WalkForwardConfig(
                 min_train_size=args.min_train_size,
@@ -248,6 +267,7 @@ def main() -> None:
                 test_size=args.test_size,
                 embargo=args.embargo,
                 step_size=args.step_size,
+                latest_fold_only=DEFAULT_ARENA_LATEST_FOLD_ONLY,
                 training_seed_offsets=tuple(
                     args.training_seed_offset
                     or DEFAULT_ARENA_TRAINING_SEED_OFFSETS
@@ -286,7 +306,7 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "artifact": str(args.output_dir / "agent-arena.json"),
+                "artifact": str(output_dir / "agent-arena.json"),
                 "completed": len(result["completed"]),
                 "failures": len(result["failures"]),
             },
