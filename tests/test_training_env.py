@@ -174,6 +174,7 @@ class OptionsEnvTests(TestCase):
             "drawdown_penalty": 3.0,
             "downside_penalty": 2.0,
         })
+        self.assertEqual(reset_info["portfolio_valuation"], "liquidation")
 
         observation, first_reward, _, _, first = env.step(np.array([1, 0]))
 
@@ -181,10 +182,10 @@ class OptionsEnvTests(TestCase):
             first["reward_components"]["gross_pnl_return"]
             + first["reward_components"]["fees"]
         )
-        self.assertAlmostEqual(first_net, -0.06065)
-        self.assertAlmostEqual(first["path_risk"]["maximum_drawdown"], 0.06065)
-        self.assertAlmostEqual(first["reward_components"]["drawdown"], -0.18195)
-        self.assertAlmostEqual(first["reward_components"]["downside"], -0.1213)
+        self.assertAlmostEqual(first_net, -0.0713)
+        self.assertAlmostEqual(first["path_risk"]["maximum_drawdown"], 0.0713)
+        self.assertAlmostEqual(first["reward_components"]["drawdown"], -0.2139)
+        self.assertAlmostEqual(first["reward_components"]["downside"], -0.1426)
         self.assertAlmostEqual(sum(first["reward_components"].values()), first_reward)
 
         observation, recovery_reward, _, _, recovery = env.step(
@@ -262,6 +263,130 @@ class OptionsEnvTests(TestCase):
         self.assertEqual(default_info["reward_components"]["drawdown"], 0)
         self.assertEqual(default_info["reward_components"]["downside"], 0)
         self.assertLess(shaped_reward, default_reward)
+
+    def test_liquidation_nav_charges_round_trip_cost_without_close_jump(self):
+        env = OptionsEnv(
+            option_lifecycle_dataset(
+                "call",
+                spots=(100, 100, 100),
+                timestamps=(
+                    "2026-07-20T14:00:00Z",
+                    "2026-07-20T14:01:00Z",
+                    "2026-07-20T14:02:00Z",
+                ),
+                expiration="2026-08-21",
+            ),
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=1_000,
+        )
+        env.reset()
+
+        opened, reward, _, _, _ = env.step(np.array([1, 0]))
+        closed, close_reward, _, truncated, _ = env.step(np.array([2, 0]))
+
+        self.assertAlmostEqual(opened.portfolio[2], 978.7)
+        self.assertAlmostEqual(reward, -0.0213)
+        self.assertTrue(truncated)
+        self.assertAlmostEqual(closed.portfolio[2], opened.portfolio[2])
+        self.assertAlmostEqual(close_reward, 0.0)
+
+    def test_liquidation_nav_marks_short_at_ask_and_preserves_midpoint_mode(self):
+        dataset = option_lifecycle_dataset(
+            "put",
+            spots=(100, 100),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+            ),
+            expiration="2026-08-21",
+        )
+        liquidation = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=20_000,
+            allow_collateralized_option_shorts=True,
+        )
+        midpoint = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=20_000,
+            allow_collateralized_option_shorts=True,
+            portfolio_valuation="midpoint",
+        )
+        liquidation.reset()
+        midpoint.reset()
+
+        liquidated, _, _, _, liquidated_info = liquidation.step(
+            np.array([2, 0])
+        )
+        midpoint_marked, _, _, _, midpoint_info = midpoint.step(
+            np.array([2, 0])
+        )
+
+        self.assertAlmostEqual(liquidated.portfolio[2], 19_978.7)
+        self.assertAlmostEqual(midpoint_marked.portfolio[2], 19_989.35)
+        self.assertEqual(liquidated_info["portfolio_valuation"], "liquidation")
+        self.assertEqual(midpoint_info["portfolio_valuation"], "midpoint")
+
+    def test_liquidation_nav_uses_last_executable_mark_during_quote_gap(self):
+        source = option_lifecycle_dataset(
+            "call",
+            spots=(100, 100),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+            ),
+            expiration="2026-08-21",
+            contract_count=2,
+        )
+        missing_held_quote = source.snapshots[1].frame.iloc[[1]].copy()
+        dataset = SnapshotDataset(
+            (
+                source.snapshots[0],
+                Snapshot(source.snapshots[1].timestamp, missing_held_quote),
+            ),
+            source.symbol,
+        )
+        env = OptionsEnv(dataset, slot_count=1, max_quantity=1, starting_cash=1_000)
+        env.reset()
+
+        observation, _, _, _, _ = env.step(np.array([1, 0]))
+
+        self.assertAlmostEqual(observation.portfolio[2], 978.7)
+
+    def test_underlying_liquidation_nav_is_continuous_when_closed(self):
+        dataset = option_lifecycle_dataset(
+            "call",
+            spots=(100, 100, 100),
+            timestamps=(
+                "2026-07-20T14:00:00Z",
+                "2026-07-20T14:01:00Z",
+                "2026-07-20T14:02:00Z",
+            ),
+            expiration="2026-08-21",
+        )
+        env = OptionsEnv(
+            dataset,
+            slot_count=1,
+            max_quantity=1,
+            starting_cash=10_000,
+            underlying_lot_size=25,
+            max_abs_underlying_shares=25,
+            underlying_commission_per_share=0.01,
+            underlying_slippage_bps=10,
+        )
+        env.reset()
+
+        opened, _, _, _, _ = env.step(np.array([0, 1]))
+        closed, reward, _, truncated, _ = env.step(np.array([0, 2]))
+
+        self.assertAlmostEqual(opened.portfolio[2], 9_994.5)
+        self.assertTrue(truncated)
+        self.assertAlmostEqual(closed.portfolio[2], opened.portfolio[2])
+        self.assertAlmostEqual(reward, 0.0)
 
     def test_collateralized_short_put_can_close_or_cross_without_reusing_cash(self):
         dataset = option_lifecycle_dataset(
@@ -728,6 +853,8 @@ class OptionsEnvTests(TestCase):
                 "reward penalties",
             ):
                 OptionsEnv(demo_dataset(), **kwargs)
+        with self.assertRaisesRegex(ValueError, "portfolio_valuation"):
+            OptionsEnv(demo_dataset(), portfolio_valuation="optimistic")
 
     def test_underlying_trade_updates_cash_nav_delta_and_position_limits(self):
         env = OptionsEnv(
@@ -946,7 +1073,7 @@ class OptionsEnvTests(TestCase):
         observation, _, _, truncated, info = env.step(np.array([1, 0]))
 
         self.assertTrue(truncated)
-        self.assertAlmostEqual(observation.portfolio[2], 1_039.35)
+        self.assertAlmostEqual(observation.portfolio[2], 1_028.7)
         self.assertAlmostEqual(observation.portfolio[3], 50.0)
         self.assertAlmostEqual(info["greek_exposures"]["delta"], 50.0)
 

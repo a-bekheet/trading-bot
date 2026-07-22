@@ -274,6 +274,10 @@ Run the research-demo PPO trainer against collected snapshots:
 train-demo --symbol AAPL --kind hybrid --episodes 25 --sequence-length 8
 ```
 
+Net liquidation value is the default reward/NAV contract. Legacy experiments
+can be reproduced explicitly with `--portfolio-valuation midpoint`; do not mix
+the two modes inside one comparison.
+
 Use the same recurrent policy with a Monte-Carlo policy-gradient comparator:
 
 ```bash
@@ -530,6 +534,28 @@ A one-episode matched smoke tied both feature candidates at zero validation
 score and selected the masked candidate through the 1,197-versus-1,261 active
 input tie-break. These are integration, coverage, and machine-latency results;
 they do not establish mispricing or alpha.
+
+v0.51 changes the default training wealth definition from midpoint accounting
+to net liquidation value. Open option longs are marked at the executable bid,
+shorts at the executable ask, and both reserve the commission required to close.
+Underlying shares use the configured exit-side synthetic slippage and closing
+commission. If a held option temporarily disappears, valuation carries its
+last executable liquidation mark instead of resetting it to entry cost. As a
+result, the complete round-trip spread and commissions are recognized when a
+position is opened, and closing later at unchanged quotes creates zero
+artificial reward. Use `--portfolio-valuation midpoint` only to reproduce the
+legacy optimistic accounting contract.
+
+The environment manifest, checkpoint, single-ticker walk-forward summary, and
+universe summary all persist the valuation contract. The environment,
+checkpoint, walk-forward, and universe schemas advance to v19, v36, v39, and
+v23 respectively; the unchanged policy input remains `dimensionless.v14`.
+With one held AAPL option, 20,000 direct portfolio valuations measured 5.92
+microseconds median for liquidation versus 4.54 for midpoint. An identical
+deterministic 12-snapshot AAPL run ended at $99,896.00 under liquidation versus
+$99,912.50 under midpoint, exposing $16.50 of legacy terminal optimism. The
+one-episode liquidation walk-forward smoke completed with zero trades and zero
+held-out return. These are accounting and latency checks, not evidence of alpha.
 
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate

@@ -169,6 +169,13 @@ class WalkForwardTrainingTests(TestCase):
         environment = _environment_kwargs_from_args(args)
         self.assertEqual(environment["reward_drawdown_penalty"], 3)
         self.assertEqual(environment["reward_downside_penalty"], 4)
+        self.assertEqual(environment["portfolio_valuation"], "liquidation")
+        self.assertEqual(
+            _environment_kwargs_from_args(_parser().parse_args([
+                "--portfolio-valuation", "midpoint",
+            ]))["portfolio_valuation"],
+            "midpoint",
+        )
 
     def test_cli_makes_collateralized_option_shorts_explicitly_opt_in(self):
         self.assertFalse(
@@ -323,6 +330,12 @@ class WalkForwardTrainingTests(TestCase):
             )
 
         self.assertEqual(summary["schema_version"], WALK_FORWARD_SCHEMA_VERSION)
+        self.assertEqual(
+            summary["environment"]["portfolio_valuation"],
+            "liquidation",
+        )
+        self.assertNotIn("data_hash", summary["environment"])
+        self.assertEqual(written_summary["environment"], summary["environment"])
         self.assertEqual(len(summary["folds"]), 1)
         self.assertEqual(fold["selection"]["scope"], "validation_research_demo")
         self.assertEqual(fold["test"][0]["steps"], 1)

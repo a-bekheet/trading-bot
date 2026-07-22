@@ -51,7 +51,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v38"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v39"
 
 
 @dataclass(frozen=True)
@@ -397,10 +397,15 @@ def run_walk_forward_training(
     )
     fold_results = []
     resolved_configs: dict[str, tuple[RecurrentConfig, int]] = {}
+    environment_contract: dict[str, Any] | None = None
     for fold in folds:
         train_data, validation_data, test_data = fold.apply(dataset)
         train_env = OptionsEnv(train_data, **environment_options)
         validation_env = OptionsEnv(validation_data, **environment_options)
+        if environment_contract is None:
+            environment_contract = train_env.manifest.to_dict()
+            for partition_field in ("data_hash", "symbol", "seed"):
+                environment_contract.pop(partition_field, None)
         fold_training = replace(
             training_config,
             seed=training_config.seed + fold.fold,
@@ -955,6 +960,7 @@ def run_walk_forward_training(
             for spec in model_specs
         ],
         "training": asdict(training_config),
+        "environment": environment_contract,
         "folds": fold_results,
     }
     summary_path = output_dir / f"{dataset.symbol}-walk-forward.json"
@@ -1154,6 +1160,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reward-drawdown-penalty", type=float, default=0.0)
     parser.add_argument("--reward-downside-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--portfolio-valuation",
+        choices=("liquidation", "midpoint"),
+        default="liquidation",
+        help=(
+            "mark open positions at executable exits plus estimated closing "
+            "fees, or use legacy midpoint accounting"
+        ),
+    )
     parser.add_argument("--underlying-lot-size", type=int, default=25)
     parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
     parser.add_argument("--underlying-commission-per-share", type=float, default=0.005)

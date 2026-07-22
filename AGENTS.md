@@ -125,7 +125,14 @@ Greek conventions:
 - Buys with insufficient cash are rejected.
 - SQLite `BEGIN IMMEDIATE` transactions serialize account updates.
 - The ledger records every fill and realized P&L; positions use average cost.
-- Portfolio marks use bid/ask midpoint, falling back to last price.
+- RL portfolio NAV defaults to net liquidation value: long options use the
+  stressed executable bid, shorts use the stressed executable ask, and both
+  reserve estimated closing commission. Underlying positions use exit-side
+  synthetic slippage and closing commission. `midpoint` is an explicit legacy
+  comparison mode, never an interchangeable result.
+- When a held option quote disappears, carry its last executable liquidation
+  mark rather than replacing it with entry cost. A position opened from an
+  executable quote must always initialize that fallback.
 - No module in this repository may route `PaperBroker` calls to a real broker.
 
 Future agents should read quotes from `interface.data.load_latest_snapshot`,
@@ -176,9 +183,11 @@ small and stable:
 - `info` retains executions, invalid-action count, P&L, fees, trade notional,
   reward components, and slot retention/churn diagnostics.
 - `reward_components` must sum to the returned scalar reward. Gross P&L includes
-  spread/mark effects, while commission and invalid-action penalties are
-  separate components. Optional downside shaping is the negative coefficient
-  times the negative part of the current net P&L return. Optional drawdown
+  spread/mark effects and the change in estimated future closing costs, while
+  realized commission and invalid-action penalties are separate components.
+  Closing at unchanged quotes under liquidation valuation must not create an
+  artificial NAV or reward jump. Optional downside shaping is the negative
+  coefficient times the negative part of the current net P&L return. Optional drawdown
   shaping charges only the increase in running maximum NAV drawdown, not the
   full current drawdown on every step. This keeps the signal path-causal and
   makes its episode sum equal negative coefficient times maximum drawdown.
@@ -186,7 +195,7 @@ small and stable:
   reward coefficients in the environment manifest, expose current/maximum
   drawdown and drawdown increase in `info.path_risk`, and retain all five reward
   components in rollout metrics. Coefficients must be finite, non-negative, and
-  default to zero so old training behavior and policy inference remain intact.
+  default to zero so shaping is disabled unless explicitly requested.
 - A surviving contract keeps its exact slot unless a reappearing held position
   needs visibility to remain sellable. A missing contract vacates only its own
   slot; ordinary replacements never shift other identities. Currently visible
@@ -639,6 +648,9 @@ short lifecycle.
 - CSV storage is appropriate for this stage; reassess Parquet or a database only
   when measured data volume or query needs justify it.
 - The paper ledger uses SQLite because account updates require transactions.
+- RL liquidation value uses saved top-of-book quotes and assumes the configured
+  quantity can exit there. It does not model depth, partial fills, market impact,
+  or adverse selection; stale fallback marks remain explicitly approximate.
 - The RL short-option lifecycle has no early assignment, exercise instruction,
   dividend, or corporate-action model. Post-expiry physical assignment is a
   conservative deterministic research approximation, not broker fidelity.

@@ -283,6 +283,7 @@ def cost_stressed_environment(
         source.manifest,
         commission_per_contract=commission,
         spread_multiplier=spread,
+        portfolio_valuation=source.portfolio_valuation,
         underlying_commission_per_share=underlying_commission,
         underlying_slippage_bps=underlying_slippage,
     )
@@ -298,6 +299,7 @@ def cost_stressed_environment(
         starting_cash=source.starting_cash,
         commission_per_contract=commission,
         spread_multiplier=spread,
+        portfolio_valuation=source.portfolio_valuation,
         underlying_lot_size=source.underlying_lot_size,
         max_abs_underlying_shares=source.max_abs_underlying_shares,
         underlying_commission_per_share=underlying_commission,

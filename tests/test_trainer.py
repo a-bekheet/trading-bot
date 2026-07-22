@@ -144,6 +144,7 @@ class TrainerTests(TestCase):
         self.assertEqual(single.action_decoder, "factorized")
         self.assertEqual(single.burn_in_steps, 8)
         self.assertFalse(single.allow_collateralized_option_shorts)
+        self.assertEqual(single.portfolio_valuation, "liquidation")
         self.assertEqual(attention.encoder, "attention_set")
         self.assertEqual(attention.attention_heads, 2)
         self.assertEqual(
@@ -161,6 +162,13 @@ class TrainerTests(TestCase):
         self.assertEqual(risk_args.burn_in_steps, 13)
         self.assertEqual(risk_environment["reward_drawdown_penalty"], 2.5)
         self.assertEqual(risk_environment["reward_downside_penalty"], 1.5)
+        self.assertEqual(risk_environment["portfolio_valuation"], "liquidation")
+        self.assertEqual(
+            _environment_kwargs_from_args(_parser().parse_args([
+                "--portfolio-valuation", "midpoint",
+            ]))["portfolio_valuation"],
+            "midpoint",
+        )
         self.assertTrue(
             _parser().parse_args([
                 "--allow-collateralized-option-shorts",
@@ -384,10 +392,14 @@ class TrainerTests(TestCase):
         self.assertEqual(sidecar["model"]["initial_hold_bias"], 5.0)
         self.assertEqual(sidecar["model"]["masked_input_indices"], [0])
         self.assertEqual(sidecar["training"]["entropy_coefficient"], 1e-4)
-        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v18")
+        self.assertEqual(sidecar["environment"]["schema_version"], "research-demo.v19")
         self.assertEqual(sidecar["environment"]["starting_cash"], 1_000)
         self.assertEqual(sidecar["environment"]["slot_assignment"], "stable")
         self.assertEqual(sidecar["environment"]["spread_multiplier"], 1.0)
+        self.assertEqual(
+            sidecar["environment"]["portfolio_valuation"],
+            "liquidation",
+        )
         self.assertEqual(
             sidecar["environment"]["reward_drawdown_penalty"],
             2.0,

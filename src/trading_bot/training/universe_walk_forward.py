@@ -54,7 +54,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v22"
+    "research-demo.universe-walk-forward.v23"
 )
 
 
@@ -373,6 +373,7 @@ def run_universe_walk_forward_training(
     )
     resolved_configs = {}
     fold_results = []
+    environment_contract: dict[str, Any] | None = None
     for fold in folds:
         partitions = tuple(fold.apply(dataset) for dataset in universe)
         global_chronology = _global_chronology(partitions)
@@ -384,6 +385,10 @@ def run_universe_walk_forward_training(
             OptionsEnv(validation, **environment_options)
             for _, validation, _ in partitions
         )
+        if environment_contract is None:
+            environment_contract = train_envs[0].manifest.to_dict()
+            for partition_field in ("data_hash", "symbol", "seed"):
+                environment_contract.pop(partition_field, None)
         fold_training = replace(
             training_config,
             seed=training_config.seed + fold.fold,
@@ -862,6 +867,7 @@ def run_universe_walk_forward_training(
             for spec in model_specs
         ],
         "training": asdict(training_config),
+        "environment": environment_contract,
         "folds": fold_results,
     }
     summary_path = output_dir / "universe-walk-forward.json"

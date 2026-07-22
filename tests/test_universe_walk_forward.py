@@ -156,6 +156,12 @@ class UniverseWalkForwardTests(TestCase):
             UNIVERSE_WALK_FORWARD_SCHEMA_VERSION,
         )
         self.assertEqual(summary["symbols"], ["AAA", "BBB"])
+        self.assertEqual(
+            summary["environment"]["portfolio_valuation"],
+            "liquidation",
+        )
+        self.assertNotIn("symbol", summary["environment"])
+        self.assertEqual(written["environment"], summary["environment"])
         self.assertEqual(summary["common_length"], 7)
         self.assertEqual(len(checkpoint_files), 1)
         self.assertEqual(

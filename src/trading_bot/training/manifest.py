@@ -27,6 +27,7 @@ class EnvManifest:
     starting_cash: float = 100_000.0
     commission_per_contract: float = 0.65
     spread_multiplier: float = 1.0
+    portfolio_valuation: str = "liquidation"
     underlying_lot_size: int = 25
     max_abs_underlying_shares: int = 500
     underlying_commission_per_share: float = 0.005

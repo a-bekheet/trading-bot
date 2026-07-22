@@ -6,6 +6,12 @@ from trading_bot.training.manifest import EnvManifest
 
 
 class ManifestTests(TestCase):
+    def test_portfolio_valuation_is_fingerprinted(self):
+        liquidation = EnvManifest(portfolio_valuation="liquidation")
+        midpoint = EnvManifest(portfolio_valuation="midpoint")
+
+        self.assertNotEqual(liquidation.fingerprint, midpoint.fingerprint)
+
     def test_symbol_manifest_ignores_unrelated_ticker_files(self):
         with TemporaryDirectory() as directory:
             data_dir = Path(directory)

@@ -178,6 +178,7 @@ class EvaluationTests(TestCase):
                 slot_assignment="ranked",
                 max_quantity=1,
                 allow_collateralized_option_shorts=True,
+                portfolio_valuation="midpoint",
                 reward_drawdown_penalty=2.0,
                 reward_downside_penalty=3.0,
                 underlying_lot_size=25,
@@ -202,6 +203,8 @@ class EvaluationTests(TestCase):
         self.assertEqual(stressed.slot_assignment, "ranked")
         self.assertEqual(stressed.manifest.slot_assignment, "ranked")
         self.assertTrue(stressed.allow_collateralized_option_shorts)
+        self.assertEqual(stressed.portfolio_valuation, "midpoint")
+        self.assertEqual(stressed.manifest.portfolio_valuation, "midpoint")
         self.assertTrue(
             stressed.manifest.allow_collateralized_option_shorts
         )

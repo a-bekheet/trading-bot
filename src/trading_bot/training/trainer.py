@@ -27,7 +27,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v35"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v36"
 
 
 @dataclass(frozen=True)
@@ -1461,6 +1461,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--reward-drawdown-penalty", type=float, default=0.0)
     parser.add_argument("--reward-downside-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--portfolio-valuation",
+        choices=("liquidation", "midpoint"),
+        default="liquidation",
+        help=(
+            "mark open positions at executable exits plus estimated closing "
+            "fees, or use legacy midpoint accounting"
+        ),
+    )
     parser.add_argument("--underlying-lot-size", type=int, default=25)
     parser.add_argument("--max-abs-underlying-shares", type=int, default=500)
     parser.add_argument("--underlying-commission-per-share", type=float, default=0.005)
@@ -1561,6 +1570,7 @@ def _environment_kwargs_from_args(
         ),
         "reward_drawdown_penalty": args.reward_drawdown_penalty,
         "reward_downside_penalty": args.reward_downside_penalty,
+        "portfolio_valuation": args.portfolio_valuation,
         "underlying_lot_size": args.underlying_lot_size,
         "max_abs_underlying_shares": args.max_abs_underlying_shares,
         "underlying_commission_per_share": (

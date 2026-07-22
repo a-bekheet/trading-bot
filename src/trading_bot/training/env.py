@@ -40,6 +40,7 @@ PORTFOLIO_FEATURES = (
 )
 PORTFOLIO_GREEK_SLICE = slice(3, 7)
 OPTION_CONTRACT_MULTIPLIER = 100
+PORTFOLIO_VALUATION_MODES = ("liquidation", "midpoint")
 
 
 @dataclass
@@ -50,6 +51,7 @@ class Position:
     option_type: str = ""
     strike: float = 0.0
     expiration: str = ""
+    last_liquidation_price: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +111,7 @@ class OptionsEnv:
         starting_cash: float = 100_000.0,
         commission_per_contract: float = 0.65,
         spread_multiplier: float = 1.0,
+        portfolio_valuation: str = "liquidation",
         underlying_lot_size: int = 25,
         max_abs_underlying_shares: int = 500,
         underlying_commission_per_share: float = 0.005,
@@ -125,6 +128,10 @@ class OptionsEnv:
             raise ValueError("slot_count and max_quantity must be positive")
         if slot_assignment not in {"stable", "ranked"}:
             raise ValueError("slot_assignment must be stable or ranked")
+        if portfolio_valuation not in PORTFOLIO_VALUATION_MODES:
+            raise ValueError(
+                "portfolio_valuation must be liquidation or midpoint"
+            )
         if (
             commission_per_contract < 0
             or spread_multiplier < 0
@@ -164,6 +171,7 @@ class OptionsEnv:
         self.starting_cash = starting_cash
         self.commission_per_contract = commission_per_contract
         self.spread_multiplier = spread_multiplier
+        self.portfolio_valuation = portfolio_valuation
         self.underlying_lot_size = underlying_lot_size
         self.max_abs_underlying_shares = max_abs_underlying_shares
         self.underlying_commission_per_share = underlying_commission_per_share
@@ -183,6 +191,7 @@ class OptionsEnv:
             "starting_cash": starting_cash,
             "commission_per_contract": commission_per_contract,
             "spread_multiplier": spread_multiplier,
+            "portfolio_valuation": portfolio_valuation,
             "underlying_lot_size": underlying_lot_size,
             "max_abs_underlying_shares": max_abs_underlying_shares,
             "underlying_commission_per_share": underlying_commission_per_share,
@@ -224,6 +233,7 @@ class OptionsEnv:
                     "slot_count", "slot_assignment", "max_quantity",
                     "allow_collateralized_option_shorts", "starting_cash",
                     "commission_per_contract", "spread_multiplier",
+                    "portfolio_valuation",
                     "underlying_lot_size", "max_abs_underlying_shares",
                     "underlying_commission_per_share",
                     "underlying_slippage_bps",
@@ -854,6 +864,7 @@ class OptionsEnv:
                 "drawdown_penalty": self.reward_drawdown_penalty,
                 "downside_penalty": self.reward_downside_penalty,
             },
+            "portfolio_valuation": self.portfolio_valuation,
             "allow_collateralized_option_shorts": (
                 self.allow_collateralized_option_shorts
             ),
@@ -1077,9 +1088,29 @@ class OptionsEnv:
         )
 
     @staticmethod
-    def _quote_valid(contract: _ContractRow) -> bool:
+    def _bid_ask_valid(contract: _ContractRow) -> bool:
         try:
-            return all(math.isfinite(float(contract[name])) and float(contract[name]) > 0 for name in ("bid", "ask", "lastPrice")) and float(contract["bid"]) <= float(contract["ask"])
+            bid = float(contract["bid"])
+            ask = float(contract["ask"])
+            return (
+                math.isfinite(bid)
+                and math.isfinite(ask)
+                and bid > 0
+                and ask > 0
+                and bid <= ask
+            )
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _quote_valid(cls, contract: _ContractRow) -> bool:
+        try:
+            last_price = float(contract["lastPrice"])
+            return (
+                cls._bid_ask_valid(contract)
+                and math.isfinite(last_price)
+                and last_price > 0
+            )
         except (TypeError, ValueError):
             return False
 
@@ -1122,6 +1153,10 @@ class OptionsEnv:
             option_type,
             strike,
             expiration,
+            self._execution_price(
+                contract,
+                "sell" if new_quantity > 0 else "buy",
+            ),
         )
 
     def _settle_expired_positions(
@@ -1207,17 +1242,39 @@ class OptionsEnv:
     ) -> tuple[float, np.ndarray]:
         rows = _FrameRows(frame) if rows is None else rows
         spot = float(rows.columns["underlyingPrice"][0])
-        value = self._underlying_shares * spot
+        if self.portfolio_valuation == "liquidation" and self._underlying_shares:
+            exit_side = "sell" if self._underlying_shares > 0 else "buy"
+            value = (
+                self._underlying_shares
+                * self._underlying_execution_price(spot, exit_side)
+                - abs(self._underlying_shares)
+                * self.underlying_commission_per_share
+            )
+        else:
+            value = self._underlying_shares * spot
         exposures = np.zeros(len(GREEK_NAMES), dtype=np.float64)
         exposures[0] = self._underlying_shares
         for symbol, position in self._positions.items():
             quote = rows.get(symbol)
             if quote is None:
+                mark = (
+                    position.last_liquidation_price
+                    if (
+                        self.portfolio_valuation == "liquidation"
+                        and position.last_liquidation_price > 0
+                    )
+                    else position.average_price
+                )
                 value += (
                     position.quantity
-                    * position.average_price
+                    * mark
                     * OPTION_CONTRACT_MULTIPLIER
                 )
+                if self.portfolio_valuation == "liquidation":
+                    value -= (
+                        abs(position.quantity)
+                        * self.commission_per_contract
+                    )
                 exposures += (
                     np.asarray(position.greeks)
                     * position.quantity
@@ -1225,10 +1282,32 @@ class OptionsEnv:
                 )
                 continue
             bid, ask = float(quote["bid"]), float(quote["ask"])
-            mark = (bid + ask) / 2 if bid > 0 and ask > 0 else float(quote["lastPrice"])
+            if self.portfolio_valuation == "liquidation":
+                if self._bid_ask_valid(quote):
+                    mark = self._execution_price(
+                        quote,
+                        "sell" if position.quantity > 0 else "buy",
+                    )
+                    position.last_liquidation_price = mark
+                else:
+                    mark = (
+                        position.last_liquidation_price
+                        if position.last_liquidation_price > 0
+                        else position.average_price
+                    )
+            else:
+                mark = (
+                    (bid + ask) / 2
+                    if bid > 0 and ask > 0
+                    else float(quote["lastPrice"])
+                )
             value += (
                 position.quantity * mark * OPTION_CONTRACT_MULTIPLIER
             )
+            if self.portfolio_valuation == "liquidation":
+                value -= (
+                    abs(position.quantity) * self.commission_per_contract
+                )
             exposures += (
                 self._contract_greeks(quote)
                 * position.quantity
