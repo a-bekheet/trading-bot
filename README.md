@@ -100,7 +100,10 @@ opposite-side message passing, for nine candidates per ticker. Repeat
 `--symbol` to choose another set. The command keeps identical budgets and split
 rules across tickers, writes one walk-forward artifact per ticker plus
 `agent-arena.json`, and records a per-ticker failure without discarding
-completed runs.
+completed runs. It trains each candidate with three deterministic seed
+replicates. Selection retains every policy within one standard error of the raw
+leader, with a one-basis-point materiality floor, then prefers the existing
+ablation, actor-latency, and complexity ordering.
 
 For a one-ticker drill-down with explicit settings:
 
@@ -765,6 +768,25 @@ were negative, mean return was -0.027%, and 14 fills cost $2.28. The interface
 therefore reports zero promotion-ready paths and shows the exact failed gates
 instead of treating a validation win as alpha. Arena schema advances to v3;
 package version is 0.76.0.
+
+v0.77 makes that larger arena more resistant to marginal validation wins. Every
+default candidate now trains on three seeds. A one-standard-error rule retains
+policies statistically competitive with the raw leader; a declared one-basis-
+point floor prevents a zero-variance result on a tiny validation slice from
+claiming false precision. Existing ablation preferences, actor latency,
+parameter count, and active input count select only within that competitive
+pool. Artifacts store the raw leader, effective tolerance, competitive model
+IDs, selected-score sacrifice, and seed replicates.
+
+On the same five-ticker integration data, this rule selected flat LSTMs for
+AAPL and AMZN, a flat GRU for NVDA, and retained surface-GNN winners for GOOG
+and MSFT. Median selected actor latency fell from about 382 to 133 microseconds,
+a 65% reduction. Mean held-out return improved slightly from -0.027% to -0.025%,
+but every path remained negative and zero passed promotion. Because the same
+tiny held-out data has already been inspected across development iterations,
+this comparison is engineering feedback, not fresh alpha evidence. Walk-forward,
+universe walk-forward, and arena schemas advance to v60, v43, and v4; package
+version is 0.77.0.
 
 v0.71 adds critic-only LayerNorm as a separately selectable training
 hypothesis for GRU, LSTM, hybrid, and gated-mixture PPO/REINFORCE models. The

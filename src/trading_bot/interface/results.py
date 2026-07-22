@@ -55,6 +55,7 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
             kind = str(model.get("kind", "unknown"))
             latency = candidate.get("inference_latency", {})
             candidate_selection = candidate.get("selection", {})
+            seed_aggregate = candidate.get("training_seed_aggregate", {})
             records.append(
                 {
                     "model_id": candidate.get("model_id", "unknown"),
@@ -73,6 +74,14 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
                     ),
                     "Median latency (us)": _number(latency.get("median_microseconds")),
                     "Parameters": _number(candidate.get("parameter_count")),
+                    "Score gap (bp)": 10_000.0
+                    * _number(candidate.get("score_gap_to_best")),
+                    "Competitive folds": int(
+                        candidate.get("selection_competitive", True)
+                    ),
+                    "Training seeds": int(
+                        seed_aggregate.get("training_seed_count", 1)
+                    ),
                     "Episodes": _number(candidate.get("episodes_completed")),
                     "Selected folds": int(candidate.get("model_id") == selected),
                 }
@@ -96,6 +105,9 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
             "Validation reward": "mean",
             "Median latency (us)": "mean",
             "Parameters": "mean",
+            "Score gap (bp)": "mean",
+            "Competitive folds": "sum",
+            "Training seeds": "sum",
             "Episodes": "sum",
             "Selected folds": "sum",
         }
@@ -115,6 +127,12 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
         label = _agent_label(winner)
         model = winner.get("model", {})
         action_policy = _decoder_label(model)
+        selection_rule = fold.get("model_selection", {}).get(
+            "simplicity_rule", {}
+        )
+        selected_latency = _number(
+            winner.get("inference_latency", {}).get("median_microseconds")
+        )
         for report in fold.get("test", []):
             steps = int(report.get("steps", 0))
             executions = int(report.get("executions", 0))
@@ -125,6 +143,16 @@ def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
                     "Encoder": _humanize(str(model.get("encoder", "unknown"))),
                     "Architecture": _architecture_label(model),
                     "Action policy": action_policy,
+                    "Selected latency (us)": selected_latency,
+                    "Score traded (bp)": 10_000.0
+                    * _number(
+                        selection_rule.get(
+                            "score_sacrificed_for_simplicity", 0.0
+                        )
+                    ),
+                    "Competitive candidates": int(
+                        selection_rule.get("competitive_candidate_count", 1)
+                    ),
                     "Test return": _number(report.get("total_return")),
                     "Final NAV": _number(report.get("final_nav")),
                     "Max drawdown": _number(report.get("max_drawdown")),
@@ -172,6 +200,15 @@ def arena_overview(runs: Sequence[dict[str, Any]]) -> pd.DataFrame:
                 "Selected encoder": ", ".join(encoders),
                 "Architecture": ", ".join(architectures),
                 "Action policy": ", ".join(action_policies),
+                "Selected latency (us)": float(
+                    heldout["Selected latency (us)"].mean()
+                ),
+                "Score traded (bp)": float(
+                    heldout["Score traded (bp)"].mean()
+                ),
+                "Competitive candidates": int(
+                    heldout["Competitive candidates"].max()
+                ),
                 "Held-out return": float(heldout["Test return"].mean()),
                 "Final NAV": float(heldout["Final NAV"].mean()),
                 "Max drawdown": float(heldout["Max drawdown"].max()),

@@ -143,6 +143,19 @@ class WalkForwardTrainingTests(TestCase):
             ):
                 WalkForwardConfig(3, 2, 2, training_seed_offsets=offsets)
 
+    def test_selection_score_tolerance_must_be_finite_and_non_negative(self):
+        for tolerance in (-1.0, float("nan"), float("inf")):
+            with self.subTest(tolerance=tolerance), self.assertRaisesRegex(
+                ValueError,
+                "selection_score_tolerance",
+            ):
+                WalkForwardConfig(
+                    3,
+                    2,
+                    2,
+                    selection_score_tolerance=tolerance,
+                )
+
     def test_seed_robust_selection_does_not_choose_best_single_run(self):
         spec = ModelSpec(hidden_size=4)
 
@@ -154,6 +167,9 @@ class WalkForwardTrainingTests(TestCase):
             latency=100.0,
             parameter_count=100,
             model_spec=spec,
+            score_std=0.0,
+            seed_count=1,
+            score_standard_error=None,
         ):
             representative = {
                 "model_id": model_id,
@@ -168,17 +184,58 @@ class WalkForwardTrainingTests(TestCase):
                 "representative": representative,
                 "aggregate": {
                     "robust_training_seed_validation_score": robust_score,
+                    "training_seed_count": seed_count,
+                    "validation_selection_score_std": score_std,
+                    "validation_selection_score_standard_error": (
+                        score_std / (seed_count**0.5)
+                        if score_standard_error is None
+                        else score_standard_error
+                    ),
                 },
                 "replicates": [representative],
                 "latency_eligible": True,
             }
 
-        unstable = group("unstable", -1.0, 10.0)
+        unstable = group("unstable", -1.0, 10.0, latency=50.0)
         stable = group("stable", 1.0, 1.0)
 
         selected = _select_seed_robust_group((unstable, stable))
 
         self.assertIs(selected, stable)
+        self.assertEqual(
+            selected["selection_rule"]["competitive_model_ids"], ["stable"]
+        )
+
+        selected_for_speed = _select_seed_robust_group(
+            (unstable, stable), minimum_score_tolerance=2.0
+        )
+        self.assertIs(selected_for_speed, unstable)
+        self.assertEqual(
+            selected_for_speed["selection_rule"][
+                "score_sacrificed_for_simplicity"
+            ],
+            2.0,
+        )
+
+        uncertain_best = group(
+            "uncertain-best",
+            1.2,
+            1.2,
+            latency=200.0,
+            score_std=0.4,
+            seed_count=4,
+        )
+        simpler = group("simpler", 1.05, 1.05, latency=75.0)
+        selected_for_uncertainty = _select_seed_robust_group(
+            (uncertain_best, simpler)
+        )
+        self.assertIs(selected_for_uncertainty, simpler)
+        self.assertAlmostEqual(
+            selected_for_uncertainty["selection_rule"][
+                "uncertainty_tolerance"
+            ],
+            0.2,
+        )
 
         smaller_slow = group(
             "smaller-slow",
@@ -1046,6 +1103,21 @@ class WalkForwardTrainingTests(TestCase):
         self.assertEqual(
             selection["criterion"],
             "robust_training_seed_validation_score",
+        )
+        self.assertEqual(
+            selection["simplicity_rule"]["rule"],
+            "one_standard_error_with_materiality_floor",
+        )
+        self.assertEqual(
+            selection["simplicity_rule"]["minimum_score_tolerance"],
+            0.0,
+        )
+        self.assertTrue(
+            all(
+                "selection_competitive" in result
+                and "score_gap_to_best" in result
+                for result in candidate_results
+            )
         )
         self.assertEqual(
             selection["score_definition"],

@@ -394,6 +394,17 @@ paths pass none of the economic/evidence gates and remain explicitly
 research-only. Longer provider-confirmed intraday histories now have higher
 priority than expanding the model menu again.
 
+The v0.77 selection rule addresses the first arena's false-precision failure.
+Every default policy now has three training-seed replicates. Candidates within
+one standard error of the best seed-robust validation score, subject to a
+predeclared one-basis-point materiality floor, form a competitive pool; only
+then do latency and simplicity break ties. This reduced the five selected
+policies from five GNNs to two and cut median selected actor latency from about
+382 to 133 microseconds. Mean held-out loss moved from 0.027% to 0.025%, while
+all paths remained negative. Treat that comparison as iterative engineering on
+reused test data, not an out-of-sample alpha improvement; the next credible
+return comparison needs a newly collected, locked regular-session test range.
+
 The transform retains batched signed contract
 columns, uses clipping for infinity handling, replaces NaNs in one pass, and
 assembles the float32 vector directly. v18 adds two scalar provider-session

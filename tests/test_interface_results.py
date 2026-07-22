@@ -139,9 +139,12 @@ class InterfaceResultTests(TestCase):
             ["Factorized multi-leg", "Factorized multi-leg"],
         )
         self.assertEqual(leaderboard["Selected folds"].tolist(), [1, 0])
+        self.assertEqual(leaderboard["Competitive folds"].tolist(), [1, 1])
+        self.assertEqual(leaderboard["Training seeds"].tolist(), [1, 1])
         self.assertEqual(heldout.iloc[0]["Agent"], "GRU Agent")
         self.assertEqual(heldout.iloc[0]["Encoder"], "Flat")
         self.assertEqual(heldout.iloc[0]["Architecture"], "Flat / Gru")
+        self.assertEqual(heldout.iloc[0]["Competitive candidates"], 1)
         self.assertEqual(heldout.iloc[0]["Action policy"], "Factorized multi-leg")
         self.assertAlmostEqual(heldout.iloc[0]["Test return"], 0.01)
         self.assertEqual(heldout.iloc[0]["Fills / decision"], 0.5)

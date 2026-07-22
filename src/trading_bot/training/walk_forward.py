@@ -62,7 +62,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v59"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v60"
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,7 @@ class WalkForwardConfig:
     training_seed_offsets: tuple[int, ...] = (0,)
     training_seed_worst_weight: float = 0.25
     training_seed_dispersion_penalty: float = 0.25
+    selection_score_tolerance: float = 0.0
     test_seeds: tuple[int, ...] = (20_001,)
     bootstrap_samples: int = 2_000
     bootstrap_block_length: int | None = None
@@ -124,6 +125,13 @@ class WalkForwardConfig:
         ):
             raise ValueError(
                 "training_seed_dispersion_penalty must be finite and non-negative"
+            )
+        if (
+            not math.isfinite(self.selection_score_tolerance)
+            or self.selection_score_tolerance < 0
+        ):
+            raise ValueError(
+                "selection_score_tolerance must be finite and non-negative"
             )
         if len(self.test_seeds) != 1:
             raise ValueError(
@@ -603,6 +611,11 @@ def _training_seed_aggregate(
     score_mean = statistics.fmean(scores)
     score_worst = min(scores)
     score_std = statistics.pstdev(scores)
+    score_standard_error = (
+        statistics.stdev(scores) / math.sqrt(len(scores))
+        if len(scores) > 1
+        else 0.0
+    )
     aggregate_score = (
         (1.0 - config.training_seed_worst_weight) * score_mean
         + config.training_seed_worst_weight * score_worst
@@ -623,6 +636,7 @@ def _training_seed_aggregate(
         "validation_selection_score_mean": score_mean,
         "validation_selection_score_worst": score_worst,
         "validation_selection_score_std": score_std,
+        "validation_selection_score_standard_error": score_standard_error,
         "validation_total_reward_mean": statistics.fmean(rewards),
         "robust_training_seed_validation_score": aggregate_score,
         "worst_weight": config.training_seed_worst_weight,
@@ -635,8 +649,13 @@ def _training_seed_aggregate(
 
 def _select_seed_robust_group(
     groups: Sequence[dict[str, Any]],
+    *,
+    minimum_score_tolerance: float = 0.0,
 ) -> dict[str, Any]:
-    """Select an eligible architecture from its seed-robust validation score."""
+    """Apply a one-standard-error rule, then prefer simpler deployment."""
+    if not math.isfinite(minimum_score_tolerance) or minimum_score_tolerance < 0:
+        raise ValueError("minimum_score_tolerance must be finite and non-negative")
+
     def delta_neutrality_enabled(group: dict[str, Any]) -> bool:
         representative = group["representative"]
         training = representative.get("training_config")
@@ -650,10 +669,9 @@ def _select_seed_robust_group(
     eligible = [group for group in groups if group["latency_eligible"]]
     if not eligible:
         raise ValueError("at least one latency-eligible candidate is required")
-    return min(
-        eligible,
-        key=lambda group: (
-            -group["aggregate"]["robust_training_seed_validation_score"],
+
+    def tie_break(group: dict[str, Any]) -> tuple[Any, ...]:
+        return (
             int(
                 group["representative"][
                     "model_spec"
@@ -692,8 +710,53 @@ def _select_seed_robust_group(
                 == "uniform"
             ),
             group["representative"]["model_id"],
+        )
+
+    raw_best = min(
+        eligible,
+        key=lambda group: (
+            -group["aggregate"]["robust_training_seed_validation_score"],
+            *tie_break(group),
         ),
     )
+    best_score = float(
+        raw_best["aggregate"]["robust_training_seed_validation_score"]
+    )
+    uncertainty_tolerance = float(
+        raw_best["aggregate"]["validation_selection_score_standard_error"]
+    )
+    effective_tolerance = max(
+        minimum_score_tolerance,
+        uncertainty_tolerance,
+    )
+    competitive = [
+        group
+        for group in eligible
+        if float(
+            group["aggregate"]["robust_training_seed_validation_score"]
+        )
+        >= best_score - effective_tolerance
+    ]
+    selected = min(competitive, key=tie_break)
+    selected_score = float(
+        selected["aggregate"]["robust_training_seed_validation_score"]
+    )
+    selected["selection_rule"] = {
+        "rule": "one_standard_error_with_materiality_floor",
+        "best_model_id": raw_best["representative"]["model_id"],
+        "best_score": best_score,
+        "minimum_score_tolerance": minimum_score_tolerance,
+        "uncertainty_tolerance": uncertainty_tolerance,
+        "effective_score_tolerance": effective_tolerance,
+        "competitive_candidate_count": len(competitive),
+        "competitive_model_ids": [
+            group["representative"]["model_id"] for group in competitive
+        ],
+        "selected_model_id": selected["representative"]["model_id"],
+        "selected_score": selected_score,
+        "score_sacrificed_for_simplicity": best_score - selected_score,
+    }
+    return selected
 
 
 def run_walk_forward_training(
@@ -999,8 +1062,14 @@ def run_walk_forward_training(
                 f"{walk_forward_config.max_median_inference_latency_us}; "
                 f"observed {observed}"
             )
-        winning_group = _select_seed_robust_group(eligible_groups)
+        winning_group = _select_seed_robust_group(
+            eligible_groups,
+            minimum_score_tolerance=(
+                walk_forward_config.selection_score_tolerance
+            ),
+        )
         winning_run = winning_group["representative"]
+        selection_rule = winning_group["selection_rule"]
         candidate_results = [
             {
                 "model_id": run["model_id"],
@@ -1042,6 +1111,16 @@ def run_walk_forward_training(
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": group["latency_eligible"],
+                "selection_competitive": (
+                    run["model_id"]
+                    in selection_rule["competitive_model_ids"]
+                ),
+                "score_gap_to_best": (
+                    selection_rule["best_score"]
+                    - group["aggregate"][
+                        "robust_training_seed_validation_score"
+                    ]
+                ),
                 "ineligibility_reason": (
                     None
                     if group["latency_eligible"]
@@ -1573,6 +1652,7 @@ def run_walk_forward_training(
                         walk_forward_config.training_seed_dispersion_penalty
                     ),
                 },
+                "simplicity_rule": selection_rule,
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
                     "raw_mean_entropy_objective_ablation",
@@ -1733,6 +1813,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--latency-warmup-iterations", type=int, default=10)
     parser.add_argument("--latency-measured-iterations", type=int, default=100)
     parser.add_argument("--max-median-inference-latency-us", type=float)
+    parser.add_argument(
+        "--selection-score-tolerance",
+        type=float,
+        default=0.0,
+        help=(
+            "minimum validation-score tolerance for the one-standard-error "
+            "simplest-competitive selection rule"
+        ),
+    )
     parser.add_argument(
         "--kind",
         choices=("gru", "lstm", "hybrid", "mixture"),
@@ -2065,6 +2154,7 @@ def _walk_forward_config_from_args(
         max_median_inference_latency_us=(
             args.max_median_inference_latency_us
         ),
+        selection_score_tolerance=args.selection_score_tolerance,
     )
 
 

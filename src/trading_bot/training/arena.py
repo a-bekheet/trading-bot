@@ -18,8 +18,10 @@ from trading_bot.training.walk_forward import (
 )
 
 
-AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v3"
+AGENT_ARENA_SCHEMA_VERSION = "research-demo.agent-arena.v4"
 DEFAULT_ARENA_SYMBOLS = ("AAPL", "NVDA", "MSFT", "AMZN", "GOOG")
+DEFAULT_ARENA_TRAINING_SEED_OFFSETS = (0, 1, 2)
+DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE = 1e-4
 
 
 def recurrent_arena_models(
@@ -167,6 +169,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-quantity", type=int, default=1)
     parser.add_argument("--initial-hold-bias", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument(
+        "--training-seed-offset",
+        action="append",
+        type=int,
+        help=(
+            "repeat to declare training-seed offsets; defaults to 0, 1, and 2"
+        ),
+    )
+    parser.add_argument(
+        "--selection-score-tolerance",
+        type=float,
+        default=DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE,
+        help=(
+            "validation-score materiality floor for simplest-competitive "
+            "selection; defaults to one basis point"
+        ),
+    )
     parser.add_argument("--bootstrap-samples", type=int, default=200)
     parser.add_argument("--bootstrap-min-observations", type=int, default=2)
     parser.add_argument("--latency-warmup-iterations", type=int, default=3)
@@ -187,6 +206,11 @@ def main() -> None:
                 test_size=args.test_size,
                 embargo=args.embargo,
                 step_size=args.step_size,
+                training_seed_offsets=tuple(
+                    args.training_seed_offset
+                    or DEFAULT_ARENA_TRAINING_SEED_OFFSETS
+                ),
+                selection_score_tolerance=args.selection_score_tolerance,
                 bootstrap_samples=args.bootstrap_samples,
                 bootstrap_min_observations=args.bootstrap_min_observations,
                 latency_warmup_iterations=args.latency_warmup_iterations,

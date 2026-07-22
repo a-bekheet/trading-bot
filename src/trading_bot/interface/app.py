@@ -135,7 +135,10 @@ with agent_tab:
                 "Surface-GNN winners",
                 int((arena["Selected encoder"] == "Surface Graph Set").sum()),
             )
-            arena_columns[4].metric("Total held-out steps", int(arena["Steps"].sum()))
+            arena_columns[4].metric(
+                "Median selected latency",
+                f"{float(arena['Selected latency (us)'].median()):.1f} us",
+            )
             arena_columns[5].metric(
                 "Promotion-ready paths",
                 int((arena["Promotion"] == "Promotion ready").sum()),
@@ -189,6 +192,11 @@ with agent_tab:
         heldout = heldout_results(run)
         evidence = evidence_summary(run)
         promotion = promotion_assessment(run)
+        selection_rules = [
+            fold.get("model_selection", {}).get("simplicity_rule", {})
+            for fold in run.get("folds", [])
+        ]
+        selection_rules = [rule for rule in selection_rules if rule]
 
         st.markdown(
             '<span class="scope-pill">Validation-ranked agents</span>'
@@ -230,6 +238,16 @@ with agent_tab:
                 + "; ".join(promotion["failed_reasons"])
                 + "."
             )
+        if selection_rules:
+            rule = selection_rules[0]
+            st.info(
+                "Simplest-competitive selection retained "
+                f"{int(rule['competitive_candidate_count'])} candidates "
+                f"within {float(rule['effective_score_tolerance']) * 10_000:.2f} "
+                "bp of the raw validation leader, then used the existing "
+                "ablation, latency, and complexity tie-breaks. "
+                f"Score traded: {float(rule['score_sacrificed_for_simplicity']) * 10_000:.2f} bp."
+            )
 
         selected_name = (
             (
@@ -242,7 +260,12 @@ with agent_tab:
         )
         mean_return = float(heldout["Test return"].mean()) if not heldout.empty else 0.0
         executions = int(heldout["Executions"].sum()) if not heldout.empty else 0
-        metric_columns = st.columns(6)
+        selected_latency = (
+            float(heldout["Selected latency (us)"].mean())
+            if not heldout.empty
+            else 0.0
+        )
+        metric_columns = st.columns(7)
         metric_columns[0].metric("Agents compared", len(leaderboard))
         metric_columns[1].metric("Selected agent", selected_name)
         metric_columns[2].metric("Held-out return", f"{mean_return:.3%}")
@@ -254,6 +277,9 @@ with agent_tab:
             else "n/a",
         )
         metric_columns[5].metric("Evidence", evidence["grade"])
+        metric_columns[6].metric(
+            "Selected latency", f"{selected_latency:.1f} us"
+        )
 
         st.subheader("Agent leaderboard")
         st.caption(
@@ -271,6 +297,7 @@ with agent_tab:
                 "Validation reward": st.column_config.NumberColumn(format="%.6f"),
                 "Median latency (us)": st.column_config.NumberColumn(format="%.1f"),
                 "Parameters": st.column_config.NumberColumn(format="%d"),
+                "Score gap (bp)": st.column_config.NumberColumn(format="%.3f"),
             },
         )
 

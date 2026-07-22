@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 from trading_bot.training.arena import (
     AGENT_ARENA_SCHEMA_VERSION,
+    DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE,
+    DEFAULT_ARENA_TRAINING_SEED_OFFSETS,
     recurrent_arena_models,
     run_agent_arena,
 )
@@ -14,6 +16,10 @@ from trading_bot.training.walk_forward import WalkForwardConfig
 
 
 class AgentArenaTests(TestCase):
+    def test_default_arena_uses_three_training_seeds(self):
+        self.assertEqual(DEFAULT_ARENA_TRAINING_SEED_OFFSETS, (0, 1, 2))
+        self.assertEqual(DEFAULT_ARENA_SELECTION_SCORE_TOLERANCE, 1e-4)
+
     def test_fixed_arena_adds_surface_gnns_to_matched_flat_controls(self):
         models = recurrent_arena_models(hidden_size=12)
 

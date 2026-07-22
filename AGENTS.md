@@ -359,6 +359,16 @@ for one ticker must be written with its exception type and message while other
 tickers continue. Do not average returns into a portfolio claim: each row is an
 independent, validation-selected research-demo path with its own provenance.
 
+The default arena uses training-seed offsets 0, 1, and 2. Model selection first
+finds the highest seed-robust validation score, then retains every eligible
+candidate within `max(best_seed_score_std / sqrt(seed_count), 1e-4)` of that
+leader. Only inside this simplest-competitive pool may the established
+ablation, worst-seed actor-latency, parameter, active-input, and training-cost
+tie-breaks choose a winner. Store the raw leader, tolerance components,
+competitive IDs, and score sacrificed in every artifact. Single-ticker and
+universe commands default the materiality floor to zero unless explicitly
+declared; never tune it from held-out results.
+
 The interface promotion status is a strict research-to-deployment gate, not a
 model-selection input. `Promotion ready` requires every held-out path to be
 positive, beat no-op with statistical support, remain positive under doubled

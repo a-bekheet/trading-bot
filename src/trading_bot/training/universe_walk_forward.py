@@ -59,7 +59,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v42"
+    "research-demo.universe-walk-forward.v43"
 )
 
 
@@ -615,8 +615,14 @@ def run_universe_walk_forward_training(
                 f"{walk_forward_config.max_median_inference_latency_us}; "
                 f"observed {observed}"
             )
-        winning_group = _select_seed_robust_group(eligible_groups)
+        winning_group = _select_seed_robust_group(
+            eligible_groups,
+            minimum_score_tolerance=(
+                walk_forward_config.selection_score_tolerance
+            ),
+        )
         winning_run = winning_group["representative"]
+        selection_rule = winning_group["selection_rule"]
         candidate_results = []
         validation_scores = {
             group["representative"]["model_id"]: group["aggregate"][
@@ -723,6 +729,13 @@ def run_universe_walk_forward_training(
                 ),
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": group["latency_eligible"],
+                "selection_competitive": (
+                    run["model_id"]
+                    in selection_rule["competitive_model_ids"]
+                ),
+                "score_gap_to_best": (
+                    selection_rule["best_score"] - aggregate_score
+                ),
                 "ineligibility_reason": (
                     None
                     if group["latency_eligible"]
@@ -1140,6 +1153,7 @@ def run_universe_walk_forward_training(
                         walk_forward_config.training_seed_dispersion_penalty
                     ),
                 },
+                "simplicity_rule": selection_rule,
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
                     "raw_mean_entropy_objective_ablation",
