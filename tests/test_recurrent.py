@@ -1,3 +1,4 @@
+import math
 from unittest import TestCase, skipUnless
 
 try:
@@ -401,6 +402,86 @@ class RecurrentTests(TestCase):
                 actions,
                 aggregation="mean",
             )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_feasible_normalized_entropy_is_bounded_and_padding_invariant(self):
+        factorized = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            4,
+            3,
+            action_slot_count=4,
+            hidden_size=8,
+        ))
+
+        def one_explorable_row(row_count):
+            logits = torch.full((1, row_count, 3), float("-inf"))
+            logits[..., 0] = 0.0
+            logits[:, 0] = 0.0
+            return factorized.action_entropy_statistics(logits)
+
+        four_rows = one_explorable_row(4)
+        seven_rows = one_explorable_row(7)
+        self.assertAlmostEqual(float(four_rows["feasible_normalized"]), 1.0)
+        self.assertAlmostEqual(float(seven_rows["feasible_normalized"]), 1.0)
+        self.assertAlmostEqual(
+            float(four_rows["raw_mean"]),
+            math.log(3) / 4,
+        )
+        self.assertAlmostEqual(
+            float(seven_rows["raw_mean"]),
+            math.log(3) / 7,
+        )
+        self.assertAlmostEqual(
+            float(four_rows["explorable_factor_fraction"]),
+            0.25,
+        )
+
+        nonuniform = torch.tensor(
+            [[[0.0, 1.0, 2.0], [0.0, float("-inf"), float("-inf")]]],
+            requires_grad=True,
+        )
+        statistics = factorized.action_entropy_statistics(nonuniform)
+        normalized_value = float(
+            statistics["feasible_normalized"].detach()
+        )
+        self.assertGreater(normalized_value, 0.0)
+        self.assertLess(normalized_value, 1.0)
+        statistics["feasible_normalized"].backward()
+        self.assertTrue(torch.isfinite(nonuniform.grad).all())
+        self.assertGreater(float(nonuniform.grad.abs().sum()), 0.0)
+
+        mixed_density = torch.full((2, 4, 3), float("-inf"))
+        mixed_density[..., 0] = 0.0
+        mixed_density[0, 0] = torch.tensor([0.0, 1.0, 2.0])
+        mixed_density[1, :3] = 0.0
+        mixed_statistics = factorized.action_entropy_statistics(mixed_density)
+        self.assertAlmostEqual(
+            float(mixed_statistics["feasible_normalized"]),
+            (normalized_value + 1.0) / 2,
+            places=6,
+        )
+
+        single_leg = build_recurrent_actor_critic(RecurrentConfig(
+            5,
+            2,
+            3,
+            action_slot_count=3,
+            hidden_size=8,
+            action_decoder="single_leg",
+        ))
+        single_statistics = single_leg.action_entropy_statistics(
+            torch.zeros(2, 7)
+        )
+        self.assertAlmostEqual(
+            float(single_statistics["feasible_normalized"]),
+            1.0,
+            places=6,
+        )
+        hold_only = single_leg.action_entropy_statistics(
+            torch.tensor([[0.0, *([float("-inf")] * 6)]])
+        )
+        self.assertEqual(float(hold_only["feasible_normalized"]), 0.0)
+        self.assertEqual(float(hold_only["explorable_factor_fraction"]), 0.0)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_encoder_masks_padded_contracts(self):

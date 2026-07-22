@@ -145,6 +145,7 @@ class TrainerTests(TestCase):
         self.assertEqual(single.slot_assignment, "stable")
         self.assertEqual(single.action_decoder, "factorized")
         self.assertEqual(single.factorized_ppo_objective, "joint")
+        self.assertEqual(single.entropy_objective, "feasible_normalized")
         self.assertEqual(single.burn_in_steps, 8)
         self.assertFalse(single.allow_collateralized_option_shorts)
         self.assertEqual(single.portfolio_valuation, "liquidation")
@@ -311,6 +312,13 @@ class TrainerTests(TestCase):
             )
             for item in metrics
         ))
+        self.assertTrue(all(
+            0 <= item["feasible_normalized_action_entropy"] <= 1
+            and item["raw_action_entropy"] >= 0
+            and 0 <= item["explorable_action_factor_fraction"] <= 1
+            and item["entropy_objective"] == "feasible_normalized"
+            for item in metrics
+        ))
         self.assertEqual(sum(item["selected_checkpoint"] for item in metrics), 1)
         self.assertTrue(all(torch.isfinite(parameter).all() for parameter in model.parameters()))
         self.assertFalse(torch.equal(
@@ -339,7 +347,10 @@ class TrainerTests(TestCase):
             "optimization_log_likelihood_aggregation": "joint",
             "ppo_importance_ratio": "joint",
             "reinforce_score_function": None,
-            "entropy_reduction": "mean_per_decoder_factor",
+            "entropy_objective": "feasible_normalized",
+            "entropy_reduction": (
+                "mean_per_decision_over_explorable_factors_normalized_by_log_feasible_actions"
+            ),
         })
         self.assertEqual(
             sidecar["temporal_training"],
@@ -799,6 +810,8 @@ class TrainerTests(TestCase):
             TrainingConfig(start_sampling="future_aware")
         with self.assertRaisesRegex(ValueError, "factorized_ppo_objective"):
             TrainingConfig(factorized_ppo_objective="marginal")
+        with self.assertRaisesRegex(ValueError, "entropy_objective"):
+            TrainingConfig(entropy_objective="all_slots")
         with self.assertRaisesRegex(ValueError, "volatility_regime_bins"):
             TrainingConfig(volatility_regime_bins=1)
         with self.assertRaisesRegex(ValueError, "volatility_regime_window"):
@@ -875,6 +888,42 @@ class TrainerTests(TestCase):
                 decoder=invalid_model.action_decoder,
             ), self.assertRaisesRegex(ValueError, "requires"):
                 train_actor_critic(env, invalid_model, invalid_config)
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_raw_entropy_objective_is_explicit_training_ablation(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset(seed=89)
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+        )
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=2,
+            entropy_objective="raw_mean",
+            seed=89,
+        )
+
+        model, metrics = train_actor_critic(env, recurrent, training)
+
+        self.assertEqual(metrics[0]["entropy_objective"], "raw_mean")
+        self.assertAlmostEqual(
+            metrics[0]["entropy"],
+            metrics[0]["raw_action_entropy"],
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "raw-entropy.pt"
+            save_checkpoint(path, model, env, recurrent, training, metrics)
+            _, manifest = load_checkpoint(path)
+        self.assertEqual(
+            manifest["policy_optimization"]["entropy_reduction"],
+            "raw_mean_per_decoder_factor",
+        )
 
     def test_selection_score_combines_declared_validation_risks(self):
         report = SimpleNamespace(
@@ -1248,6 +1297,18 @@ class TrainerTests(TestCase):
                                 and action_decoder == "factorized"
                                 else "exact_joint"
                             ),
+                        )
+                        self.assertEqual(
+                            metrics[0]["entropy_objective"],
+                            "feasible_normalized",
+                        )
+                        self.assertGreaterEqual(
+                            metrics[0]["feasible_normalized_action_entropy"],
+                            0.0,
+                        )
+                        self.assertLessEqual(
+                            metrics[0]["feasible_normalized_action_entropy"],
+                            1.0,
                         )
                         self.assertEqual(metrics[0]["invalid_actions"], 0)
                         if action_decoder == "single_leg":

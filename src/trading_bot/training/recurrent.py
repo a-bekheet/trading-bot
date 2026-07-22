@@ -645,6 +645,40 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             entropy = self._categorical(logits).entropy()
             return entropy.unsqueeze(-1) if single_leg else entropy
 
+        def action_entropy_statistics(self, logits):
+            """Return raw and feasible-set-normalized exploration entropy."""
+            entropies = self.action_entropies(logits)
+            feasible_counts = torch.isfinite(logits).sum(dim=-1)
+            if single_leg:
+                feasible_counts = feasible_counts.unsqueeze(-1)
+            explorable = feasible_counts > 1
+            maximum_entropy = feasible_counts.clamp_min(2).to(
+                entropies.dtype
+            ).log()
+            normalized = torch.where(
+                explorable,
+                entropies / maximum_entropy,
+                torch.zeros_like(entropies),
+            ).clamp(0.0, 1.0)
+            explorable_per_decision = explorable.sum(dim=-1)
+            normalized_per_decision = normalized.sum(dim=-1) / (
+                explorable_per_decision.clamp_min(1)
+            )
+            explorable_decisions = explorable_per_decision > 0
+            return {
+                "raw_mean": entropies.mean(),
+                "feasible_normalized": (
+                    (
+                        normalized_per_decision
+                        * explorable_decisions.to(entropies.dtype)
+                    ).sum()
+                    / explorable_decisions.sum().clamp_min(1)
+                ),
+                "explorable_factor_fraction": explorable.to(
+                    entropies.dtype
+                ).mean(),
+            }
+
         def forward_sequence(self, sequence, action_mask=None, hidden_state=None):
             """Return actor and critic outputs for every causal time step."""
             encoded, hidden, node_embeddings = self._encode_sequence(

@@ -28,7 +28,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v42"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v43"
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,7 @@ class TrainingConfig:
     target_kl: float = 0.03
     value_coefficient: float = 0.5
     entropy_coefficient: float = 1e-4
+    entropy_objective: str = "feasible_normalized"
     gradient_clip: float = 0.5
     seed: int = 7
     max_steps: int | None = 128
@@ -96,6 +97,13 @@ class TrainingConfig:
             raise ValueError("ppo_epochs and minibatch_size must be positive")
         if self.value_coefficient < 0 or self.entropy_coefficient < 0:
             raise ValueError("loss coefficients cannot be negative")
+        if self.entropy_objective not in {
+            "feasible_normalized",
+            "raw_mean",
+        }:
+            raise ValueError(
+                "entropy_objective must be feasible_normalized or raw_mean"
+            )
         if (
             not math.isfinite(self.auxiliary_coefficient)
             or self.auxiliary_coefficient < 0
@@ -1095,7 +1103,8 @@ def train_actor_critic(
                     value_loss = 0.5 * (
                         predicted_values - returns_tensor[batch]
                     ).square().mean()
-                entropy = model.action_entropies(logits).mean()
+                entropy_statistics = model.action_entropy_statistics(logits)
+                entropy = entropy_statistics[config.entropy_objective]
                 auxiliary_loss = predicted_values.sum() * 0.0
                 auxiliary_mae = predicted_values.sum() * 0.0
                 if auxiliary_enabled:
@@ -1150,6 +1159,17 @@ def train_actor_critic(
                         ),
                         float(auxiliary_loss.detach()),
                         float(auxiliary_mae.detach()),
+                        float(entropy_statistics["raw_mean"].detach()),
+                        float(
+                            entropy_statistics[
+                                "feasible_normalized"
+                            ].detach()
+                        ),
+                        float(
+                            entropy_statistics[
+                                "explorable_factor_fraction"
+                            ].detach()
+                        ),
                     )
                 )
                 if config.algorithm == "ppo" and approx_kl > config.target_kl:
@@ -1314,6 +1334,10 @@ def train_actor_critic(
                     config.auxiliary_coefficient * means[7]
                 ),
                 "auxiliary_mae": float(means[8]),
+                "raw_action_entropy": float(means[9]),
+                "feasible_normalized_action_entropy": float(means[10]),
+                "explorable_action_factor_fraction": float(means[11]),
+                "entropy_objective": config.entropy_objective,
                 "auxiliary_target_coverage": (
                     {
                         f"t+{horizon}": {
@@ -1481,7 +1505,12 @@ def checkpoint_manifest(
                 if training_config.algorithm == "reinforce"
                 else None
             ),
-            "entropy_reduction": "mean_per_decoder_factor",
+            "entropy_objective": training_config.entropy_objective,
+            "entropy_reduction": (
+                "mean_per_decision_over_explorable_factors_normalized_by_log_feasible_actions"
+                if training_config.entropy_objective == "feasible_normalized"
+                else "raw_mean_per_decoder_factor"
+            ),
         },
         "temporal_training": {
             "mode": "stateful_tbptt",
@@ -1769,6 +1798,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-kl", type=float, default=0.03)
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument(
+        "--entropy-objective",
+        choices=("feasible_normalized", "raw_mean"),
+        default="feasible_normalized",
+        help=(
+            "normalize masked entropy by each feasible action set or use "
+            "the legacy raw factor mean"
+        ),
+    )
+    parser.add_argument(
         "--auxiliary-coefficient",
         type=float,
         default=0.0,
@@ -1910,6 +1948,7 @@ def main() -> None:
         clip_ratio=args.clip_ratio,
         target_kl=args.target_kl,
         entropy_coefficient=args.entropy_coefficient,
+        entropy_objective=args.entropy_objective,
         factorized_ppo_objective=args.factorized_ppo_objective,
         auxiliary_coefficient=args.auxiliary_coefficient,
         auxiliary_horizons=auxiliary_horizons,

@@ -437,6 +437,27 @@ class WalkForwardTrainingTests(TestCase):
                 factorized_ppo_objective="dimensionwise",
             )
 
+    def test_cli_builds_matched_entropy_objective_ablation(self):
+        args = _parser().parse_args(["--entropy-objective-ablation"])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(len(specs), 2)
+        self.assertIsNone(specs[0].entropy_objective)
+        self.assertEqual(specs[1].entropy_objective, "raw_mean")
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--entropy-objective", "raw_mean",
+                "--entropy-objective-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "requires"):
+            _model_specs_from_args(_parser().parse_args([
+                "--entropy-coefficient", "0",
+                "--entropy-objective-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "entropy_objective"):
+            ModelSpec(entropy_objective="all_slots")
+
     def test_cli_builds_matched_auxiliary_loss_ablation(self):
         args = _parser().parse_args([
             "--auxiliary-coefficient",
@@ -770,6 +791,7 @@ class WalkForwardTrainingTests(TestCase):
             selection["tie_break"],
             [
                 "dimensionwise_factorized_objective_ablation",
+                "raw_mean_entropy_objective_ablation",
                 "worst_training_seed_median_inference_latency",
                 "parameter_count",
                 "active_input_count",
@@ -1070,7 +1092,7 @@ class WalkForwardTrainingTests(TestCase):
             )
 
     @skipUnless(torch is not None, "install the optional ml extra")
-    def test_factorized_objective_ablation_reports_validation_only_lift(self):
+    def test_training_objective_ablations_report_validation_only_lift(self):
         candidates = (
             ModelSpec(kind="gru", encoder="flat", hidden_size=4),
             ModelSpec(
@@ -1078,6 +1100,12 @@ class WalkForwardTrainingTests(TestCase):
                 encoder="flat",
                 hidden_size=4,
                 factorized_ppo_objective="dimensionwise",
+            ),
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                entropy_objective="raw_mean",
             ),
         )
         with TemporaryDirectory() as directory:
@@ -1104,7 +1132,7 @@ class WalkForwardTrainingTests(TestCase):
                 env_kwargs={"slot_count": 2, "starting_cash": 1_000},
             )
 
-        joint, dimensionwise = summary["folds"][0]["model_selection"][
+        joint, dimensionwise, raw_entropy = summary["folds"][0]["model_selection"][
             "candidates"
         ]
         self.assertEqual(joint["effective_factorized_ppo_objective"], "joint")
@@ -1122,9 +1150,37 @@ class WalkForwardTrainingTests(TestCase):
         self.assertIsNone(
             joint["validation_score_lift_vs_joint_factorized_objective"]
         )
+        self.assertEqual(
+            joint["effective_entropy_objective"],
+            "feasible_normalized",
+        )
+        self.assertEqual(raw_entropy["effective_entropy_objective"], "raw_mean")
+        for candidate in (joint, dimensionwise, raw_entropy):
+            for replicate in candidate["training_seed_replicates"]:
+                entropy = replicate["entropy"]
+                self.assertEqual(
+                    entropy["objective"],
+                    candidate["effective_entropy_objective"],
+                )
+                self.assertGreaterEqual(
+                    entropy["minimum_feasible_normalized_entropy"],
+                    0.0,
+                )
+                self.assertLessEqual(
+                    entropy["maximum_feasible_normalized_entropy"],
+                    1.0,
+                )
+        self.assertAlmostEqual(
+            raw_entropy[
+                "validation_score_lift_vs_feasible_normalized_entropy"
+            ],
+            raw_entropy["selection"]["validation_selection_score"]
+            - joint["selection"]["validation_selection_score"],
+        )
         if (
             joint["selection"]["validation_selection_score"]
             == dimensionwise["selection"]["validation_selection_score"]
+            == raw_entropy["selection"]["validation_selection_score"]
         ):
             self.assertEqual(
                 summary["folds"][0]["model_selection"]["selected_model_id"],

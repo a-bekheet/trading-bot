@@ -118,6 +118,12 @@ class UniverseWalkForwardTests(TestCase):
                 hidden_size=4,
                 factorized_ppo_objective="dimensionwise",
             ),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
+                entropy_objective="raw_mean",
+            ),
         )
         with TemporaryDirectory() as directory:
             output_dir = Path(directory)
@@ -301,6 +307,32 @@ class UniverseWalkForwardTests(TestCase):
         self.assertIsNotNone(
             objective_ablation[
                 "validation_score_lift_vs_joint_factorized_objective"
+            ]
+        )
+        entropy_ablation = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if candidate["model"]["entropy_objective"] == "raw_mean"
+        )
+        self.assertEqual(
+            entropy_ablation["effective_entropy_objective"],
+            "raw_mean",
+        )
+        self.assertTrue(all(
+            replicate["entropy"]["objective"] == "raw_mean"
+            and 0
+            <= replicate["entropy"][
+                "minimum_feasible_normalized_entropy"
+            ]
+            <= replicate["entropy"][
+                "maximum_feasible_normalized_entropy"
+            ]
+            <= 1
+            for replicate in entropy_ablation["training_seed_replicates"]
+        ))
+        self.assertIsNotNone(
+            entropy_ablation[
+                "validation_score_lift_vs_feasible_normalized_entropy"
             ]
         )
         self.assertEqual(len(manifest["training_environments"]), 2)

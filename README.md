@@ -622,6 +622,33 @@ held-out policy made zero trades with zero return. This verifies independent
 training, aggregation, checkpoint selection, and constant deployment model count;
 it is not evidence of alpha.
 
+v0.58 makes entropy regularization invariant to padded and hold-only action
+rows. For every masked categorical factor with `K > 1` feasible choices, the
+trainer computes exact entropy divided by `log(K)` and averages only those
+explorable factors within each decision, then averages decisions. The result
+stays in `[0, 1]`; factors with one choice
+contribute neither a fake zero nor a divide-by-zero. This gives the same
+exploration scale to sparse and dense option surfaces and works unchanged with
+PPO, REINFORCE, GRU, LSTM, hybrid, gated mixture, graph encoders, and the
+single-leg joint decoder.
+
+Raw entropy, normalized entropy, and the explorable-factor fraction remain in
+every episode record. `--entropy-objective-ablation` adds otherwise matched
+legacy `raw_mean` candidates in both walk-forward runners and reports their
+validation-only lift. An exact score tie retains feasible-normalized entropy
+before latency comparison because this objective changes no inference work.
+On a local 512-transition, 33-row tensor benchmark, computing normalized and
+raw diagnostics took 1,187.21 microseconds versus 810.98 for raw entropy alone,
+about 0.74 microseconds of extra training work per transition.
+
+The real two-seed GOOG smoke gave both objectives zero robust validation score
+and the raw-mean ablation zero lift. The normalized checkpoint won the declared
+tie and its two-transition held-out path made no trades or return. This validates
+the invariant and selection path; it is not evidence of alpha. Checkpoint,
+single-ticker walk-forward, and universe walk-forward schemas advance to v43,
+v46, and v30. Feature and environment schemas remain `dimensionless.v17` and
+v22.
+
 v0.57 corrects the default factorized PPO objective to use the likelihood of
 the complete action vector. Because the row policies are conditionally
 independent, the exact joint log likelihood is the sum of their masked
@@ -985,8 +1012,13 @@ trainable. On the real AAPL 33-row mask, 1,024 untrained graph-hybrid samples
 fell from 24.06 requested orders per snapshot with zero bias to 0.74 with the
 sparse prior; the 95th percentile was two orders. PPO entropy regularization
 defaults to `1e-4`, matching basis-point reward scale more closely than the old
-`0.01`. Override these with `--initial-hold-bias` and
-`--entropy-coefficient`. Episode metrics retain requested option orders,
+`0.01`. The default `feasible_normalized` objective divides each masked
+factor's entropy by its current maximum `log(K)` and excludes factors with only
+one feasible choice before averaging decisions, so padding and unavailable
+contracts cannot dilute the
+bonus. Override these with `--initial-hold-bias`, `--entropy-coefficient`, and
+`--entropy-objective`. Episode metrics retain raw and normalized entropy,
+explorable-factor coverage, requested option orders,
 underlying orders, mean orders per step, and action density so sparsity is
 measured rather than assumed.
 
@@ -1082,6 +1114,7 @@ train-walk-forward \
   --start-sampling volatility_stratified \
   --start-sampling-ablation \
   --factorized-objective-ablation \
+  --entropy-objective-ablation \
   --ablation surface_wings \
   --ablation volatility_regime
 ```
@@ -1157,6 +1190,12 @@ candidate continue to use an exact joint likelihood. The optional
 reproduction, not as the recommended training default. An exact validation tie
 retains the joint candidate because this training-only choice has no deployment
 latency tradeoff.
+
+Add `--entropy-objective-ablation` to compare the default mask-density-invariant
+entropy against the legacy raw factor mean. The flag requires a positive
+entropy coefficient and creates a matched candidate for every declared model.
+Artifacts record both objective values and validation lift; an exact tie retains
+`feasible_normalized` because the choice adds no inference operations.
 
 When auxiliary training is enabled, add `--auxiliary-ablation` to create an
 otherwise matched candidate with coefficient zero. Both candidates start from

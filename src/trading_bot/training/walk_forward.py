@@ -55,7 +55,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v45"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v46"
 
 
 @dataclass(frozen=True)
@@ -187,6 +187,7 @@ class ModelSpec:
     burn_in_steps: int | None = None
     start_sampling: str | None = None
     factorized_ppo_objective: str | None = None
+    entropy_objective: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid", "mixture"}:
@@ -274,6 +275,15 @@ class ModelSpec:
         ):
             raise ValueError(
                 "dimensionwise objective requires factorized PPO"
+            )
+        if self.entropy_objective not in {
+            None,
+            "feasible_normalized",
+            "raw_mean",
+        }:
+            raise ValueError(
+                "model entropy_objective must be feasible_normalized, "
+                "raw_mean, or None"
             )
         normalized_horizons = tuple(self.auxiliary_horizons)
         if (
@@ -447,6 +457,34 @@ def _start_sampling_evidence(
     }
 
 
+def _entropy_evidence(
+    metrics: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize mask-aware exploration diagnostics for one replicate."""
+    normalized = tuple(
+        float(item["feasible_normalized_action_entropy"])
+        for item in metrics
+    )
+    return {
+        "objective": metrics[0]["entropy_objective"],
+        "episode_mean_effective_entropy": statistics.fmean(
+            float(item["entropy"]) for item in metrics
+        ),
+        "episode_mean_raw_entropy": statistics.fmean(
+            float(item["raw_action_entropy"]) for item in metrics
+        ),
+        "episode_mean_feasible_normalized_entropy": statistics.fmean(
+            normalized
+        ),
+        "minimum_feasible_normalized_entropy": min(normalized),
+        "maximum_feasible_normalized_entropy": max(normalized),
+        "episode_mean_explorable_factor_fraction": statistics.fmean(
+            float(item["explorable_action_factor_fraction"])
+            for item in metrics
+        ),
+    }
+
+
 def _training_seed_aggregate(
     runs: Sequence[dict[str, Any]],
     config: WalkForwardConfig,
@@ -506,6 +544,10 @@ def _select_seed_robust_group(
                 group["representative"][
                     "model_spec"
                 ].factorized_ppo_objective == "dimensionwise"
+            ),
+            int(
+                group["representative"]["model_spec"].entropy_objective
+                == "raw_mean"
             ),
             max(
                 run["inference_latency"]["median_microseconds"]
@@ -631,6 +673,11 @@ def run_walk_forward_training(
                         else "joint"
                     )
                 ),
+                entropy_objective=(
+                    fold_training.entropy_objective
+                    if candidate.entropy_objective is None
+                    else candidate.entropy_objective
+                ),
             )
             for seed_offset in walk_forward_config.training_seed_offsets:
                 candidate_training = replace(
@@ -687,6 +734,7 @@ def run_walk_forward_training(
                     "start_sampling_evidence": _start_sampling_evidence(
                         metrics
                     ),
+                    "entropy_evidence": _entropy_evidence(metrics),
                     "training_config": candidate_training,
                     "parameter_count": resolved_parameter_count,
                     "inference_latency": inference_latency,
@@ -757,6 +805,10 @@ def run_walk_forward_training(
                         candidate,
                         factorized_ppo_objective=None,
                     ).identifier,
+                    "entropy_objective_reference_model_id": replace(
+                        candidate,
+                        entropy_objective=None,
+                    ).identifier,
                 })
 
         grouped_runs = []
@@ -821,6 +873,9 @@ def run_walk_forward_training(
                 if run["model_spec"].algorithm == "ppo"
                 and run["model_spec"].action_decoder == "factorized"
                 else None,
+                "effective_entropy_objective": run[
+                    "training_config"
+                ].entropy_objective,
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": group["latency_eligible"],
@@ -847,6 +902,7 @@ def run_walk_forward_training(
                         "start_sampling": replicate[
                             "start_sampling_evidence"
                         ],
+                        "entropy": replicate["entropy_evidence"],
                     }
                     for replicate in group["replicates"]
                 ],
@@ -907,6 +963,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_stratified_starts": None,
                 "validation_reward_lift_vs_joint_factorized_objective": None,
                 "validation_score_lift_vs_joint_factorized_objective": None,
+                "validation_reward_lift_vs_feasible_normalized_entropy": None,
+                "validation_score_lift_vs_feasible_normalized_entropy": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -1056,6 +1114,24 @@ def run_walk_forward_training(
                     aggregate_reward
                     - validation_rewards[
                         run["factorized_objective_reference_model_id"]
+                    ]
+                )
+            entropy_reference = validation_scores.get(
+                run["entropy_objective_reference_model_id"]
+            )
+            if (
+                run["model_spec"].entropy_objective == "raw_mean"
+                and entropy_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_feasible_normalized_entropy"
+                ] = aggregate_score - entropy_reference
+                result[
+                    "validation_reward_lift_vs_feasible_normalized_entropy"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["entropy_objective_reference_model_id"]
                     ]
                 )
         model = winning_run["model"]
@@ -1260,6 +1336,7 @@ def run_walk_forward_training(
                 },
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
+                    "raw_mean_entropy_objective_ablation",
                     "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
@@ -1514,6 +1591,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--entropy-coefficient", type=float, default=1e-4)
     parser.add_argument(
+        "--entropy-objective",
+        choices=("feasible_normalized", "raw_mean"),
+        default="feasible_normalized",
+        help=(
+            "normalize masked entropy by each feasible action set or use "
+            "the legacy raw factor mean"
+        ),
+    )
+    parser.add_argument(
         "--factorized-ppo-objective",
         choices=("joint", "dimensionwise"),
         default="joint",
@@ -1578,6 +1664,13 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "add matched legacy dimension-wise PPO candidates for every "
             "factorized PPO candidate"
+        ),
+    )
+    parser.add_argument(
+        "--entropy-objective-ablation",
+        action="store_true",
+        help=(
+            "add matched legacy raw-mean entropy candidates for every model"
         ),
     )
     parser.add_argument("--slot-count", type=int, default=32)
@@ -1776,6 +1869,21 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
             replace(spec, factorized_ppo_objective="dimensionwise")
             for spec in references
         )
+    if args.entropy_objective_ablation:
+        if args.entropy_objective != "feasible_normalized":
+            raise ValueError(
+                "--entropy-objective-ablation requires "
+                "--entropy-objective feasible_normalized"
+            )
+        if args.entropy_coefficient <= 0:
+            raise ValueError(
+                "--entropy-objective-ablation requires "
+                "--entropy-coefficient > 0"
+            )
+        specs.extend(
+            replace(spec, entropy_objective="raw_mean")
+            for spec in full_specs
+        )
     return _normalize_model_specs(specs)
 
 
@@ -1820,6 +1928,7 @@ def main() -> None:
                     args.selection_worst_ticker_weight
                 ),
                 entropy_coefficient=args.entropy_coefficient,
+                entropy_objective=args.entropy_objective,
                 factorized_ppo_objective=args.factorized_ppo_objective,
                 auxiliary_coefficient=args.auxiliary_coefficient,
                 auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),

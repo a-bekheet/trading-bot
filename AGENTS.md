@@ -360,13 +360,24 @@ entropy regularization, gradient clipping, and contiguous recurrent chunks.
 Policy heads initialize with a trainable hold-logit prior because a near-uniform
 33-row categorical policy creates pathological turnover before learning begins.
 The default entropy coefficient is `1e-4`, calibrated to return-scale rewards.
+The default `feasible_normalized` entropy objective operates on the already
+masked categorical distribution. For each likelihood factor, count only finite
+masked logits as feasible actions. When `K > 1`, divide exact categorical
+entropy by `log(K)`; average only those explorable factors. A factor with
+`K <= 1` is excluded. First average within each decision, then average decisions
+with at least one explorable factor so dense surfaces do not receive more weight
+than sparse ones. This makes the objective bounded in `[0, 1]` and invariant to
+padded or hold-only slots. Never normalize by the global encoded action count,
+normalize before masking, or let right-padding enter the denominator. Preserve
+raw entropy, normalized entropy, and the explorable-factor fraction in episode
+metrics. Keep `raw_mean` only as the named validation ablation, require a
+positive coefficient for that comparison, and prefer `feasible_normalized` on
+an exact score tie because neither objective changes inference.
 Do not hard-cap active rows or post-process sampled actions without deriving the
 matching joint likelihood; that would invalidate PPO ratios. Preserve requested
 option/underlying order counts and action-density metrics in every episode.
 Persist the decoder, number of likelihood factors, likelihood aggregation,
-importance-ratio count, and score-function likelihood count. Entropy remains
-the mean per decoder factor so its
-coefficient does not scale with the slot count. `single_leg` must encode
+importance-ratio count, and score-function likelihood count. `single_leg` must encode
 masks before sampling, decode to the existing environment action array, reject
 training actions with multiple non-hold rows, and retain one scalar log
 probability/entropy per step. It cannot express same-snapshot spreads or hedges,

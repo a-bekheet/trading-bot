@@ -45,6 +45,7 @@ from trading_bot.training.walk_forward import (
     ModelSpec,
     WalkForwardConfig,
     _model_specs_from_args,
+    _entropy_evidence,
     _normalize_model_specs,
     _parser as single_parser,
     _selected_metric,
@@ -57,7 +58,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v29"
+    "research-demo.universe-walk-forward.v30"
 )
 
 
@@ -437,6 +438,11 @@ def run_universe_walk_forward_training(
                         else "joint"
                     )
                 ),
+                entropy_objective=(
+                    fold_training.entropy_objective
+                    if candidate.entropy_objective is None
+                    else candidate.entropy_objective
+                ),
             )
             for seed_offset in walk_forward_config.training_seed_offsets:
                 candidate_training = replace(
@@ -488,6 +494,7 @@ def run_universe_walk_forward_training(
                     "start_sampling_evidence": _start_sampling_evidence(
                         metrics
                     ),
+                    "entropy_evidence": _entropy_evidence(metrics),
                     "training_config": candidate_training,
                     "parameter_count": parameter_count,
                     "inference_latency": inference_latency,
@@ -543,6 +550,10 @@ def run_universe_walk_forward_training(
                     "factorized_objective_reference_model_id": replace(
                         candidate,
                         factorized_ppo_objective=None,
+                    ).identifier,
+                    "entropy_objective_reference_model_id": replace(
+                        candidate,
+                        entropy_objective=None,
                     ).identifier,
                 })
         grouped_runs = []
@@ -630,6 +641,9 @@ def run_universe_walk_forward_training(
                 if run["model_spec"].algorithm == "ppo"
                 and run["model_spec"].action_decoder == "factorized"
                 else None,
+                "effective_entropy_objective": run[
+                    "training_config"
+                ].entropy_objective,
                 "parameter_count": run["parameter_count"],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
@@ -699,6 +713,7 @@ def run_universe_walk_forward_training(
                         "start_sampling": replicate[
                             "start_sampling_evidence"
                         ],
+                        "entropy": replicate["entropy_evidence"],
                     }
                     for replicate in group["replicates"]
                 ],
@@ -716,6 +731,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_stratified_starts": None,
                 "validation_score_lift_vs_joint_factorized_objective": None,
                 "validation_reward_lift_vs_joint_factorized_objective": None,
+                "validation_score_lift_vs_feasible_normalized_entropy": None,
+                "validation_reward_lift_vs_feasible_normalized_entropy": None,
                 "selection": {
                     "scope": selected["evaluation_scope"],
                     "episode": selected["episode"],
@@ -860,6 +877,24 @@ def run_universe_walk_forward_training(
                         run["factorized_objective_reference_model_id"]
                     ]
                 )
+            entropy_reference = validation_scores.get(
+                run["entropy_objective_reference_model_id"]
+            )
+            if (
+                run["model_spec"].entropy_objective == "raw_mean"
+                and entropy_reference is not None
+            ):
+                result[
+                    "validation_score_lift_vs_feasible_normalized_entropy"
+                ] = aggregate_score - entropy_reference
+                result[
+                    "validation_reward_lift_vs_feasible_normalized_entropy"
+                ] = (
+                    aggregate_reward
+                    - validation_rewards[
+                        run["entropy_objective_reference_model_id"]
+                    ]
+                )
             candidate_results.append(result)
 
         model = winning_run["model"]
@@ -991,6 +1026,7 @@ def run_universe_walk_forward_training(
                 },
                 "tie_break": [
                     "dimensionwise_factorized_objective_ablation",
+                    "raw_mean_entropy_objective_ablation",
                     "worst_training_seed_median_inference_latency",
                     "parameter_count",
                     "active_input_count",
@@ -1151,6 +1187,7 @@ def main() -> None:
                     args.selection_worst_ticker_weight
                 ),
                 entropy_coefficient=args.entropy_coefficient,
+                entropy_objective=args.entropy_objective,
                 factorized_ppo_objective=args.factorized_ppo_objective,
                 auxiliary_coefficient=args.auxiliary_coefficient,
                 auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),
