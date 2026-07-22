@@ -46,7 +46,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v22"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v23"
 
 
 @dataclass(frozen=True)
@@ -121,6 +121,7 @@ class ModelSpec:
     algorithm: str = "ppo"
     parameter_budget: int | None = None
     auxiliary_coefficient: float | None = None
+    auxiliary_horizons: tuple[int, ...] = (1,)
 
     def __post_init__(self) -> None:
         if self.kind not in {"gru", "lstm", "hybrid"}:
@@ -149,6 +150,20 @@ class ModelSpec:
             raise ValueError(
                 "model auxiliary_coefficient must be finite and non-negative"
             )
+        normalized_horizons = tuple(self.auxiliary_horizons)
+        if (
+            not normalized_horizons
+            or any(
+                not isinstance(horizon, int) or isinstance(horizon, bool)
+                for horizon in normalized_horizons
+            )
+            or any(horizon < 1 for horizon in normalized_horizons)
+            or tuple(sorted(set(normalized_horizons))) != normalized_horizons
+        ):
+            raise ValueError(
+                "model auxiliary_horizons must be unique positive increasing integers"
+            )
+        object.__setattr__(self, "auxiliary_horizons", normalized_horizons)
         feature_ablation_indices(self.disabled_feature_groups, 1)
 
     @property
@@ -181,7 +196,10 @@ class ModelSpec:
             graph_layers=self.graph_layers,
             graph_neighbors=self.graph_neighbors,
             initial_hold_bias=self.initial_hold_bias,
-            auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
+            auxiliary_target_count=(
+                len(AUXILIARY_TARGET_FEATURES) * len(self.auxiliary_horizons)
+            ),
+            auxiliary_horizons=self.auxiliary_horizons,
             masked_input_indices=feature_ablation_indices(
                 self.disabled_feature_groups,
                 env.slot_count,
@@ -319,6 +337,7 @@ def run_walk_forward_training(
             candidate_training = replace(
                 fold_training,
                 algorithm=candidate.algorithm,
+                auxiliary_horizons=candidate.auxiliary_horizons,
                 auxiliary_coefficient=(
                     fold_training.auxiliary_coefficient
                     if candidate.auxiliary_coefficient is None
@@ -416,6 +435,10 @@ def run_walk_forward_training(
                     candidate,
                     auxiliary_coefficient=None,
                 ).identifier,
+                "auxiliary_horizon_reference_model_id": replace(
+                    candidate,
+                    auxiliary_horizons=fold_training.auxiliary_horizons,
+                ).identifier,
             })
 
         eligible_runs = [
@@ -449,6 +472,9 @@ def run_walk_forward_training(
                 "effective_auxiliary_coefficient": run[
                     "training_config"
                 ].auxiliary_coefficient,
+                "effective_auxiliary_horizons": list(
+                    run["training_config"].auxiliary_horizons
+                ),
                 "parameter_count": run["parameter_count"],
                 "inference_latency": run["inference_latency"],
                 "deployment_eligible": run["latency_eligible"],
@@ -475,6 +501,8 @@ def run_walk_forward_training(
                 "validation_score_lift_vs_full": None,
                 "validation_reward_lift_vs_auxiliary_enabled": None,
                 "validation_score_lift_vs_auxiliary_enabled": None,
+                "validation_reward_lift_vs_configured_horizons": None,
+                "validation_score_lift_vs_configured_horizons": None,
                 "selection": {
                     "scope": run["selection_scope"],
                     "episode": run["selected_episode"],
@@ -524,6 +552,23 @@ def run_walk_forward_training(
                 result["validation_reward_lift_vs_auxiliary_enabled"] = (
                     run["validation_total_reward"]
                     - validation_rewards[run["auxiliary_reference_model_id"]]
+                )
+            horizon_reference = validation_scores.get(
+                run["auxiliary_horizon_reference_model_id"]
+            )
+            if (
+                run["model_spec"].auxiliary_horizons
+                != fold_training.auxiliary_horizons
+                and horizon_reference is not None
+            ):
+                result["validation_score_lift_vs_configured_horizons"] = (
+                    run["validation_selection_score"] - horizon_reference
+                )
+                result["validation_reward_lift_vs_configured_horizons"] = (
+                    run["validation_total_reward"]
+                    - validation_rewards[
+                        run["auxiliary_horizon_reference_model_id"]
+                    ]
                 )
         model = winning_run["model"]
         metrics = winning_run["metrics"]
@@ -834,7 +879,16 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help=(
-            "weight for train-only next-market prediction loss; zero disables"
+            "weight for train-only future-market prediction loss; zero disables"
+        ),
+    )
+    parser.add_argument(
+        "--auxiliary-horizon",
+        action="append",
+        type=int,
+        help=(
+            "repeat for cumulative train-only prediction horizons; defaults "
+            "to one step"
         ),
     )
     parser.add_argument(
@@ -842,6 +896,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "add a matched validation candidate with auxiliary loss disabled"
+        ),
+    )
+    parser.add_argument(
+        "--auxiliary-horizon-ablation",
+        action="store_true",
+        help=(
+            "add matched one-step candidates for configured multi-horizon "
+            "models"
         ),
     )
     parser.add_argument("--slot-count", type=int, default=32)
@@ -865,6 +927,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
     candidates = args.candidate or [f"{args.encoder}:{args.kind}"]
+    auxiliary_horizons = tuple(args.auxiliary_horizon or (1,))
     specs = []
     for candidate in candidates:
         parts = candidate.split(":")
@@ -894,12 +957,22 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 initial_hold_bias=args.initial_hold_bias,
                 algorithm=algorithm,
                 parameter_budget=args.parameter_budget,
+                auxiliary_horizons=auxiliary_horizons,
             )
         )
     full_specs = tuple(specs)
     for group in args.ablation or ():
         specs.extend(
             replace(spec, disabled_feature_groups=(group,))
+            for spec in full_specs
+        )
+    if args.auxiliary_horizon_ablation:
+        if auxiliary_horizons == (1,):
+            raise ValueError(
+                "--auxiliary-horizon-ablation requires a horizon beyond one"
+            )
+        specs.extend(
+            replace(spec, auxiliary_horizons=(1,))
             for spec in full_specs
         )
     if args.auxiliary_ablation:
@@ -969,6 +1042,7 @@ def main() -> None:
                 ),
                 entropy_coefficient=args.entropy_coefficient,
                 auxiliary_coefficient=args.auxiliary_coefficient,
+                auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),
                 algorithm=args.algorithm,
                 seed=args.seed,
             ),

@@ -34,6 +34,7 @@ class RecurrentConfig:
     initial_hold_bias: float = 5.0
     masked_input_indices: tuple[int, ...] = ()
     auxiliary_target_count: int = 0
+    auxiliary_horizons: tuple[int, ...] = (1,)
 
     def __post_init__(self) -> None:
         if min(self.input_size, self.slot_count, self.action_count, self.hidden_size) < 1:
@@ -61,6 +62,20 @@ class RecurrentConfig:
             raise ValueError("masked_input_indices are outside the input layout")
         if self.auxiliary_target_count < 0:
             raise ValueError("auxiliary_target_count cannot be negative")
+        normalized_horizons = tuple(self.auxiliary_horizons)
+        if (
+            not normalized_horizons
+            or any(
+                not isinstance(horizon, int) or isinstance(horizon, bool)
+                for horizon in normalized_horizons
+            )
+            or any(horizon < 1 for horizon in normalized_horizons)
+            or tuple(sorted(set(normalized_horizons))) != normalized_horizons
+        ):
+            raise ValueError(
+                "auxiliary_horizons must be unique positive increasing integers"
+            )
+        object.__setattr__(self, "auxiliary_horizons", normalized_horizons)
 
 
 def build_recurrent_actor_critic(config: RecurrentConfig):
@@ -395,7 +410,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             action_mask=None,
             hidden_state=None,
         ):
-            """Return PPO outputs plus train-only next-market predictions."""
+            """Return PPO outputs plus train-only future-market predictions."""
             if self.auxiliary is None:
                 raise RuntimeError("model has no auxiliary prediction head")
             encoded, hidden, node_embeddings = self._encode_sequence(

@@ -75,6 +75,30 @@ class WalkForwardTrainingTests(TestCase):
         with self.assertRaisesRegex(ValueError, "auxiliary_coefficient"):
             ModelSpec(auxiliary_coefficient=float("nan"))
 
+    def test_cli_builds_one_step_auxiliary_horizon_ablation(self):
+        args = _parser().parse_args([
+            "--auxiliary-coefficient",
+            "0.05",
+            "--auxiliary-horizon",
+            "1",
+            "--auxiliary-horizon",
+            "4",
+            "--auxiliary-horizon-ablation",
+        ])
+
+        specs = _model_specs_from_args(args)
+
+        self.assertEqual(
+            [spec.auxiliary_horizons for spec in specs],
+            [(1, 4), (1,)],
+        )
+        with self.assertRaisesRegex(ValueError, "horizon beyond one"):
+            _model_specs_from_args(_parser().parse_args([
+                "--auxiliary-horizon-ablation",
+            ]))
+        with self.assertRaisesRegex(ValueError, "auxiliary_horizons"):
+            ModelSpec(auxiliary_horizons=(2, 1))
+
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_runner_selects_on_validation_then_reports_held_out_test(self):
         with TemporaryDirectory() as directory:
@@ -364,12 +388,19 @@ class WalkForwardTrainingTests(TestCase):
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_auxiliary_ablation_reports_validation_only_lift(self):
         candidates = (
+            ModelSpec(
+                kind="gru",
+                encoder="flat",
+                hidden_size=4,
+                auxiliary_horizons=(1, 2),
+            ),
             ModelSpec(kind="gru", encoder="flat", hidden_size=4),
             ModelSpec(
                 kind="gru",
                 encoder="flat",
                 hidden_size=4,
                 auxiliary_coefficient=0.0,
+                auxiliary_horizons=(1, 2),
             ),
         )
         with TemporaryDirectory() as directory:
@@ -391,6 +422,7 @@ class WalkForwardTrainingTests(TestCase):
                     minibatch_size=4,
                     evaluation_interval=1,
                     auxiliary_coefficient=0.05,
+                    auxiliary_horizons=(1, 2),
                     seed=29,
                 ),
                 Path(directory),
@@ -398,8 +430,10 @@ class WalkForwardTrainingTests(TestCase):
             )
 
         results = summary["folds"][0]["model_selection"]["candidates"]
-        enabled, disabled = results
+        enabled, one_step, disabled = results
         self.assertEqual(enabled["effective_auxiliary_coefficient"], 0.05)
+        self.assertEqual(enabled["effective_auxiliary_horizons"], [1, 2])
+        self.assertEqual(one_step["effective_auxiliary_horizons"], [1])
         self.assertEqual(disabled["effective_auxiliary_coefficient"], 0.0)
         self.assertIsNone(
             enabled["validation_score_lift_vs_auxiliary_enabled"]
@@ -412,6 +446,16 @@ class WalkForwardTrainingTests(TestCase):
         self.assertAlmostEqual(
             disabled["validation_reward_lift_vs_auxiliary_enabled"],
             disabled["selection"]["validation_total_reward"]
+            - enabled["selection"]["validation_total_reward"],
+        )
+        self.assertAlmostEqual(
+            one_step["validation_score_lift_vs_configured_horizons"],
+            one_step["selection"]["validation_selection_score"]
+            - enabled["selection"]["validation_selection_score"],
+        )
+        self.assertAlmostEqual(
+            one_step["validation_reward_lift_vs_configured_horizons"],
+            one_step["selection"]["validation_total_reward"]
             - enabled["selection"]["validation_total_reward"],
         )
 

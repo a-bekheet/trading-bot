@@ -16,9 +16,10 @@ from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION, Observat
 from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
     FEATURE_ABLATION_GROUPS,
-    auxiliary_market_targets,
+    auxiliary_market_change_targets,
     build_windows,
     feature_ablation_indices,
+    multi_horizon_auxiliary_targets,
     observation_vector,
 )
 
@@ -71,22 +72,31 @@ def surface_snapshot(
 
 
 class FeatureSequenceTests(TestCase):
-    def test_auxiliary_market_targets_use_next_state_scaling_and_coverage(self):
+    @staticmethod
+    def auxiliary_observation(
+        timestamp: str,
+        *,
+        spot: float,
+        atm: float,
+        risk_reversal: float,
+        butterfly: float,
+        term_slope: float,
+        wing_coverage: float = 1.0,
+    ) -> Observation:
         market = np.zeros(len(MARKET_FEATURES), dtype=float)
         for name, value in {
-            "underlyingPrice": 100,
-            "underlyingReturn": 0.01,
-            "frontAtmIvChange": 0.03,
-            "frontAtmIvChangeCoverage": 0.5,
-            "front25DeltaRiskReversalChange": 0.02,
-            "front25DeltaButterflyChange": -0.01,
-            "frontWingChangeCoverage": 0.5,
-            "atmTermStructureSlopeChange": -0.1,
-            "atmTermSlopeChangeCoverage": 1.0,
+            "underlyingPrice": spot,
+            "frontAtmIv": atm,
+            "frontAtmIvCoverage": 1.0,
+            "front25DeltaRiskReversal": risk_reversal,
+            "front25DeltaButterfly": butterfly,
+            "front25DeltaCoverage": wing_coverage,
+            "atmTermStructureSlope": term_slope,
+            "atmTermSlopeCoverage": 1.0,
         }.items():
             market[MARKET_FEATURES.index(name)] = value
-        observation = Observation(
-            "next",
+        return Observation(
+            timestamp,
             market,
             np.zeros((1, len(CONTRACT_FEATURES))),
             np.zeros(8),
@@ -95,13 +105,72 @@ class FeatureSequenceTests(TestCase):
             ("C1",),
         )
 
-        values, available = auxiliary_market_targets(observation)
+    def test_auxiliary_market_targets_use_endpoint_scaling_and_coverage(self):
+        current = self.auxiliary_observation(
+            "current",
+            spot=100,
+            atm=0.20,
+            risk_reversal=-0.02,
+            butterfly=0.01,
+            term_slope=-0.03,
+        )
+        future = self.auxiliary_observation(
+            "future",
+            spot=101,
+            atm=0.23,
+            risk_reversal=0.0,
+            butterfly=0.0,
+            term_slope=-0.13,
+            wing_coverage=0.5,
+        )
+
+        values, available = auxiliary_market_change_targets(current, future)
 
         self.assertEqual(len(values), len(AUXILIARY_TARGET_FEATURES))
         np.testing.assert_allclose(available, (1, 1, 0, 0, 1))
         self.assertAlmostEqual(values[0], np.log1p(1.0))
         self.assertAlmostEqual(values[1], np.log1p(0.03))
         self.assertAlmostEqual(values[-1], -np.log1p(0.1))
+
+    def test_multi_horizon_auxiliary_targets_are_cumulative_and_tail_masked(self):
+        observations = [
+            self.auxiliary_observation(
+                str(index),
+                spot=100 + 2 * index,
+                atm=0.20 + 0.01 * index,
+                risk_reversal=-0.02 + 0.005 * index,
+                butterfly=0.01 + 0.002 * index,
+                term_slope=-0.03 + 0.004 * index,
+                wing_coverage=0.5 if index == 2 else 1.0,
+            )
+            for index in range(5)
+        ]
+
+        values, available = multi_horizon_auxiliary_targets(
+            observations,
+            (1, 4),
+        )
+        direct, direct_mask = auxiliary_market_change_targets(
+            observations[0],
+            observations[4],
+        )
+
+        self.assertEqual(values.shape, (4, 2 * len(AUXILIARY_TARGET_FEATURES)))
+        np.testing.assert_allclose(values[0, 5:], direct)
+        np.testing.assert_allclose(available[0, 5:], direct_mask)
+        np.testing.assert_allclose(available[1:, 5:], 0.0)
+        self.assertAlmostEqual(
+            values[0, 5],
+            np.log1p(abs(108 / 100 - 1) * 100),
+        )
+        # Both endpoints have full wing coverage for horizon four, while the
+        # one-step target ending at the sparse middle snapshot is unavailable.
+        self.assertEqual(available[0, 7], 1.0)
+        self.assertEqual(available[1, 2], 0.0)
+
+        for invalid in ((), (0,), (2, 1), (1, 1)):
+            with self.assertRaisesRegex(ValueError, "horizons"):
+                multi_horizon_auxiliary_targets(observations, invalid)
 
     def test_feature_ablation_groups_map_to_stable_non_overlapping_inputs(self):
         wing_indices = feature_ablation_indices(("surface_wings",), 2)

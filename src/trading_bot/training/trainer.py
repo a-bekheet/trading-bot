@@ -19,13 +19,13 @@ from trading_bot.training.recurrent import RecurrentConfig, build_recurrent_acto
 from trading_bot.training.schemas import FEATURE_VECTOR_SCHEMA_VERSION
 from trading_bot.training.sequence import (
     AUXILIARY_TARGET_FEATURES,
-    auxiliary_market_targets,
+    multi_horizon_auxiliary_targets,
     observation_vector,
 )
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v20"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v21"
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,7 @@ class TrainingConfig:
     selection_cross_ticker_std_penalty: float = 0.0
     selection_worst_ticker_weight: float = 0.0
     auxiliary_coefficient: float = 0.0
+    auxiliary_horizons: tuple[int, ...] = (1,)
 
     def __post_init__(self) -> None:
         if self.episodes < 1 or self.sequence_length < 1:
@@ -75,8 +76,30 @@ class TrainingConfig:
             or self.auxiliary_coefficient < 0
         ):
             raise ValueError("auxiliary_coefficient must be finite and non-negative")
+        normalized_horizons = tuple(self.auxiliary_horizons)
+        if (
+            not normalized_horizons
+            or any(
+                not isinstance(horizon, int) or isinstance(horizon, bool)
+                for horizon in normalized_horizons
+            )
+            or any(horizon < 1 for horizon in normalized_horizons)
+            or tuple(sorted(set(normalized_horizons))) != normalized_horizons
+        ):
+            raise ValueError(
+                "auxiliary_horizons must be unique positive increasing integers"
+            )
+        object.__setattr__(self, "auxiliary_horizons", normalized_horizons)
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError("max_steps must be positive when provided")
+        if (
+            self.auxiliary_coefficient > 0
+            and self.max_steps is not None
+            and self.max_steps < max(self.auxiliary_horizons)
+        ):
+            raise ValueError(
+                "max_steps must reach every enabled auxiliary horizon"
+            )
         if not isinstance(self.random_start, bool):
             raise ValueError("random_start must be a boolean")
         if self.evaluation_interval < 1:
@@ -462,14 +485,23 @@ def train_actor_critic(
     if recurrent_config.feature_vector_schema != FEATURE_VECTOR_SCHEMA_VERSION:
         raise ValueError("model feature-vector schema does not match the trainer")
     auxiliary_enabled = config.auxiliary_coefficient > 0
+    expected_auxiliary_target_count = (
+        len(AUXILIARY_TARGET_FEATURES) * len(config.auxiliary_horizons)
+    )
     auxiliary_target_contract = (
-        recurrent_config.auxiliary_target_count == len(AUXILIARY_TARGET_FEATURES)
+        recurrent_config.auxiliary_target_count
+        == expected_auxiliary_target_count
     )
     if recurrent_config.auxiliary_target_count not in {
         0,
-        len(AUXILIARY_TARGET_FEATURES),
+        expected_auxiliary_target_count,
     }:
         raise ValueError("model auxiliary target layout does not match the trainer")
+    if (
+        auxiliary_target_contract
+        and recurrent_config.auxiliary_horizons != config.auxiliary_horizons
+    ):
+        raise ValueError("model and trainer auxiliary horizons do not match")
     if auxiliary_enabled and not auxiliary_target_contract:
         raise ValueError(
             "enabled auxiliary loss requires one model output per auxiliary target"
@@ -494,6 +526,16 @@ def train_actor_critic(
             if len(environment.dataset) < 2:
                 raise ValueError(
                     f"{pool_name} environment requires at least two snapshots"
+                )
+            if (
+                pool_name == "training"
+                and auxiliary_enabled
+                and len(environment.dataset) - 1
+                < max(config.auxiliary_horizons)
+            ):
+                raise ValueError(
+                    "training environment is shorter than an enabled "
+                    "auxiliary horizon"
                 )
     selection_scope = (
         (
@@ -545,8 +587,7 @@ def train_actor_critic(
         rewards = []
         old_log_probabilities = []
         old_values = []
-        auxiliary_targets = []
-        auxiliary_masks = []
+        auxiliary_observations = [observation] if auxiliary_target_contract else []
         chunk_hidden_states = []
         hidden_state = None
         invalid_actions = executions = steps = 0
@@ -580,9 +621,7 @@ def train_actor_critic(
                 action_array
             )
             if auxiliary_target_contract:
-                target, target_mask = auxiliary_market_targets(observation)
-                auxiliary_targets.append(torch.from_numpy(target))
-                auxiliary_masks.append(torch.from_numpy(target_mask))
+                auxiliary_observations.append(observation)
             sequences.append(sequence.squeeze(0).squeeze(0))
             action_masks.append(action_mask.squeeze(0))
             actions.append(action.squeeze(0))
@@ -617,12 +656,18 @@ def train_actor_critic(
         old_log_probs_tensor = torch.stack(old_log_probabilities)
         old_values_tensor = torch.stack(old_values)
         rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
-        auxiliary_targets_tensor = (
-            torch.stack(auxiliary_targets) if auxiliary_target_contract else None
-        )
-        auxiliary_masks_tensor = (
-            torch.stack(auxiliary_masks) if auxiliary_target_contract else None
-        )
+        if auxiliary_target_contract:
+            auxiliary_values, auxiliary_available = (
+                multi_horizon_auxiliary_targets(
+                    auxiliary_observations,
+                    config.auxiliary_horizons,
+                )
+            )
+            auxiliary_targets_tensor = torch.from_numpy(auxiliary_values)
+            auxiliary_masks_tensor = torch.from_numpy(auxiliary_available)
+        else:
+            auxiliary_targets_tensor = None
+            auxiliary_masks_tensor = None
         if config.algorithm == "ppo":
             advantages, returns_tensor = _generalized_advantages(
                 rewards_tensor,
@@ -961,15 +1006,29 @@ def train_actor_critic(
                 "auxiliary_mae": float(means[8]),
                 "auxiliary_target_coverage": (
                     {
-                        name: float(coverage)
-                        for name, coverage in zip(
-                            AUXILIARY_TARGET_FEATURES,
-                            auxiliary_masks_tensor.mean(dim=0).tolist(),
-                            strict=True,
+                        f"t+{horizon}": {
+                            name: float(coverage)
+                            for name, coverage in zip(
+                                AUXILIARY_TARGET_FEATURES,
+                                auxiliary_masks_tensor.view(
+                                    steps,
+                                    len(config.auxiliary_horizons),
+                                    len(AUXILIARY_TARGET_FEATURES),
+                                ).mean(dim=0)[horizon_index].tolist(),
+                                strict=True,
+                            )
+                        }
+                        for horizon_index, horizon in enumerate(
+                            config.auxiliary_horizons
                         )
                     }
                     if auxiliary_target_contract
-                    else {name: 0.0 for name in AUXILIARY_TARGET_FEATURES}
+                    else {
+                        f"t+{horizon}": {
+                            name: 0.0 for name in AUXILIARY_TARGET_FEATURES
+                        }
+                        for horizon in config.auxiliary_horizons
+                    }
                 ),
                 "explained_variance": explained_variance,
                 "algorithm": config.algorithm,
@@ -1051,7 +1110,9 @@ def checkpoint_manifest(
             "enabled": training_config.auxiliary_coefficient > 0,
             "coefficient": training_config.auxiliary_coefficient,
             "targets": list(AUXILIARY_TARGET_FEATURES),
-            "availability": "point_in_time_coverage_mask",
+            "horizons": list(training_config.auxiliary_horizons),
+            "target_semantics": "cumulative_change_from_policy_state",
+            "availability": "endpoint_point_in_time_coverage_mask",
             "inference_path": "excluded_from_policy_inference",
         },
         "feature_vector_schema": FEATURE_VECTOR_SCHEMA_VERSION,
@@ -1205,7 +1266,16 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help=(
-            "weight for train-only next-market prediction loss; zero disables"
+            "weight for train-only future-market prediction loss; zero disables"
+        ),
+    )
+    parser.add_argument(
+        "--auxiliary-horizon",
+        action="append",
+        type=int,
+        help=(
+            "repeat for cumulative train-only prediction horizons; defaults "
+            "to one step"
         ),
     )
     parser.add_argument("--evaluation-interval", type=int, default=5)
@@ -1248,6 +1318,7 @@ def _symbols_from_args(args: argparse.Namespace) -> tuple[str, ...]:
 
 def main() -> None:
     args = _parser().parse_args()
+    auxiliary_horizons = tuple(args.auxiliary_horizon or (1,))
     symbols = _symbols_from_args(args)
     environments = tuple(
         OptionsEnv.from_directory(
@@ -1290,7 +1361,10 @@ def main() -> None:
         graph_hidden_size=args.graph_hidden_size,
         graph_layers=args.graph_layers,
         graph_neighbors=args.graph_neighbors,
-        auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
+        auxiliary_target_count=(
+            len(AUXILIARY_TARGET_FEATURES) * len(auxiliary_horizons)
+        ),
+        auxiliary_horizons=auxiliary_horizons,
     )
     training_config = TrainingConfig(
         episodes=args.episodes,
@@ -1305,6 +1379,7 @@ def main() -> None:
         target_kl=args.target_kl,
         entropy_coefficient=args.entropy_coefficient,
         auxiliary_coefficient=args.auxiliary_coefficient,
+        auxiliary_horizons=auxiliary_horizons,
         evaluation_interval=args.evaluation_interval,
         selection_patience=(
             None if args.selection_patience == 0 else args.selection_patience

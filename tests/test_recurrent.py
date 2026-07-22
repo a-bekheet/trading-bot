@@ -51,6 +51,8 @@ class RecurrentTests(TestCase):
             RecurrentConfig(5, 2, 3, masked_input_indices=(1, 1))
         with self.assertRaisesRegex(ValueError, "auxiliary_target_count"):
             RecurrentConfig(5, 2, 3, auxiliary_target_count=-1)
+        with self.assertRaisesRegex(ValueError, "auxiliary_horizons"):
+            RecurrentConfig(5, 2, 3, auxiliary_horizons=(2, 1))
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_auxiliary_head_is_train_only_and_preserves_policy_outputs(self):

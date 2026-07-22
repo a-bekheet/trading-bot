@@ -74,13 +74,20 @@ class UniverseWalkForwardTests(TestCase):
     def test_shared_universe_selects_before_per_ticker_heldout_evaluation(self):
         datasets = (renamed_dataset("AAA"), renamed_dataset("BBB"))
         candidates = (
-            ModelSpec("gru", "flat", hidden_size=4),
+            ModelSpec(
+                "gru",
+                "flat",
+                hidden_size=4,
+                auxiliary_horizons=(1, 2),
+            ),
             ModelSpec("lstm", "flat", hidden_size=4),
+            ModelSpec("gru", "flat", hidden_size=4),
             ModelSpec(
                 "gru",
                 "flat",
                 hidden_size=4,
                 auxiliary_coefficient=0.0,
+                auxiliary_horizons=(1, 2),
             ),
         )
         with TemporaryDirectory() as directory:
@@ -108,6 +115,7 @@ class UniverseWalkForwardTests(TestCase):
                     selection_cross_ticker_std_penalty=0.25,
                     selection_worst_ticker_weight=0.25,
                     auxiliary_coefficient=0.05,
+                    auxiliary_horizons=(1, 2),
                     seed=17,
                 ),
                 output_dir,
@@ -174,6 +182,20 @@ class UniverseWalkForwardTests(TestCase):
         self.assertIsNotNone(
             auxiliary_ablation[
                 "validation_score_lift_vs_auxiliary_enabled"
+            ]
+        )
+        horizon_ablation = next(
+            candidate
+            for candidate in fold["model_selection"]["candidates"]
+            if (
+                candidate["model"]["kind"] == "gru"
+                and candidate["model"]["auxiliary_coefficient"] is None
+                and candidate["effective_auxiliary_horizons"] == [1]
+            )
+        )
+        self.assertIsNotNone(
+            horizon_ablation[
+                "validation_score_lift_vs_configured_horizons"
             ]
         )
         self.assertEqual(len(manifest["training_environments"]), 2)

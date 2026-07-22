@@ -226,31 +226,35 @@ default and retains clipped multi-epoch updates. Metrics distinguish PPO,
 REINFORCE, and total optimizer updates so their compute is auditable.
 
 Sparse portfolio reward does not have to be the recurrent encoder's only
-learning signal. Enable a train-only next-market prediction loss:
+learning signal. Enable train-only multi-horizon market prediction:
 
 ```bash
 train-demo \
   --symbol AAPL \
   --kind hybrid \
-  --auxiliary-coefficient 0.05
+  --auxiliary-coefficient 0.05 \
+  --auxiliary-horizon 1 \
+  --auxiliary-horizon 4
 ```
 
-The shared GRU/LSTM representation predicts the next observation's bounded
-underlying return, front-ATM-IV change, 25-delta risk-reversal/butterfly
-changes, and ATM term-slope change. Each surface target uses its point-in-time
-coverage mask, so an unavailable wing or term point contributes no loss. The
-targets come only from the next transition inside the supplied training
-partition; neither validation nor test values are used. The small linear head
-is excluded from action inference and therefore adds parameters and training
-work but no policy-path matrix multiply. Episode metrics retain Smooth-L1 loss,
-masked MAE, weighted loss, and per-target coverage. The coefficient defaults to
-zero because this is a representation-learning hypothesis, not established
-alpha.
-In a local 500-iteration CPU smoke with a two-slot, hidden-size-eight hybrid,
-adding the five-output head increased parameters from 5,980 to 6,065 while the
-policy-only streaming median was 130.71 microseconds without the head and
-128.96 microseconds with it (measurement noise, not a speedup). Treat those
-numbers as machine-specific confirmation that inference skips the head.
+For every policy state, the shared GRU/LSTM representation predicts bounded
+cumulative spot, front-ATM-IV, 25-delta risk-reversal/butterfly, and ATM
+term-slope changes at each declared snapshot horizon. Both endpoints require
+point-in-time coverage; incomplete tail horizons are explicitly masked. Targets
+are constructed only from observations already collected inside that training
+rollout and partition, so neither validation nor test values enter the loss or
+policy input. Horizons count snapshots rather than fixed wall-clock time, which
+must be considered when collection cadence varies.
+
+The linear head is excluded from action inference and therefore adds parameters
+and training work but no policy-path matrix multiply. Episode metrics retain
+Smooth-L1 loss, masked MAE, weighted loss, and nested per-horizon/per-target
+coverage. The coefficient defaults to zero because this is a
+representation-learning hypothesis, not established alpha. In the current
+hidden-size-eight AAPL smoke, horizons 1+4 added only 45 parameters over the
+one-step head; policy-only medians overlapped at roughly 108-118 microseconds.
+All validation scores were zero and the one-step candidate won only through the
+smaller-parameter tie-break.
 
 Train one ticker-invariant shared policy across the collected top-50 universe:
 
@@ -542,6 +546,10 @@ otherwise matched candidate with coefficient zero. Both candidates start from
 the same seeded initialization and train on the same fold; artifacts report the
 disabled candidate's validation reward and selection-score lift relative to the
 enabled version. This comparison is also available in the universe runner.
+For multi-horizon experiments, add `--auxiliary-horizon-ablation` to include a
+matched one-step candidate in the same validation tournament. Artifacts retain
+effective horizons and the one-step candidate's lift relative to the configured
+multi-horizon model.
 Only the validation winner reaches test, so the auxiliary task cannot be kept
 because it happened to look good on the held-out range.
 

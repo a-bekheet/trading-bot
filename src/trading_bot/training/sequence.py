@@ -69,11 +69,19 @@ AUXILIARY_TARGET_FEATURES = (
     "atmTermStructureSlopeChange",
 )
 
-_AUXILIARY_TARGET_COVERAGE = {
-    "frontAtmIvChange": ("frontAtmIvChangeCoverage", 0.0),
-    "front25DeltaRiskReversalChange": ("frontWingChangeCoverage", 1.0),
-    "front25DeltaButterflyChange": ("frontWingChangeCoverage", 1.0),
-    "atmTermStructureSlopeChange": ("atmTermSlopeChangeCoverage", 1.0),
+_AUXILIARY_LEVEL_FEATURES = (
+    "underlyingPrice",
+    "frontAtmIv",
+    "front25DeltaRiskReversal",
+    "front25DeltaButterfly",
+    "atmTermStructureSlope",
+)
+
+_AUXILIARY_LEVEL_COVERAGE = {
+    "frontAtmIv": ("frontAtmIvCoverage", 0.0),
+    "front25DeltaRiskReversal": ("front25DeltaCoverage", 1.0),
+    "front25DeltaButterfly": ("front25DeltaCoverage", 1.0),
+    "atmTermStructureSlope": ("atmTermSlopeCoverage", 1.0),
 }
 
 
@@ -219,39 +227,100 @@ def observation_vector(observation: Observation) -> np.ndarray:
     ).astype(np.float32)
 
 
-def auxiliary_market_targets(
-    observation: Observation,
+def auxiliary_market_change_targets(
+    current: Observation,
+    future: Observation,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return bounded next-market targets and explicit availability masks.
+    """Return bounded point-to-point market changes and coverage.
 
-    The caller supplies the observation *after* a training transition. Its
-    values supervise the recurrent representation that encoded the preceding
-    observation; they are never appended to the policy input at that step.
+    Consecutive observations reproduce the existing one-step target semantics.
+    Non-consecutive observations create cumulative changes for an explicitly
+    requested future horizon without adding any future value to policy inputs.
     """
-    market, _, _ = _dimensionless_components(observation)
-    if len(market) != len(MARKET_FEATURES):
+    current_market = np.asarray(current.market, dtype=np.float64)
+    future_market = np.asarray(future.market, dtype=np.float64)
+    if (
+        len(current_market) != len(MARKET_FEATURES)
+        or len(future_market) != len(MARKET_FEATURES)
+    ):
         raise ValueError("observation market layout does not match auxiliary targets")
-    raw_market = np.asarray(observation.market, dtype=np.float64)
     indices = {name: index for index, name in enumerate(MARKET_FEATURES)}
-    values = np.asarray(
-        [market[indices[name]] for name in AUXILIARY_TARGET_FEATURES],
-        dtype=np.float32,
-    )
-    available = np.ones(len(AUXILIARY_TARGET_FEATURES), dtype=np.float32)
-    return_index = indices["underlyingReturn"]
-    available[0] = float(
-        np.isfinite(raw_market[0])
-        and raw_market[0] > 0
-        and np.isfinite(raw_market[return_index])
-    )
-    for target_index, name in enumerate(AUXILIARY_TARGET_FEATURES[1:], start=1):
-        coverage_name, threshold = _AUXILIARY_TARGET_COVERAGE[name]
-        coverage = raw_market[indices[coverage_name]]
-        meets_threshold = coverage > 0 if threshold == 0 else coverage >= threshold
-        available[target_index] = float(
-            np.isfinite(coverage) and meets_threshold
+    values = np.zeros(len(AUXILIARY_TARGET_FEATURES), dtype=np.float64)
+    available = np.zeros(len(AUXILIARY_TARGET_FEATURES), dtype=np.float32)
+
+    current_spot = current_market[indices["underlyingPrice"]]
+    future_spot = future_market[indices["underlyingPrice"]]
+    if (
+        np.isfinite(current_spot)
+        and current_spot > 0
+        and np.isfinite(future_spot)
+        and future_spot > 0
+    ):
+        change = future_spot / current_spot - 1.0
+        values[0] = np.sign(change) * np.log1p(abs(change) * 100.0)
+        available[0] = 1.0
+
+    for target_index, level_name in enumerate(
+        _AUXILIARY_LEVEL_FEATURES[1:],
+        start=1,
+    ):
+        coverage_name, threshold = _AUXILIARY_LEVEL_COVERAGE[level_name]
+        current_coverage = current_market[indices[coverage_name]]
+        future_coverage = future_market[indices[coverage_name]]
+        current_level = current_market[indices[level_name]]
+        future_level = future_market[indices[level_name]]
+        coverage_available = (
+            np.isfinite(current_coverage)
+            and np.isfinite(future_coverage)
+            and (
+                min(current_coverage, future_coverage) > 0
+                if threshold == 0
+                else min(current_coverage, future_coverage) >= threshold
+            )
         )
+        if (
+            coverage_available
+            and np.isfinite(current_level)
+            and np.isfinite(future_level)
+        ):
+            change = future_level - current_level
+            values[target_index] = np.sign(change) * np.log1p(abs(change))
+            available[target_index] = 1.0
+
     values = np.nan_to_num(values, nan=0.0, posinf=10.0, neginf=-10.0)
+    return np.clip(values, -10.0, 10.0).astype(np.float32), available
+
+
+def multi_horizon_auxiliary_targets(
+    observations: list[Observation],
+    horizons: tuple[int, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Align cumulative future-market targets to preceding policy states."""
+    normalized = tuple(horizons)
+    if (
+        not normalized
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in normalized)
+        or any(item < 1 for item in normalized)
+        or tuple(sorted(set(normalized))) != normalized
+    ):
+        raise ValueError("auxiliary horizons must be unique positive increasing integers")
+    transition_count = max(len(observations) - 1, 0)
+    width = len(normalized) * len(AUXILIARY_TARGET_FEATURES)
+    values = np.zeros((transition_count, width), dtype=np.float32)
+    available = np.zeros((transition_count, width), dtype=np.float32)
+    for step in range(transition_count):
+        for horizon_index, horizon in enumerate(normalized):
+            future_index = step + horizon
+            if future_index >= len(observations):
+                continue
+            target, mask = auxiliary_market_change_targets(
+                observations[step],
+                observations[future_index],
+            )
+            start = horizon_index * len(AUXILIARY_TARGET_FEATURES)
+            end = start + len(AUXILIARY_TARGET_FEATURES)
+            values[step, start:end] = target
+            available[step, start:end] = mask
     return values, available
 
 

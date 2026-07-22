@@ -254,15 +254,19 @@ must use only that validation environment and be labeled
 `weights_only=True`; never weaken this to unrestricted pickle loading.
 
 Auxiliary market prediction is optional representation supervision, not reward
-shaping. At step t the recurrent state may predict dimensionless market changes
-observed at t+1 only when both observations belong to the training partition.
-Use explicit point-in-time coverage masks for sparse IV-surface targets; never
-teach a missing wing or expiration as zero. Keep the prediction head out of
+shaping. At step t the recurrent state may predict cumulative dimensionless
+market changes at configured positive, increasing snapshot horizons only when
+both endpoints were observed inside the same training rollout and partition.
+Mask incomplete rollout tails and require point-in-time coverage at both
+endpoints for sparse IV-surface targets; never teach a missing wing or
+expiration as zero. Keep the prediction head out of
 `forward`, `sample_action`, streaming evaluation, and latency benchmarks so it
 cannot alter PPO likelihoods or deployment latency. Persist its targets,
-coefficient, masked loss/MAE, and coverage in checkpoints. Any claimed benefit
-requires the matched `--auxiliary-ablation` candidate to win on validation
-before the single selected policy reaches test.
+snapshot horizons, coefficient, masked loss/MAE, and nested horizon/target
+coverage in checkpoints. Any claimed benefit requires both the matched
+one-step `--auxiliary-horizon-ablation` and zero-coefficient
+`--auxiliary-ablation` comparisons on validation before the single selected
+policy reaches test. Snapshot horizons are not elapsed-time horizons.
 
 Shared-policy training accepts unique-symbol environment pools with identical
 feature and action layouts. Schedule seeded shuffled ticker cycles and require

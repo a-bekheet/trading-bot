@@ -187,7 +187,7 @@ class TrainerTests(TestCase):
         self.assertTrue(all(math.isfinite(item["auxiliary_loss"]) for item in metrics))
         self.assertTrue(all(item["auxiliary_loss"] >= 0 for item in metrics))
         self.assertTrue(all(
-            item["auxiliary_target_coverage"]["underlyingReturn"] == 1
+            item["auxiliary_target_coverage"]["t+1"]["underlyingReturn"] == 1
             for item in metrics
         ))
         self.assertTrue(all(math.isfinite(item["evaluation_total_reward"]) for item in metrics))
@@ -234,7 +234,9 @@ class TrainerTests(TestCase):
             "enabled": True,
             "coefficient": 0.05,
             "targets": list(AUXILIARY_TARGET_FEATURES),
-            "availability": "point_in_time_coverage_mask",
+            "horizons": [1],
+            "target_semantics": "cumulative_change_from_policy_state",
+            "availability": "endpoint_point_in_time_coverage_mask",
             "inference_path": "excluded_from_policy_inference",
         })
         self.assertEqual(sidecar["selection"]["scope"], "in_sample_research_demo")
@@ -454,6 +456,18 @@ class TrainerTests(TestCase):
             TrainingConfig(selection_min_delta=float("nan"))
         with self.assertRaisesRegex(ValueError, "auxiliary_coefficient"):
             TrainingConfig(auxiliary_coefficient=-0.1)
+        for invalid in ((), (0,), (2, 1), (1, 1)):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError,
+                "auxiliary_horizons",
+            ):
+                TrainingConfig(auxiliary_horizons=invalid)
+        with self.assertRaisesRegex(ValueError, "max_steps"):
+            TrainingConfig(
+                max_steps=3,
+                auxiliary_coefficient=0.05,
+                auxiliary_horizons=(1, 4),
+            )
         with self.assertRaisesRegex(ValueError, "risk penalties"):
             TrainingConfig(selection_drawdown_penalty=-1)
         with self.assertRaisesRegex(ValueError, "risk penalties"):
@@ -635,6 +649,41 @@ class TrainerTests(TestCase):
                 incompatible,
                 TrainingConfig(episodes=1),
             )
+        mismatched_horizons = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+            auxiliary_target_count=len(AUXILIARY_TARGET_FEATURES),
+            auxiliary_horizons=(1, 2),
+        )
+        with self.assertRaisesRegex(ValueError, "horizons do not match"):
+            train_actor_critic(
+                env,
+                mismatched_horizons,
+                TrainingConfig(episodes=1),
+            )
+        unavailable_horizon = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_count=7,
+            action_slot_count=env.action_shape[0],
+            hidden_size=4,
+            auxiliary_target_count=2 * len(AUXILIARY_TARGET_FEATURES),
+            auxiliary_horizons=(1, 4),
+        )
+        with self.assertRaisesRegex(ValueError, "shorter than"):
+            train_actor_critic(
+                env,
+                unavailable_horizon,
+                TrainingConfig(
+                    episodes=1,
+                    max_steps=None,
+                    auxiliary_coefficient=0.05,
+                    auxiliary_horizons=(1, 4),
+                ),
+            )
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_risk_score_can_select_safer_lower_reward_checkpoint(self):
@@ -732,6 +781,65 @@ class TrainerTests(TestCase):
             manifest["algorithm"],
             "stateful_factorized_reinforce_baseline",
         )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_multi_horizon_auxiliary_training_supports_all_recurrent_learners(self):
+        for kind in ("gru", "lstm", "hybrid"):
+            for algorithm in ("ppo", "reinforce"):
+                with self.subTest(kind=kind, algorithm=algorithm):
+                    env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+                    observation, _ = env.reset(seed=71)
+                    recurrent = RecurrentConfig(
+                        input_size=observation_vector(observation).size,
+                        slot_count=2,
+                        action_count=7,
+                        action_slot_count=env.action_shape[0],
+                        hidden_size=4,
+                        kind=kind,
+                        auxiliary_target_count=(
+                            2 * len(AUXILIARY_TARGET_FEATURES)
+                        ),
+                        auxiliary_horizons=(1, 2),
+                    )
+                    training = TrainingConfig(
+                        episodes=1,
+                        sequence_length=2,
+                        ppo_epochs=1,
+                        minibatch_size=2,
+                        evaluation_interval=1,
+                        auxiliary_coefficient=0.05,
+                        auxiliary_horizons=(1, 2),
+                        algorithm=algorithm,
+                        seed=71,
+                    )
+
+                    model, metrics = train_actor_critic(
+                        env,
+                        recurrent,
+                        training,
+                    )
+
+                    self.assertEqual(model.auxiliary.out_features, 10)
+                    self.assertTrue(math.isfinite(metrics[0]["auxiliary_loss"]))
+                    self.assertEqual(
+                        metrics[0]["auxiliary_target_coverage"]["t+2"][
+                            "underlyingReturn"
+                        ],
+                        0.5,
+                    )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "multi-horizon.pt"
+            save_checkpoint(
+                path,
+                model,
+                env,
+                recurrent,
+                training,
+                metrics,
+            )
+            restored, manifest = load_checkpoint(path)
+        self.assertEqual(restored.config.auxiliary_horizons, (1, 2))
+        self.assertEqual(manifest["auxiliary_prediction"]["horizons"], [1, 2])
         self.assertEqual(manifest["training"]["algorithm"], "reinforce")
 
     @skipUnless(torch is not None, "install the optional ml extra")

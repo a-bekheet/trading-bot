@@ -48,7 +48,7 @@ from trading_bot.training.walk_forward import (
 
 
 UNIVERSE_WALK_FORWARD_SCHEMA_VERSION = (
-    "research-demo.universe-walk-forward.v6"
+    "research-demo.universe-walk-forward.v7"
 )
 
 
@@ -344,6 +344,7 @@ def run_universe_walk_forward_training(
             candidate_training = replace(
                 fold_training,
                 algorithm=candidate.algorithm,
+                auxiliary_horizons=candidate.auxiliary_horizons,
                 auxiliary_coefficient=(
                     fold_training.auxiliary_coefficient
                     if candidate.auxiliary_coefficient is None
@@ -418,6 +419,10 @@ def run_universe_walk_forward_training(
                     candidate,
                     auxiliary_coefficient=None,
                 ).identifier,
+                "auxiliary_horizon_reference_model_id": replace(
+                    candidate,
+                    auxiliary_horizons=fold_training.auxiliary_horizons,
+                ).identifier,
             })
         eligible_runs = [
             run for run in candidate_runs if run["latency_eligible"]
@@ -466,6 +471,9 @@ def run_universe_walk_forward_training(
                 "effective_auxiliary_coefficient": run[
                     "training_config"
                 ].auxiliary_coefficient,
+                "effective_auxiliary_horizons": list(
+                    run["training_config"].auxiliary_horizons
+                ),
                 "parameter_count": run["parameter_count"],
                 "parameter_budget_headroom": (
                     run["model_spec"].parameter_budget
@@ -494,6 +502,8 @@ def run_universe_walk_forward_training(
                 "validation_reward_lift_vs_full": None,
                 "validation_score_lift_vs_auxiliary_enabled": None,
                 "validation_reward_lift_vs_auxiliary_enabled": None,
+                "validation_score_lift_vs_configured_horizons": None,
+                "validation_reward_lift_vs_configured_horizons": None,
                 "selection": {
                     "scope": selected["evaluation_scope"],
                     "episode": selected["episode"],
@@ -548,6 +558,24 @@ def run_universe_walk_forward_training(
                 result["validation_reward_lift_vs_auxiliary_enabled"] = (
                     float(selected["evaluation_total_reward"])
                     - validation_rewards[run["auxiliary_reference_model_id"]]
+                )
+            horizon_reference = validation_scores.get(
+                run["auxiliary_horizon_reference_model_id"]
+            )
+            if (
+                run["model_spec"].auxiliary_horizons
+                != fold_training.auxiliary_horizons
+                and horizon_reference is not None
+            ):
+                result["validation_score_lift_vs_configured_horizons"] = (
+                    float(selected["evaluation_selection_score"])
+                    - horizon_reference
+                )
+                result["validation_reward_lift_vs_configured_horizons"] = (
+                    float(selected["evaluation_total_reward"])
+                    - validation_rewards[
+                        run["auxiliary_horizon_reference_model_id"]
+                    ]
                 )
             candidate_results.append(result)
 
@@ -812,6 +840,7 @@ def main() -> None:
                 ),
                 entropy_coefficient=args.entropy_coefficient,
                 auxiliary_coefficient=args.auxiliary_coefficient,
+                auxiliary_horizons=tuple(args.auxiliary_horizon or (1,)),
                 algorithm=args.algorithm,
                 seed=args.seed,
             ),
