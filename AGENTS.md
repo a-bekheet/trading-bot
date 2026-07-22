@@ -56,11 +56,17 @@ Create those packages only when implementing their first real behavior.
    Yahoo's option payload reports dividend yield in percentage units, so the
    adapter divides it by 100.
 4. `analytics.greeks` calculates Black-Scholes-Merton Greeks.
-5. `market_data.collector` appends the enriched rows to `data/<TICKER>.csv`.
-6. `interface.app` displays the latest saved snapshot; it never fetches markets.
-7. `execution.paper_broker` stores fake cash, long positions, and fills in
+5. `market_data.collector` appends the enriched rows to `data/<TICKER>.csv`
+   only when the raw quote/rate surface materially changes. It also holds a
+   per-output-directory process lock and atomically updates
+   `data/_collector_status.json` throughout each cycle.
+6. `market_data.status` validates heartbeat freshness, cycle failures, and
+   continuous-process liveness. `market_data.service` manages the optional
+   macOS LaunchAgent used for unattended restart-on-failure collection.
+7. `interface.app` displays the latest saved snapshot; it never fetches markets.
+8. `execution.paper_broker` stores fake cash, long positions, and fills in
    `data/paper_portfolio.db`; `execution.valuation` marks positions from CSVs.
-8. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
+9. `training.env.OptionsEnv` exposes the current CSVs through a Gymnasium-style
    `reset`/`step` API. It is `research_demo` only and must not be used as a
    historical-performance benchmark.
 
@@ -73,6 +79,16 @@ rate would make the calculated data misleading.
 CSV files are append-only snapshots. Do not remove or reorder columns without a
 migration. `collector._migrate_csv` upgrades older files atomically before an
 append. Important model/input columns are:
+
+Snapshot identity excludes `collectedAt`, time-to-expiry, and derived Greeks.
+Do not let recomputation against unchanged stale quotes create a new market
+state. Identity must retain raw quote fields, contract membership, spot,
+dividend yield, and risk-free-rate inputs so any material change is persisted.
+The persisted Greek-model identifier is also material so a deliberate model
+version change can coexist with the older calculation.
+The training loader must apply the same rule to consecutive legacy snapshots;
+after filtering, causal gaps are measured from the last materially distinct
+surface. Do not delete old CSV rows as part of this filter.
 
 - `collectedAt`, `symbol`, `expiration`, `optionType`
 - `underlyingPrice`, `riskFreeRate`, `riskFreeRateSource`, `dividendYield`
@@ -426,6 +442,9 @@ uv run --extra dev python -m pytest -q
 python -c 'from pathlib import Path; from trading_bot.training import OptionsEnv; print(OptionsEnv.from_directory(Path("data"), "AAPL").manifest.fingerprint)'
 collect-options --once --expirations 3
 collect-options
+collector-status
+collector-status --json
+collector-service install
 streamlit run src/trading_bot/interface/app.py
 option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
@@ -437,11 +456,20 @@ The collector defaults to three expirations per ticker, one cycle every 900
 seconds, and a one-second delay between tickers. Use `--expirations 1` when
 remote request latency matters more than term-structure coverage.
 
+On macOS, `collector-service install` writes a user LaunchAgent with absolute
+repository, interpreter, output, and log paths, then bootstraps it. It must use
+the virtual-environment launcher path without resolving its interpreter
+symlink. The LaunchAgent restarts nonzero exits; the collector's advisory lock
+prevents duplicate writers. `collector-service uninstall` is intentionally an
+explicit operation.
+
 ## Verification expectations
 
 - Unit tests must remain network-free and deterministic.
 - Changes to Greeks require a published numeric test vector and unit checks.
 - Changes to persistence require an append/migration test.
+- Collector persistence changes require changed/unchanged identity tests,
+  process-lock coverage, and heartbeat/status health tests.
 - Paper execution changes require isolated tests for cash, position quantity,
   ledger writes, insufficient funds, and overselling.
 - Market-data changes require a one-cycle live smoke test when network access is
@@ -462,6 +490,10 @@ and a Python fallback; use C++ only when required by an existing library.
 ## Known limitations and next decisions
 
 - The top-50 universe is a dated snapshot and must be refreshed deliberately.
+- Data gathered while the underlying raw surface is unchanged is intentionally
+  represented by one state plus the next observed time gap, not repeated Greek
+  recomputations. A single retained state is insufficient for training even if
+  the source CSV contains many stale capture timestamps.
 - Collection defaults to the nearest three listed expirations; this is still
   sparse relative to a licensed full-surface historical feed.
 - `^IRX / 100` is a quoted 13-week bill-yield approximation, not a

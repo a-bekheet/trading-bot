@@ -150,10 +150,10 @@ class EvaluationTests(TestCase):
 
     def test_cost_scenario_stresses_underlying_slippage_and_commission(self):
         rows = []
-        for timestamp in (
+        for index, timestamp in enumerate((
             "2026-07-21T14:00:00Z",
             "2026-07-21T14:01:00Z",
-        ):
+        )):
             rows.append({
                 "collectedAt": timestamp,
                 "contractSymbol": "TEST-C",
@@ -165,7 +165,7 @@ class EvaluationTests(TestCase):
                 "ask": 1.2,
                 "lastPrice": 1.1,
                 "impliedVolatility": 0.2,
-                "underlyingPrice": 100,
+                "underlyingPrice": 100 + index,
                 "riskFreeRate": 0.04,
             })
         with TemporaryDirectory() as directory:

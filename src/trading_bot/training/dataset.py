@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_bot.market_data.snapshot_identity import material_snapshot_fingerprint
 from trading_bot.training.features import engineer_snapshot
 
 
@@ -50,8 +51,12 @@ class SnapshotDataset:
         frame = frame.sort_values(["collectedAt", "optionType", "expiration", "strike", "contractSymbol"])
         snapshots_list = []
         previous = None
+        previous_material_fingerprint = None
         spot_history: list[tuple[pd.Timestamp, float]] = []
         for timestamp, group in frame.groupby("collectedAt", sort=True):
+            material_fingerprint = material_snapshot_fingerprint(group)
+            if material_fingerprint == previous_material_fingerprint:
+                continue
             spot = pd.to_numeric(group["underlyingPrice"], errors="coerce").iloc[0]
             spot_history.append((timestamp, float(spot)))
             engineered = engineer_snapshot(
@@ -61,6 +66,7 @@ class SnapshotDataset:
             )
             snapshots_list.append(Snapshot(timestamp=timestamp.isoformat(), frame=engineered))
             previous = engineered
+            previous_material_fingerprint = material_fingerprint
         snapshots = tuple(snapshots_list)
         return cls(snapshots, symbol.upper())
 

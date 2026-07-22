@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import json
 import logging
+import os
 import time
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 import pandas as pd
 
 from trading_bot.analytics.greeks import black_scholes_greeks, years_to_expiration
 from trading_bot.market_data.option_chain import fetch_option_chains
 from trading_bot.market_data.rates import RISK_FREE_RATE_SOURCE, fetch_risk_free_rate
+from trading_bot.market_data.snapshot_identity import (
+    material_snapshot_fingerprint,
+    persisted_material_snapshot_fingerprint,
+)
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
@@ -24,6 +34,132 @@ CSV_COLUMNS = (
     "riskFreeRateSource", "dividendYield", "timeToExpiryYears", "delta", "gamma",
     "theta", "vega", "greekModel",
 )
+COLLECTOR_STATUS_SCHEMA_VERSION = "collector.status.v1"
+SNAPSHOT_STATE_SCHEMA_VERSION = "collector.snapshot-state.v4"
+COLLECTOR_STATUS_FILENAME = "_collector_status.json"
+
+
+@dataclass
+class CycleResult:
+    """Observable outcome of one top-50 collection cycle."""
+
+    cycle_started_at: str
+    continuous: bool = False
+    status: str = "running"
+    last_heartbeat_at: str = ""
+    cycle_completed_at: str | None = None
+    next_cycle_at: str | None = None
+    pid: int = field(default_factory=os.getpid)
+    ticker_total: int = field(default_factory=lambda: len(TOP_50_TICKERS))
+    tickers_attempted: int = 0
+    successes: int = 0
+    failures: int = 0
+    appended: int = 0
+    unchanged: int = 0
+    rows_appended: int = 0
+    errors: dict[str, str] = field(default_factory=dict)
+
+    def heartbeat(self) -> None:
+        self.last_heartbeat_at = _utc_now().isoformat()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": COLLECTOR_STATUS_SCHEMA_VERSION,
+            **asdict(self),
+        }
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _write_cycle_status(output_dir: Path, result: CycleResult) -> None:
+    result.heartbeat()
+    _write_json_atomic(output_dir / COLLECTOR_STATUS_FILENAME, result.to_dict())
+
+
+@contextmanager
+def collector_lock(output_dir: Path) -> Iterator[None]:
+    """Hold an advisory process lock for one collector instance."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / ".collector.lock"
+    with path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError(
+                f"another collector already holds {path}"
+            ) from error
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _snapshot_state_path(output_dir: Path, symbol: str) -> Path:
+    return output_dir / ".snapshot_state" / f"{symbol}.json"
+
+
+def _load_snapshot_state(path: Path, csv_path: Path) -> str | None:
+    if not path.exists() or not csv_path.exists():
+        return None
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        stat = csv_path.stat()
+        if (
+            state.get("schema_version") == SNAPSHOT_STATE_SCHEMA_VERSION
+            and state.get("csv_size") == stat.st_size
+            and state.get("csv_mtime_ns") == stat.st_mtime_ns
+        ):
+            return str(state["fingerprint"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return None
+
+
+def _latest_persisted_fingerprint(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    existing = pd.read_csv(path)
+    if existing.empty or "collectedAt" not in existing:
+        return None
+    timestamps = pd.to_datetime(existing["collectedAt"], utc=True, errors="coerce")
+    latest = timestamps.max()
+    if pd.isna(latest):
+        return None
+    return material_snapshot_fingerprint(existing.loc[timestamps.eq(latest)])
+
+
+def _save_snapshot_state(
+    state_path: Path,
+    csv_path: Path,
+    fingerprint: str,
+    captured: datetime,
+    row_count: int,
+) -> None:
+    stat = csv_path.stat()
+    _write_json_atomic(state_path, {
+        "schema_version": SNAPSHOT_STATE_SCHEMA_VERSION,
+        "fingerprint": fingerprint,
+        "last_observed_at": captured.isoformat(),
+        "row_count": row_count,
+        "csv_size": stat.st_size,
+        "csv_mtime_ns": stat.st_mtime_ns,
+    })
 
 
 def _add_greeks(
@@ -72,7 +208,7 @@ def save_snapshot(
     collected_at: datetime | None = None,
     expiration_count: int | None = 3,
 ) -> tuple[Path, int]:
-    """Append one ticker's selected option surface to its CSV file."""
+    """Append one materially changed surface; return zero rows if unchanged."""
     chains, spot, dividend_yield = fetch_option_chains(symbol, expiration_count)
     captured = collected_at or datetime.now(timezone.utc)
     frames = []
@@ -106,8 +242,88 @@ def save_snapshot(
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{symbol}.csv"
     _migrate_csv(path)
+    fingerprint = persisted_material_snapshot_fingerprint(snapshot)
+    state_path = _snapshot_state_path(output_dir, symbol)
+    previous_fingerprint = _load_snapshot_state(state_path, path)
+    if previous_fingerprint is None:
+        previous_fingerprint = _latest_persisted_fingerprint(path)
+    if previous_fingerprint == fingerprint:
+        if path.exists():
+            _save_snapshot_state(
+                state_path,
+                path,
+                fingerprint,
+                captured,
+                len(snapshot),
+            )
+        return path, 0
     snapshot.to_csv(path, mode="a", header=not path.exists(), index=False)
+    _save_snapshot_state(
+        state_path,
+        path,
+        fingerprint,
+        captured,
+        len(snapshot),
+    )
     return path, len(snapshot)
+
+
+def collect_cycle(
+    output_dir: Path,
+    ticker_delay: float = 1.0,
+    expiration_count: int | None = 3,
+    *,
+    continuous: bool = False,
+) -> CycleResult:
+    """Collect every ticker and persist a queryable heartbeat throughout."""
+    result = CycleResult(
+        cycle_started_at=_utc_now().isoformat(),
+        continuous=continuous,
+    )
+    _write_cycle_status(output_dir, result)
+    try:
+        risk_free_rate = fetch_risk_free_rate()
+        logging.info("risk-free rate: %.6f (%s)", risk_free_rate, RISK_FREE_RATE_SOURCE)
+    except Exception as error:
+        message = str(error)
+        logging.error("risk-free rate: %s", message)
+        result.failures = len(TOP_50_TICKERS)
+        result.errors["risk_free_rate"] = message
+        result.status = "complete"
+        result.cycle_completed_at = _utc_now().isoformat()
+        _write_cycle_status(output_dir, result)
+        return result
+
+    for index, symbol in enumerate(TOP_50_TICKERS):
+        result.tickers_attempted += 1
+        try:
+            path, row_count = save_snapshot(
+                symbol,
+                output_dir,
+                risk_free_rate,
+                expiration_count=expiration_count,
+            )
+            result.successes += 1
+            if row_count:
+                result.appended += 1
+                result.rows_appended += row_count
+                logging.info("%s: appended %d rows to %s", symbol, row_count, path)
+            else:
+                result.unchanged += 1
+                logging.info("%s: unchanged; skipped append to %s", symbol, path)
+        except Exception as error:
+            message = str(error)
+            logging.error("%s: %s", symbol, message)
+            result.failures += 1
+            result.errors[symbol] = message
+        _write_cycle_status(output_dir, result)
+        if ticker_delay and index < len(TOP_50_TICKERS) - 1:
+            time.sleep(ticker_delay)
+
+    result.status = "complete"
+    result.cycle_completed_at = _utc_now().isoformat()
+    _write_cycle_status(output_dir, result)
+    return result
 
 
 def collect_all(
@@ -116,31 +332,8 @@ def collect_all(
     expiration_count: int | None = 3,
 ) -> tuple[int, int]:
     """Collect every ticker, continuing when an individual ticker fails."""
-    try:
-        risk_free_rate = fetch_risk_free_rate()
-        logging.info("risk-free rate: %.6f (%s)", risk_free_rate, RISK_FREE_RATE_SOURCE)
-    except Exception as error:
-        logging.error("risk-free rate: %s", error)
-        return 0, len(TOP_50_TICKERS)
-
-    successes = 0
-    failures = 0
-    for index, symbol in enumerate(TOP_50_TICKERS):
-        try:
-            path, row_count = save_snapshot(
-                symbol,
-                output_dir,
-                risk_free_rate,
-                expiration_count=expiration_count,
-            )
-            logging.info("%s: appended %d rows to %s", symbol, row_count, path)
-            successes += 1
-        except Exception as error:
-            logging.error("%s: %s", symbol, error)
-            failures += 1
-        if ticker_delay and index < len(TOP_50_TICKERS) - 1:
-            time.sleep(ticker_delay)
-    return successes, failures
+    result = collect_cycle(output_dir, ticker_delay, expiration_count)
+    return result.successes, result.failures
 
 
 def main() -> int:
@@ -162,16 +355,35 @@ def main() -> int:
         )
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    while True:
-        successes, failures = collect_all(
-            args.output_dir,
-            args.ticker_delay,
-            expiration_count=args.expirations or None,
-        )
-        logging.info("cycle complete: %d succeeded, %d failed", successes, failures)
-        if args.once:
-            return 1 if failures else 0
-        time.sleep(args.interval)
+    try:
+        with collector_lock(args.output_dir):
+            while True:
+                result = collect_cycle(
+                    args.output_dir,
+                    args.ticker_delay,
+                    expiration_count=args.expirations or None,
+                    continuous=not args.once,
+                )
+                logging.info(
+                    "cycle complete: %d succeeded, %d failed, %d appended, "
+                    "%d unchanged",
+                    result.successes,
+                    result.failures,
+                    result.appended,
+                    result.unchanged,
+                )
+                if args.once:
+                    return 1 if result.failures else 0
+                result.status = "sleeping"
+                result.next_cycle_at = datetime.fromtimestamp(
+                    time.time() + args.interval,
+                    tz=timezone.utc,
+                ).isoformat()
+                _write_cycle_status(args.output_dir, result)
+                time.sleep(args.interval)
+    except RuntimeError as error:
+        logging.error("%s", error)
+        return 2
 
 
 if __name__ == "__main__":

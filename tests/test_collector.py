@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -73,3 +74,75 @@ class CollectorTests(TestCase):
             {"2026-08-21", "2026-09-18"},
         )
         self.assertTrue(saved.iloc[1:][["delta", "gamma", "theta", "vega"]].notna().all().all())
+
+    @patch("trading_bot.market_data.collector.fetch_option_chains")
+    def test_skips_unchanged_raw_surface_but_retains_rate_change(self, fetch):
+        fetch.return_value = (
+            ((
+                "2026-08-21",
+                SimpleNamespace(
+                    calls=pd.DataFrame([{
+                        "contractSymbol": "AAPL-C1",
+                        "strike": 200,
+                        "bid": 4.9,
+                        "ask": 5.1,
+                        "impliedVolatility": 0.2,
+                    }]),
+                    puts=pd.DataFrame([{
+                        "contractSymbol": "AAPL-P1",
+                        "strike": 200,
+                        "bid": 4.8,
+                        "ask": 5.2,
+                        "impliedVolatility": 0.2,
+                    }]),
+                ),
+            ),),
+            200.0,
+            0.005,
+        )
+        first = datetime(2026, 7, 21, 20, 0, tzinfo=timezone.utc)
+        second = datetime(2026, 7, 21, 20, 15, tzinfo=timezone.utc)
+
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            path, first_rows = collector.save_snapshot(
+                "AAPL", output_dir, 0.05, first, expiration_count=1
+            )
+            _, unchanged_rows = collector.save_snapshot(
+                "AAPL", output_dir, 0.05, second, expiration_count=1
+            )
+            _, changed_rows = collector.save_snapshot(
+                "AAPL", output_dir, 0.051, second, expiration_count=1
+            )
+            saved = pd.read_csv(path)
+            state = collector._snapshot_state_path(output_dir, "AAPL")
+            self.assertTrue(state.exists())
+
+        self.assertEqual((first_rows, unchanged_rows, changed_rows), (2, 0, 2))
+        self.assertEqual(len(saved), 4)
+        self.assertEqual(saved["collectedAt"].nunique(), 2)
+
+    def test_collector_lock_rejects_a_second_instance(self):
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with collector.collector_lock(output_dir):
+                with self.assertRaisesRegex(RuntimeError, "another collector"):
+                    with collector.collector_lock(output_dir):
+                        self.fail("second lock unexpectedly acquired")
+
+    @patch("trading_bot.market_data.collector.fetch_risk_free_rate")
+    def test_cycle_status_records_rate_failure(self, fetch_rate):
+        fetch_rate.side_effect = RuntimeError("rate unavailable")
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            result = collector.collect_cycle(output_dir, ticker_delay=0)
+            status = json.loads(
+                (output_dir / collector.COLLECTOR_STATUS_FILENAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(result.failures, 50)
+        self.assertEqual(result.errors, {"risk_free_rate": "rate unavailable"})
+        self.assertEqual(status["status"], "complete")
+        self.assertEqual(status["failures"], 50)

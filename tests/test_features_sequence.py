@@ -74,6 +74,59 @@ def surface_snapshot(
 
 
 class FeatureSequenceTests(TestCase):
+    def test_dataset_drops_consecutive_stale_quote_surfaces(self):
+        base = {
+            "contractSymbol": "AAPL-C1",
+            "symbol": "AAPL",
+            "expiration": "2026-08-21",
+            "optionType": "call",
+            "strike": 100,
+            "bid": 1.0,
+            "ask": 1.2,
+            "lastPrice": 1.1,
+            "impliedVolatility": 0.2,
+            "underlyingPrice": 100,
+            "riskFreeRate": 0.04,
+            "greekModel": "black-scholes-merton",
+            "delta": 0.5,
+            "gamma": 0.01,
+            "theta": -0.1,
+            "vega": 0.2,
+        }
+        rows = [
+            {**base, "collectedAt": "2026-07-21T14:00:00Z"},
+            {
+                **base,
+                "collectedAt": "2026-07-21T14:01:00Z",
+                "theta": -0.11,
+                "delta": 0.51,
+            },
+            {
+                **base,
+                "collectedAt": "2026-07-21T14:02:00Z",
+                "underlyingPrice": 101,
+                "bid": 1.1,
+            },
+        ]
+
+        with TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            pd.DataFrame(rows).to_csv(data_dir / "AAPL.csv", index=False)
+            dataset = SnapshotDataset.from_directory(data_dir, "AAPL")
+
+        self.assertEqual(len(dataset), 2)
+        self.assertEqual(
+            [snapshot.timestamp for snapshot in dataset.snapshots],
+            [
+                "2026-07-21T14:00:00+00:00",
+                "2026-07-21T14:02:00+00:00",
+            ],
+        )
+        self.assertEqual(
+            dataset.snapshots[-1].frame.iloc[0]["snapshotGapSeconds"],
+            120,
+        )
+
     @staticmethod
     def auxiliary_observation(
         timestamp: str,

@@ -28,6 +28,21 @@ Run continuously every 15 minutes:
 collect-options
 ```
 
+On macOS, install that loop as a login service so it is restarted after a
+failure and does not depend on an open terminal:
+
+```bash
+collector-service install
+collector-status
+```
+
+`collector-service uninstall` stops and removes the LaunchAgent. The service
+writes its stdout and stderr logs under `data/`. `collector-status --json`
+exposes the current PID, heartbeat age, cycle progress, success/failure counts,
+appended/unchanged ticker counts, and errors. Its exit status is nonzero when
+the heartbeat is stale, the last cycle failed, or a continuous process died.
+Only one collector may hold an output directory at a time.
+
 Each ticker has an append-only file under `data/`, such as `data/AAPL.csv`.
 Every row records the collection time, expiration, option type, market fields,
 model inputs, and Delta, Gamma, Theta, and Vega. Collection defaults to the
@@ -37,6 +52,14 @@ nearest three expirations. Use `--expirations 1` for the lowest-latency mode or
 ```bash
 collect-options --once --expirations 1
 ```
+
+The collector fingerprints the raw quote surface, spot, dividend yield, and
+risk-free rate before appending. If those inputs are unchanged, it records the
+successful observation in the heartbeat but does not append rows whose only
+differences would be elapsed time and recomputed Greeks. The training loader
+applies the same consecutive-deduplication rule to older CSVs, preventing stale
+closed-market quotes from becoming synthetic RL transitions. A changed rate,
+spot, contract set, or quote remains a new snapshot.
 
 ## Explore data
 

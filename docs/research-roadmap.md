@@ -10,6 +10,14 @@ risk are included. A higher in-sample reward or one favorable seed is not
 alpha. Yahoo snapshots remain useful for API and training-pipeline smoke tests,
 but they are not enough for a historical performance claim.
 
+Collector v0.36 makes this boundary stricter at ingestion. Consecutive surfaces
+whose raw quotes, contract membership, spot, dividend input, and risk-free rate
+are identical are one market state even if later timestamps produce different
+time-to-expiry and model Greeks. Both persistence and legacy CSV loading enforce
+that identity. This removes synthetic closed-market transitions but can expose
+that a seemingly long CSV contains almost no usable temporal history; collect
+during live market evolution before running selection gates.
+
 Every candidate must eventually pass:
 
 1. Fixed chronological train, validation, and untouched test periods, followed
