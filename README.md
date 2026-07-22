@@ -466,6 +466,29 @@ establish alpha. Profiling showed Python/pandas object construction—not a
 numerical kernel—as the bottleneck, so a Rust or C++ extension would add a
 boundary without addressing the measured cause.
 
+v0.48 adds `attention_set`, an opt-in learned cross-contract relation encoder.
+Within each snapshot it projects every valid contract into a shared latent
+space, applies masked multi-head self-attention and pointwise residual blocks,
+then uses the same invariant mean/max pooling and shared option-action scorer as
+`graph_set`. GRU, LSTM, hybrid, and mixture units still own temporal state.
+There are no positional embeddings: permuting contracts permutes their option
+logits while leaving value estimates, auxiliary predictions, and the underlying
+row unchanged. Invalid slots cannot contribute keys or values, and an entirely
+empty surface remains finite. Configure heads with `--attention-heads`; the
+graph width must be divisible by that count.
+
+The encoder works with PPO or REINFORCE, factorized or exact single-leg actions,
+feature ablations, parameter caps, checkpoints, and both walk-forward runners.
+It is a candidate rather than a default. On the current 1,133-input AAPL layout
+with width-128 GRU, graph width 32, two graph layers, and one CPU thread, 500
+streaming calls measured 384.50 microseconds median and 398.08 p95 with 112,781
+parameters. Zero-neighbor `graph_set` measured 182.25/188.21 microseconds and
+96,749 parameters; flat GRU measured 121.81/126.46 microseconds and 517,186
+parameters. A tiny matched AAPL validation smoke gave both set encoders zero
+reward and selected Deep Sets through the smaller-parameter tie-break. This is
+integration and latency evidence, not evidence that learned attention adds
+alpha.
+
 Collection intervals are not assumed to be regular. The market vector includes
 the positive elapsed seconds from the immediately prior snapshot and a separate
 coverage bit; `dimensionless.v13` log-compresses the interval before it reaches
@@ -589,13 +612,15 @@ candidates. `--selection-patience 0` disables this behavior, while
 patience. Each metric row and checkpoint manifest records the stopping state.
 These are machine-specific throughput choices, not alpha results.
 
-Add `--encoder graph` to run masked message passing over the option surface
-before temporal encoding, or `--encoder graph_set` to use a
-permutation-equivariant set policy:
+Add `--encoder graph` to run masked message passing over the option surface,
+`--encoder graph_set` to use a permutation-equivariant fixed-graph set policy,
+or `--encoder attention_set` to learn masked cross-contract relations before
+temporal encoding:
 
 ```bash
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
+train-demo --symbol AAPL --encoder attention_set --attention-heads 4 --kind hybrid --episodes 25
 ```
 
 Training can enforce the same portfolio budgets:
@@ -616,6 +641,14 @@ shares policy parameters across slots and tickers. This dense implementation
 avoids a separate graph-framework dependency at the default 32 slots. Keep
 `flat` and flattened `graph` as measured baselines rather than assuming more
 relational structure is automatically better.
+
+`attention_set` retains those set-policy symmetries but replaces hand-built
+nearest-neighbor edges with global learned multi-head attention among valid
+contracts. It uses no slot or positional embedding, so surface coordinates must
+come from causal contract features such as log-moneyness and DTE. The additional
+quadratic cross-contract work is bounded at 32 slots and is measured by the
+existing inference-latency gate. Compare it against both zero-neighbor Deep Sets
+and fixed-neighbor `graph_set` under the same parameter and validation budgets.
 
 Set `--graph-neighbors 0` to turn `graph_set` into a self-only Deep Sets path.
 It retains pointwise contract encoding, validity-masked pooling, the recurrent
@@ -795,6 +828,7 @@ train-walk-forward \
   --candidate graph:hybrid:ppo \
   --candidate graph_set:hybrid:ppo \
   --candidate graph_set:hybrid:ppo:0 \
+  --candidate attention_set:hybrid:ppo \
   --candidate flat:gru:ppo:single_leg \
   --candidate graph_set:hybrid:ppo:0:single_leg \
   --hidden-size 256 \
@@ -814,7 +848,8 @@ The optional integer neighbor override permits full and zero-neighbor graph
 candidates in one predeclared tournament; otherwise `--graph-neighbors` applies.
 The decoder is `factorized` or `single_leg`; for a non-graph candidate it may
 occupy the fourth field directly, as in `flat:gru:ppo:single_leg`.
-Every GRU, LSTM, hybrid, mixture, flat, flattened-graph, or graph-set candidate receives
+Every GRU, LSTM, hybrid, mixture, flat, flattened-graph, graph-set, or
+attention-set candidate receives
 the same fold and training seed. Each candidate restores its best validation
 checkpoint; the
 highest declared validation selection score wins, with fewer trainable

@@ -51,7 +51,7 @@ from trading_bot.training.trainer import (
 )
 
 
-WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v36"
+WALK_FORWARD_SCHEMA_VERSION = "research-demo.walk-forward.v37"
 
 
 @dataclass(frozen=True)
@@ -141,6 +141,7 @@ class ModelSpec:
     graph_hidden_size: int = 32
     graph_layers: int = 2
     graph_neighbors: int = 3
+    attention_heads: int = 4
     initial_hold_bias: float = 5.0
     action_decoder: str = "factorized"
     disabled_feature_groups: tuple[str, ...] = ()
@@ -156,8 +157,12 @@ class ModelSpec:
             raise ValueError(
                 "model kind must be gru, lstm, hybrid, or mixture"
             )
-        if self.encoder not in {"flat", "graph", "graph_set"}:
-            raise ValueError("model encoder must be flat, graph, or graph_set")
+        if self.encoder not in {
+            "flat", "graph", "graph_set", "attention_set",
+        }:
+            raise ValueError(
+                "model encoder must be flat, graph, graph_set, or attention_set"
+            )
         if min(
             self.hidden_size,
             self.layers,
@@ -167,6 +172,17 @@ class ModelSpec:
             raise ValueError("model sizes and layers must be positive")
         if self.graph_neighbors < 0:
             raise ValueError("model graph neighbors cannot be negative")
+        if self.encoder == "attention_set":
+            object.__setattr__(self, "graph_neighbors", 0)
+        if self.attention_heads < 1:
+            raise ValueError("model attention_heads must be positive")
+        if (
+            self.encoder == "attention_set"
+            and self.graph_hidden_size % self.attention_heads
+        ):
+            raise ValueError(
+                "attention_set graph_hidden_size must be divisible by attention_heads"
+            )
         if not 0 <= self.dropout < 1:
             raise ValueError("model dropout must be in [0, 1)")
         if self.algorithm not in {"ppo", "reinforce"}:
@@ -244,6 +260,7 @@ class ModelSpec:
             graph_hidden_size=self.graph_hidden_size,
             graph_layers=self.graph_layers,
             graph_neighbors=self.graph_neighbors,
+            attention_heads=self.attention_heads,
             initial_hold_bias=self.initial_hold_bias,
             action_decoder=self.action_decoder,
             auxiliary_target_count=(
@@ -994,7 +1011,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--encoder",
-        choices=("flat", "graph", "graph_set"),
+        choices=("flat", "graph", "graph_set", "attention_set"),
         default="flat",
     )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
@@ -1025,6 +1042,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-hidden-size", type=int, default=32)
     parser.add_argument("--graph-layers", type=int, default=2)
     parser.add_argument("--graph-neighbors", type=int, default=3)
+    parser.add_argument("--attention-heads", type=int, default=4)
     parser.add_argument(
         "--parameter-budget",
         type=int,
@@ -1219,6 +1237,7 @@ def _model_specs_from_args(args: argparse.Namespace) -> tuple[ModelSpec, ...]:
                 graph_hidden_size=args.graph_hidden_size,
                 graph_layers=args.graph_layers,
                 graph_neighbors=graph_neighbors,
+                attention_heads=args.attention_heads,
                 initial_hold_bias=args.initial_hold_bias,
                 action_decoder=action_decoder,
                 algorithm=algorithm,

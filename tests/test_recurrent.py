@@ -36,11 +36,35 @@ class RecurrentTests(TestCase):
             action_decoder=action_decoder,
         )
 
+    @classmethod
+    def attention_set_config(
+        cls,
+        *,
+        kind: str = "gru",
+        action_decoder: str = "factorized",
+    ) -> RecurrentConfig:
+        return RecurrentConfig(**{
+            **cls.graph_set_config(
+                kind=kind,
+                action_decoder=action_decoder,
+            ).__dict__,
+            "encoder": "attention_set",
+            "attention_heads": 2,
+        })
+
     def test_positional_hidden_size_remains_backward_compatible(self):
         config = RecurrentConfig(5, 2, 3, 8)
         self.assertEqual(config.hidden_size, 8)
         self.assertIsNone(config.action_slot_count)
         self.assertEqual(config.initial_hold_bias, 5.0)
+        attention = RecurrentConfig(
+            5,
+            2,
+            3,
+            encoder="attention_set",
+            graph_neighbors=3,
+        )
+        self.assertEqual(attention.graph_neighbors, 0)
 
     def test_rejects_invalid_sparse_policy_prior(self):
         with self.assertRaisesRegex(ValueError, "initial_hold_bias"):
@@ -59,6 +83,8 @@ class RecurrentTests(TestCase):
             RecurrentConfig(5, 2, 3, auxiliary_target_count=-1)
         with self.assertRaisesRegex(ValueError, "auxiliary_horizons"):
             RecurrentConfig(5, 2, 3, auxiliary_horizons=(2, 1))
+        with self.assertRaisesRegex(ValueError, "attention_heads"):
+            RecurrentConfig(5, 2, 3, attention_heads=0)
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_auxiliary_head_is_train_only_and_preserves_policy_outputs(self):
@@ -368,12 +394,22 @@ class RecurrentTests(TestCase):
                 market_feature_count=2,
                 portfolio_feature_count=3,
             ))
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            build_recurrent_actor_critic(RecurrentConfig(
+                20,
+                3,
+                3,
+                action_slot_count=4,
+                encoder="attention_set",
+                contract_feature_count=4,
+                market_feature_count=2,
+                portfolio_feature_count=3,
+                graph_hidden_size=6,
+                attention_heads=4,
+            ))
 
     @skipUnless(torch is not None, "install the optional ml extra")
-    def test_graph_set_is_permutation_equivariant_with_invariant_value(self):
-        torch.manual_seed(31)
-        model = build_recurrent_actor_critic(self.graph_set_config())
-        model.eval()
+    def test_set_encoders_are_permutation_equivariant_with_invariant_value(self):
         sequence = torch.randn(2, 5, 20)
         sequence[..., -3:] = 1
         action_mask = torch.ones(2, 5, 4, 3, dtype=torch.bool)
@@ -387,41 +423,54 @@ class RecurrentTests(TestCase):
             dim=2,
         )
 
-        logits, values, auxiliary, _ = model.forward_sequence_with_auxiliary(
-            sequence,
-            action_mask,
-        )
-        changed_logits, changed_values, changed_auxiliary, _ = (
-            model.forward_sequence_with_auxiliary(changed, changed_mask)
-        )
+        for config in (
+            self.graph_set_config(),
+            self.attention_set_config(),
+        ):
+            with self.subTest(encoder=config.encoder):
+                torch.manual_seed(31)
+                model = build_recurrent_actor_critic(config)
+                model.eval()
+                logits, values, auxiliary, _ = (
+                    model.forward_sequence_with_auxiliary(
+                        sequence,
+                        action_mask,
+                    )
+                )
+                changed_logits, changed_values, changed_auxiliary, _ = (
+                    model.forward_sequence_with_auxiliary(
+                        changed,
+                        changed_mask,
+                    )
+                )
 
-        torch.testing.assert_close(
-            changed_logits[:, :, :3],
-            logits[:, :, permutation],
-            rtol=1e-5,
-            atol=1e-6,
-        )
-        torch.testing.assert_close(
-            changed_logits[:, :, 3],
-            logits[:, :, 3],
-            rtol=1e-5,
-            atol=1e-6,
-        )
-        torch.testing.assert_close(changed_values, values, rtol=1e-5, atol=1e-6)
-        torch.testing.assert_close(
-            changed_auxiliary,
-            auxiliary,
-            rtol=1e-5,
-            atol=1e-6,
-        )
+                torch.testing.assert_close(
+                    changed_logits[:, :, :3],
+                    logits[:, :, permutation],
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
+                torch.testing.assert_close(
+                    changed_logits[:, :, 3],
+                    logits[:, :, 3],
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
+                torch.testing.assert_close(
+                    changed_values,
+                    values,
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
+                torch.testing.assert_close(
+                    changed_auxiliary,
+                    auxiliary,
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
 
     @skipUnless(torch is not None, "install the optional ml extra")
-    def test_single_leg_graph_set_preserves_permutation_symmetry(self):
-        torch.manual_seed(35)
-        model = build_recurrent_actor_critic(self.graph_set_config(
-            action_decoder="single_leg",
-        ))
-        model.eval()
+    def test_single_leg_set_encoders_preserve_permutation_symmetry(self):
         sequence = torch.randn(2, 4, 20)
         sequence[..., -3:] = 1
         mask = torch.ones(2, 4, 4, 3, dtype=torch.bool)
@@ -432,23 +481,38 @@ class RecurrentTests(TestCase):
         changed[..., -3:] = sequence[..., -3:][:, :, permutation]
         changed_mask = torch.cat((mask[:, :, permutation], mask[:, :, 3:4]), dim=2)
 
-        logits, values, _ = model.forward_sequence(sequence, mask)
-        changed_logits, changed_values, _ = model.forward_sequence(
-            changed,
-            changed_mask,
-        )
-        rows = logits[..., 1:].view(2, 4, 4, 2)
-        changed_rows = changed_logits[..., 1:].view(2, 4, 4, 2)
+        for config in (
+            self.graph_set_config(action_decoder="single_leg"),
+            self.attention_set_config(action_decoder="single_leg"),
+        ):
+            with self.subTest(encoder=config.encoder):
+                torch.manual_seed(35)
+                model = build_recurrent_actor_critic(config)
+                model.eval()
+                logits, values, _ = model.forward_sequence(sequence, mask)
+                changed_logits, changed_values, _ = model.forward_sequence(
+                    changed,
+                    changed_mask,
+                )
+                rows = logits[..., 1:].view(2, 4, 4, 2)
+                changed_rows = changed_logits[..., 1:].view(2, 4, 4, 2)
 
-        torch.testing.assert_close(changed_logits[..., 0], logits[..., 0])
-        torch.testing.assert_close(changed_rows[..., :3, :], rows[..., permutation, :])
-        torch.testing.assert_close(changed_rows[..., 3, :], rows[..., 3, :])
-        torch.testing.assert_close(changed_values, values)
+                torch.testing.assert_close(
+                    changed_logits[..., 0],
+                    logits[..., 0],
+                )
+                torch.testing.assert_close(
+                    changed_rows[..., :3, :],
+                    rows[..., permutation, :],
+                )
+                torch.testing.assert_close(
+                    changed_rows[..., 3, :],
+                    rows[..., 3, :],
+                )
+                torch.testing.assert_close(changed_values, values)
 
     @skipUnless(torch is not None, "install the optional ml extra")
-    def test_graph_set_ignores_padded_nodes_and_backpropagates_shared_head(self):
-        torch.manual_seed(37)
-        model = build_recurrent_actor_critic(self.graph_set_config())
+    def test_set_encoders_ignore_padded_nodes_and_backpropagate_shared_head(self):
         sequence = torch.randn(2, 4, 20)
         sequence[..., -3:] = torch.tensor([1.0, 1.0, 0.0])
         changed = sequence.clone()
@@ -456,50 +520,86 @@ class RecurrentTests(TestCase):
         mask = torch.ones(2, 4, 4, 3, dtype=torch.bool)
         mask[:, :, 2, 1:] = False
 
-        logits, values, _ = model.forward_sequence(sequence, mask)
-        changed_logits, changed_values, _ = model.forward_sequence(changed, mask)
+        for config in (
+            self.graph_set_config(),
+            self.attention_set_config(),
+        ):
+            with self.subTest(encoder=config.encoder):
+                torch.manual_seed(37)
+                model = build_recurrent_actor_critic(config)
+                logits, values, _ = model.forward_sequence(sequence, mask)
+                changed_logits, changed_values, _ = model.forward_sequence(
+                    changed,
+                    mask,
+                )
 
-        torch.testing.assert_close(logits, changed_logits)
-        torch.testing.assert_close(values, changed_values)
-        loss = logits[..., :2, :].square().mean() + values.square().mean()
-        loss.backward()
-        self.assertIsNotNone(model.contract_policy.weight.grad)
-        self.assertIsNotNone(model.recurrent.weight_ih_l0.grad)
+                torch.testing.assert_close(logits, changed_logits)
+                torch.testing.assert_close(values, changed_values)
+                loss = logits[..., :2, :].square().mean() + values.square().mean()
+                loss.backward()
+                self.assertIsNotNone(model.contract_policy.weight.grad)
+                self.assertIsNotNone(model.recurrent.weight_ih_l0.grad)
+                if config.encoder == "attention_set":
+                    attention = model.attention_layers[0]["attention"]
+                    self.assertIsNotNone(attention.in_proj_weight.grad)
 
     @skipUnless(torch is not None, "install the optional ml extra")
-    def test_graph_set_streaming_matches_full_sequence_for_every_variant(self):
-        torch.manual_seed(41)
-        for kind in ("gru", "lstm", "hybrid", "mixture"):
-            model = build_recurrent_actor_critic(
-                self.graph_set_config(kind=kind)
-            )
-            model.eval()
-            sequence = torch.randn(1, 5, 20)
-            sequence[..., -3:] = 1
-            masks = torch.ones(1, 5, 4, 3, dtype=torch.bool)
-            full_logits, full_values, _ = model.forward_sequence(
-                sequence,
-                masks,
-            )
-            hidden = None
-            streamed_logits = []
-            streamed_values = []
-            for step in range(sequence.shape[1]):
-                logits, values, hidden = model(
-                    sequence[:, step:step + 1],
-                    masks[:, step],
-                    hidden_state=hidden,
-                )
-                streamed_logits.append(logits)
-                streamed_values.append(values)
-            torch.testing.assert_close(
-                torch.stack(streamed_logits, dim=1),
-                full_logits,
-            )
-            torch.testing.assert_close(
-                torch.stack(streamed_values, dim=1),
-                full_values,
-            )
+    def test_set_encoders_streaming_matches_full_sequence_for_every_variant(self):
+        for encoder in ("graph_set", "attention_set"):
+            for kind in ("gru", "lstm", "hybrid", "mixture"):
+                with self.subTest(encoder=encoder, kind=kind):
+                    torch.manual_seed(41)
+                    config = (
+                        self.graph_set_config(kind=kind)
+                        if encoder == "graph_set"
+                        else self.attention_set_config(kind=kind)
+                    )
+                    model = build_recurrent_actor_critic(config)
+                    model.eval()
+                    sequence = torch.randn(1, 5, 20)
+                    sequence[..., -3:] = 1
+                    masks = torch.ones(1, 5, 4, 3, dtype=torch.bool)
+                    full_logits, full_values, _ = model.forward_sequence(
+                        sequence,
+                        masks,
+                    )
+                    hidden = None
+                    streamed_logits = []
+                    streamed_values = []
+                    for step in range(sequence.shape[1]):
+                        logits, values, hidden = model(
+                            sequence[:, step:step + 1],
+                            masks[:, step],
+                            hidden_state=hidden,
+                        )
+                        streamed_logits.append(logits)
+                        streamed_values.append(values)
+                    torch.testing.assert_close(
+                        torch.stack(streamed_logits, dim=1),
+                        full_logits,
+                    )
+                    torch.testing.assert_close(
+                        torch.stack(streamed_values, dim=1),
+                        full_values,
+                    )
+
+    @skipUnless(torch is not None, "install the optional ml extra")
+    def test_attention_set_is_finite_for_an_empty_surface(self):
+        torch.manual_seed(42)
+        model = build_recurrent_actor_critic(self.attention_set_config())
+        sequence = torch.randn(2, 3, 20)
+        sequence[..., -3:] = 0
+        action_mask = torch.zeros(2, 3, 4, 3, dtype=torch.bool)
+        action_mask[..., 0] = True
+
+        logits, values, auxiliary, _ = (
+            model.forward_sequence_with_auxiliary(sequence, action_mask)
+        )
+
+        self.assertTrue(torch.isfinite(logits[..., 0]).all())
+        self.assertTrue(torch.isneginf(logits[..., 1:]).all())
+        self.assertTrue(torch.isfinite(values).all())
+        self.assertTrue(torch.isfinite(auxiliary).all())
 
     @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_set_uses_fewer_parameters_than_flattened_graph(self):

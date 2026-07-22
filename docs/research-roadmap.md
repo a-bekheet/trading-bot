@@ -35,6 +35,7 @@ Every candidate must eventually pass:
 
 | Evidence | Useful idea for this repository | Decision |
 | --- | --- | --- |
+| [Volatility Surface Reconstruction using Deep Learning under No-Arbitrage Constraints (2026)](https://arxiv.org/abs/2605.24031) | In a parameter-controlled reconstruction study, a coordinate-aware Transformer was robust to structured missing surface regions, while explicit arbitrage penalties remained important. Reconstruction accuracy does not imply a profitable trading representation. | Add a compact masked attention set encoder as a validation/latency candidate, keep current causal coordinates in the node features, and do not infer pricing consistency or alpha without separate arbitrage and trading tests. |
 | [Recurrent Experience Replay in Distributed Reinforcement Learning (ICLR 2019)](https://deepmind.google/research/publications/recurrent-experience-replay-in-distributed-reinforcement-learning/) | Recurrent training on partial sequences must address inaccurate boundary hidden states; a prefix can reconstruct state before loss-bearing transitions. | Random training windows now use a bounded causal no-op prefix, one batched no-gradient recurrent call, explicit metrics, and a validation-only disabled ablation. This is on-policy context reconstruction, not replay. |
 | [AlphaZeroBeta: Deep Reinforcement Learning for Market-Neutral Portfolios (2026)](https://arxiv.org/abs/2607.18001) | A current finance study combines recurrent PPO, transaction-cost-aware objectives, and rolling walk-forward evaluation, but its reported equity-index results do not establish option alpha here. | Keep recurrent PPO in the tournament, require cost stress and walk-forward evidence, and treat market-neutrality controls as a later declared objective rather than importing performance claims. |
 | [Sizing the Risk: Kelly, VIX, and Hybrid Approaches in Put-Writing (2025)](https://arxiv.org/abs/2508.16598) | The preprint treats implied-versus-realized volatility and volatility-regime scaling as interacting inputs for put-writing size, but its SPXW backtest does not establish portability to equity options. | Add bounded prior-only ATM-IV and volatility-premium normalization as two compact state candidates. Keep sizing bounded by collateral and require the named normalization ablation, costs, and held-out folds before retaining either signal. |
@@ -48,7 +49,7 @@ Every candidate must eventually pass:
 | [Autonomous AI Agents for Option Hedging (2026)](https://arxiv.org/abs/2603.06587) | Listed-option experiments emphasize realized path shortfall frequency and Expected Shortfall rather than static fit. | Preserve executable current position state now; add terminal shortfall distributions only after liability episodes and enough independent held-out paths make tail estimates meaningful. |
 | [CANDID DAC (2024)](https://arxiv.org/abs/2407.05789) | Independent policies over coupled action dimensions can struggle; sequential policies coordinate dimensions without enumerating the joint action space. | Compare the factorized decoder with an exact single-leg joint categorical now. Defer autoregressive multi-leg decoding until this simpler restriction earns validation lift; never post-process sampled rows in a way that breaks PPO likelihoods. |
 | [Structured Policy Initialization for Large Discrete Actions (2026)](https://arxiv.org/abs/2601.04441) | Independence can create incoherent combinatorial actions, while learning full action structure can be slow and unstable; a pretrained structure model can improve convergence. | Keep the exact single-leg structural baseline lightweight. Consider learned multi-leg action structure only after sufficient trajectories exist for pretraining and the single-leg restriction is demonstrably too limiting. |
-| [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Log-moneyness/time-to-expiry surface coordinates, cross-day learning, and model-based priors help sparse reconstruction. | Treat a SABR-prior or attention surface encoder as a later experiment, after full-surface history and arbitrage checks exist. |
+| [Meta-learning neural processes for IV surfaces (2025)](https://arxiv.org/abs/2509.11928) | Self-attention can contextualize sparse option quotes across log-moneyness and maturity, while the paper's SABR pretraining supplied an important financial prior. | The attention set candidate now learns only observed cross-contract relations inside the trading policy. Defer SABR pretraining or reconstructed quotes until sufficient surface history and explicit arbitrage checks exist. |
 | [Deep option pricing with market IV surfaces (updated 2026)](https://arxiv.org/abs/2509.05911) | A low-dimensional whole-surface latent representation may retain most surface information. | Benchmark causal PCA first; try VAE/attention compression only if it beats the simpler representation out of sample. |
 | [When does Self-Prediction help? Understanding Auxiliary Tasks in Reinforcement Learning (2024)](https://arxiv.org/abs/2406.17718) and [Bridging State and History Representations (2024)](https://arxiv.org/abs/2401.08898) | Predictive auxiliary objectives can improve RL history representations, but their value depends on observation structure and distractions rather than being universal. | A masked multi-horizon Smooth-L1 head supervises compact market changes plus permutation-invariant median matched-contract quote/IV dynamics only on training transitions. Keep it only through matched one-step and disabled validation ablations. |
 | [Data-Efficient RL with Self-Predictive Representations (2020)](https://arxiv.org/abs/2007.05929) | Predicting multiple future steps can improve representation learning under limited interaction, though its evidence comes from visual-control domains rather than markets. | Support predeclared cumulative snapshot horizons with endpoint masks and compare multi-horizon, one-step, and disabled heads using validation only. |
@@ -81,7 +82,7 @@ uses a real bounded underlying-share action with explicit synthetic costs. It
 remains a research approximation until historical underlying bid/ask, borrow,
 margin, dividend, and funding data are available.
 
-The runner can now compare flat, flattened-graph, and graph-set GRU, LSTM,
+The runner can now compare flat, flattened-graph, graph-set, and attention-set GRU, LSTM,
 concatenated-hybrid, and gated-mixture candidates within each fold. All
 candidates share the fold and seed;
 architecture selection uses
@@ -213,13 +214,25 @@ Episode provenance reports requested option and hedge actions separately.
 
 An optional exact single-leg decoder now replaces the 33 independent row
 categoricals with one masked categorical over hold or one row/action pair. It
-trains under both PPO and REINFORCE with GRU, LSTM, hybrid, mixture, flat, graph, and
-graph-set encoders; graph-set option scores remain permutation equivariant. It
+trains under both PPO and REINFORCE with GRU, LSTM, hybrid, mixture, flat,
+graph, graph-set, and attention-set encoders; set-policy option scores remain
+permutation equivariant. It
 reduces the default flat-hybrid head by 8,224 parameters but measured roughly
 11% slower in batch-one deterministic inference because the joint category must
 be decoded into the fixed environment array. The current tiny AAPL tournament
 tied at zero validation reward and selected it only by parameter count, so the
 factorized decoder remains the default and any coordination benefit is unproven.
+
+The optional `attention_set` encoder learns cross-contract relations through
+masked multi-head self-attention before the existing GRU/LSTM temporal layer.
+It has no positional embedding, preserves exact option-logit equivariance and
+global-output invariance, ignores padded contracts, and safely handles an empty
+surface. It shares checkpoint, parameter-cap, action-decoder, PPO/REINFORCE, and
+walk-forward selection contracts with `graph_set`. The latest tiny AAPL smoke
+tied the zero-neighbor and attention candidates at zero validation reward and
+selected the smaller Deep Sets model, while the 32-slot attention benchmark was
+materially slower. The implementation enables a controlled hypothesis test; it
+does not promote attention or establish surface-reconstruction quality.
 
 The gated recurrent mixture keeps independent GRU and LSTM causal states but
 compresses their outputs through one state-dependent scalar convex gate before
@@ -360,13 +373,14 @@ should compare:
 - Flat GRU versus GNN-GRU at matched parameter and latency budgets.
 - Zero-neighbor Deep Sets versus neighbor-message graph sets in the same
   validation-only tournament.
-- Hand-built neighbor graphs versus learned attention with validity masks.
+- Fixed-neighbor `graph_set` versus the implemented masked `attention_set` under
+  matched parameter and latency budgets.
 - Per-ticker training versus the shared graph-set policy with ticker/regime
   context.
 - Raw normalized surface features versus causal PCA, then a compact VAE or
   neural-process surface latent only after the data volume supports it.
 
-The flat, flattened-graph, graph-set, and recurrent-family tournament plumbing,
+The flat, flattened-graph, graph-set, attention-set, and recurrent-family tournament plumbing,
 exact parameter-cap matching, and a standardized streaming batch-one inference
 benchmark are implemented. Each fold reports median, p95, and mean latency with
 runtime context from a training observation. Timing is informational by default; a

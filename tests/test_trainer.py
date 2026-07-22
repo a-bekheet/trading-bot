@@ -45,6 +45,48 @@ from tests.test_training_env import demo_dataset, three_snapshot_dataset
 
 class TrainerTests(TestCase):
     @skipUnless(torch is not None, "install the optional ml extra")
+    def test_attention_set_policy_trains_and_round_trips_checkpoint(self):
+        env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
+        observation, _ = env.reset(seed=47)
+        recurrent = RecurrentConfig(
+            input_size=observation_vector(observation).size,
+            slot_count=2,
+            action_slot_count=env.action_shape[0],
+            action_count=env.action_shape[1],
+            hidden_size=4,
+            kind="gru",
+            encoder="attention_set",
+            contract_feature_count=observation.contracts.shape[1],
+            market_feature_count=observation.market.size,
+            portfolio_feature_count=observation.portfolio.size,
+            graph_hidden_size=4,
+            graph_layers=1,
+            attention_heads=2,
+        )
+        training = TrainingConfig(
+            episodes=1,
+            sequence_length=2,
+            ppo_epochs=1,
+            minibatch_size=2,
+            evaluation_interval=1,
+            seed=47,
+        )
+
+        model, metrics = train_actor_critic(env, recurrent, training)
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "attention-set.pt"
+            save_checkpoint(path, model, env, recurrent, training, metrics)
+            restored, manifest = load_checkpoint(path)
+
+        self.assertEqual(restored.config.encoder, "attention_set")
+        self.assertEqual(restored.config.attention_heads, 2)
+        self.assertEqual(manifest["schema_version"], CHECKPOINT_SCHEMA_VERSION)
+        self.assertTrue(all(
+            torch.isfinite(parameter).all()
+            for parameter in restored.parameters()
+        ))
+
+    @skipUnless(torch is not None, "install the optional ml extra")
     def test_graph_set_policy_trains_and_round_trips_checkpoint(self):
         env = OptionsEnv(three_snapshot_dataset(), slot_count=2)
         observation, _ = env.reset(seed=43)
@@ -93,12 +135,17 @@ class TrainerTests(TestCase):
         single = _parser().parse_args(["--symbol", "msft"])
         universe = _parser().parse_args(["--universe", "top50"])
         sparse = _parser().parse_args(["--action-decoder", "single_leg"])
+        attention = _parser().parse_args([
+            "--encoder", "attention_set", "--attention-heads", "2",
+        ])
 
         self.assertEqual(_symbols_from_args(single), ("MSFT",))
         self.assertEqual(single.slot_assignment, "stable")
         self.assertEqual(single.action_decoder, "factorized")
         self.assertEqual(single.burn_in_steps, 8)
         self.assertFalse(single.allow_collateralized_option_shorts)
+        self.assertEqual(attention.encoder, "attention_set")
+        self.assertEqual(attention.attention_heads, 2)
         self.assertEqual(
             _environment_kwargs_from_args(single)[
                 "reward_drawdown_penalty"

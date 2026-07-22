@@ -30,6 +30,7 @@ class RecurrentConfig:
     graph_hidden_size: int = 32
     graph_layers: int = 2
     graph_neighbors: int = 3
+    attention_heads: int = 4
     graph_relation_indices: tuple[int, ...] = ()
     initial_hold_bias: float = 5.0
     action_decoder: str = "factorized"
@@ -52,6 +53,10 @@ class RecurrentConfig:
             raise ValueError("layer and graph hidden sizes must be positive")
         if self.graph_neighbors < 0:
             raise ValueError("graph_neighbors cannot be negative")
+        if self.encoder == "attention_set":
+            object.__setattr__(self, "graph_neighbors", 0)
+        if self.attention_heads < 1:
+            raise ValueError("attention_heads must be positive")
         if not math.isfinite(self.initial_hold_bias) or self.initial_hold_bias < 0:
             raise ValueError("initial_hold_bias must be finite and nonnegative")
         if self.action_decoder not in {"factorized", "single_leg"}:
@@ -95,10 +100,14 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         raise ValueError(
             "kind must be 'gru', 'lstm', 'hybrid', or 'mixture'"
         )
-    graph_encoder = config.encoder in {"graph", "graph_set"}
+    graph_encoder = config.encoder in {"graph", "graph_set", "attention_set"}
+    set_encoder = config.encoder in {"graph_set", "attention_set"}
+    fixed_graph_encoder = config.encoder in {"graph", "graph_set"}
     single_leg = config.action_decoder == "single_leg"
-    if config.encoder not in {"flat", "graph", "graph_set"}:
-        raise ValueError("encoder must be 'flat', 'graph', or 'graph_set'")
+    if config.encoder not in {"flat", "graph", "graph_set", "attention_set"}:
+        raise ValueError(
+            "encoder must be 'flat', 'graph', 'graph_set', or 'attention_set'"
+        )
     if graph_encoder and config.contract_feature_count is None:
         raise ValueError("graph encoder requires contract_feature_count")
     if graph_encoder and any(
@@ -106,6 +115,13 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
         for index in config.graph_relation_indices
     ):
         raise ValueError("graph_relation_indices are outside the contract feature layout")
+    if (
+        config.encoder == "attention_set"
+        and config.graph_hidden_size % config.attention_heads
+    ):
+        raise ValueError(
+            "attention_set graph_hidden_size must be divisible by attention_heads"
+        )
 
     temporal_input_size = config.input_size
     policy_slot_count = config.action_slot_count or config.slot_count
@@ -124,10 +140,10 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             raise ValueError(
                 "input_size does not match market, contract, portfolio, and mask dimensions"
             )
-        if config.encoder == "graph_set":
+        if set_encoder:
             if policy_slot_count != config.slot_count + 1:
                 raise ValueError(
-                    "graph_set requires one action row per contract plus underlying"
+                    "set encoders require one action row per contract plus underlying"
                 )
             temporal_input_size = (
                 config.market_feature_count
@@ -163,30 +179,66 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             )
             self.input_norm = nn.LayerNorm(temporal_input_size)
             if graph_encoder:
-                graph_dimensions = [
-                    config.contract_feature_count,
-                    *([config.graph_hidden_size] * config.graph_layers),
-                ]
                 self.contract_norm = nn.LayerNorm(config.contract_feature_count)
-                self.graph_message_layers = nn.ModuleList(
-                    nn.ModuleDict(
-                        {
-                            "self": nn.Linear(source, target),
-                            **(
-                                {
-                                    "neighbor": nn.Linear(
-                                        source,
-                                        target,
-                                        bias=False,
-                                    )
-                                }
-                                if effective_graph_neighbors
-                                else {}
-                            ),
-                        }
+                if config.encoder == "attention_set":
+                    self.contract_projection = nn.Linear(
+                        config.contract_feature_count,
+                        config.graph_hidden_size,
                     )
-                    for source, target in zip(graph_dimensions, graph_dimensions[1:])
-                )
+                    self.attention_layers = nn.ModuleList(
+                        nn.ModuleDict({
+                            "attention": nn.MultiheadAttention(
+                                config.graph_hidden_size,
+                                config.attention_heads,
+                                batch_first=True,
+                            ),
+                            "attention_norm": nn.LayerNorm(
+                                config.graph_hidden_size
+                            ),
+                            "feedforward": nn.Sequential(
+                                nn.Linear(
+                                    config.graph_hidden_size,
+                                    2 * config.graph_hidden_size,
+                                ),
+                                nn.GELU(),
+                                nn.Linear(
+                                    2 * config.graph_hidden_size,
+                                    config.graph_hidden_size,
+                                ),
+                            ),
+                            "feedforward_norm": nn.LayerNorm(
+                                config.graph_hidden_size
+                            ),
+                        })
+                        for _ in range(config.graph_layers)
+                    )
+                else:
+                    graph_dimensions = [
+                        config.contract_feature_count,
+                        *([config.graph_hidden_size] * config.graph_layers),
+                    ]
+                    self.graph_message_layers = nn.ModuleList(
+                        nn.ModuleDict(
+                            {
+                                "self": nn.Linear(source, target),
+                                **(
+                                    {
+                                        "neighbor": nn.Linear(
+                                            source,
+                                            target,
+                                            bias=False,
+                                        )
+                                    }
+                                    if effective_graph_neighbors
+                                    else {}
+                                ),
+                            }
+                        )
+                        for source, target in zip(
+                            graph_dimensions,
+                            graph_dimensions[1:],
+                        )
+                    )
             if config.kind in {"hybrid", "mixture"}:
                 self.recurrent = nn.ModuleDict(
                     {"gru": make_recurrent("gru"), "lstm": make_recurrent("lstm")}
@@ -203,7 +255,7 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 self.recurrent = make_recurrent(config.kind)
                 self.mixture_gate = None
                 output_size = config.hidden_size
-            if config.encoder == "graph_set":
+            if set_encoder:
                 self.policy = None
                 self.contract_policy = nn.Linear(
                     output_size + config.graph_hidden_size,
@@ -267,8 +319,33 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             valid = flattened[:, portfolio_end:].bool()
             hidden = self.contract_norm(contracts)
 
-            neighbor_count = effective_graph_neighbors
-            if neighbor_count:
+            neighbor_count = (
+                effective_graph_neighbors if fixed_graph_encoder else 0
+            )
+            if config.encoder == "attention_set":
+                hidden = self.contract_projection(hidden)
+                hidden *= valid.unsqueeze(-1)
+                key_padding_mask = ~valid
+                # MultiheadAttention needs at least one unmasked key. A fully
+                # empty surface uses the already-zero first node as a sentinel;
+                # every output is masked back to zero below.
+                key_padding_mask[:, 0] &= valid.any(dim=1)
+                for layer in self.attention_layers:
+                    attended, _ = layer["attention"](
+                        hidden,
+                        hidden,
+                        hidden,
+                        key_padding_mask=key_padding_mask,
+                        need_weights=False,
+                    )
+                    hidden = layer["attention_norm"](hidden + attended)
+                    hidden *= valid.unsqueeze(-1)
+                    transformed = layer["feedforward"](hidden)
+                    hidden = layer["feedforward_norm"](
+                        hidden + transformed
+                    )
+                    hidden *= valid.unsqueeze(-1)
+            elif neighbor_count:
                 pair_valid = valid.unsqueeze(1) & valid.unsqueeze(2)
                 relation_indices = config.graph_relation_indices or tuple(
                     range(config.contract_feature_count)
@@ -303,16 +380,17 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
                 adjacency += torch.diag_embed(valid.to(hidden.dtype))
                 degree = adjacency.sum(dim=-1, keepdim=True).clamp_min(1.0)
 
-            for layer in self.graph_message_layers:
-                transformed = layer["self"](hidden)
-                if neighbor_count:
-                    neighbor_mean = adjacency.bmm(hidden) / degree
-                    transformed = transformed + layer["neighbor"](neighbor_mean)
-                hidden = torch.nn.functional.gelu(transformed)
-                hidden *= valid.unsqueeze(-1)
+            if fixed_graph_encoder:
+                for layer in self.graph_message_layers:
+                    transformed = layer["self"](hidden)
+                    if neighbor_count:
+                        neighbor_mean = adjacency.bmm(hidden) / degree
+                        transformed = transformed + layer["neighbor"](neighbor_mean)
+                    hidden = torch.nn.functional.gelu(transformed)
+                    hidden *= valid.unsqueeze(-1)
 
             valid_values = valid.to(hidden.dtype)
-            if config.encoder == "graph_set":
+            if set_encoder:
                 valid_count = valid_values.sum(dim=1, keepdim=True).clamp_min(1.0)
                 pooled_mean = hidden.sum(dim=1) / valid_count
                 pooled_max = hidden.masked_fill(
@@ -400,9 +478,9 @@ def build_recurrent_actor_critic(config: RecurrentConfig):
             action_mask,
             node_embeddings,
         ):
-            if config.encoder == "graph_set":
+            if set_encoder:
                 if node_embeddings is None:
-                    raise RuntimeError("graph_set node embeddings are missing")
+                    raise RuntimeError("set-encoder node embeddings are missing")
                 global_context = encoded.unsqueeze(2).expand(
                     -1,
                     -1,

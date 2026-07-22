@@ -264,15 +264,22 @@ class WalkForwardTrainingTests(TestCase):
             "flat:gru:ppo:factorized",
             "--candidate",
             "graph_set:mixture:ppo:0:single_leg",
+            "--candidate",
+            "attention_set:gru:ppo:factorized",
+            "--attention-heads",
+            "2",
         ])
 
         specs = _model_specs_from_args(args)
 
         self.assertEqual(
             [spec.action_decoder for spec in specs],
-            ["factorized", "single_leg"],
+            ["factorized", "single_leg", "factorized"],
         )
         self.assertEqual(specs[1].graph_neighbors, 0)
+        self.assertEqual(specs[2].encoder, "attention_set")
+        self.assertEqual(specs[2].attention_heads, 2)
+        self.assertEqual(specs[2].graph_neighbors, 0)
         self.assertNotEqual(specs[0].identifier, specs[1].identifier)
 
     @skipUnless(torch is not None, "install the optional ml extra")
@@ -871,6 +878,15 @@ class WalkForwardTrainingTests(TestCase):
                 graph_neighbors=0,
                 parameter_budget=5_000,
             ),
+            ModelSpec(
+                "gru",
+                "attention_set",
+                hidden_size=32,
+                graph_hidden_size=4,
+                graph_layers=1,
+                attention_heads=2,
+                parameter_budget=5_000,
+            ),
         )
 
         resolved_sizes = set()
@@ -1007,6 +1023,14 @@ class WalkForwardTrainingTests(TestCase):
             ModelSpec(parameter_budget=0)
         with self.assertRaisesRegex(ValueError, "action_decoder"):
             ModelSpec(action_decoder="beam_search")
+        with self.assertRaisesRegex(ValueError, "attention_heads"):
+            ModelSpec(attention_heads=0)
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            ModelSpec(
+                encoder="attention_set",
+                graph_hidden_size=6,
+                attention_heads=4,
+            )
 
     def test_rejects_invalid_latency_benchmark_lengths(self):
         with self.assertRaisesRegex(ValueError, "cannot be negative"):

@@ -27,7 +27,7 @@ from trading_bot.training.sequence import (
 from trading_bot.market_data.universe import TOP_50_TICKERS
 
 
-CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v33"
+CHECKPOINT_SCHEMA_VERSION = "research-demo.policy.v34"
 
 
 @dataclass(frozen=True)
@@ -1426,7 +1426,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--encoder",
-        choices=("flat", "graph", "graph_set"),
+        choices=("flat", "graph", "graph_set", "attention_set"),
         default="flat",
     )
     parser.add_argument("--algorithm", choices=("ppo", "reinforce"), default="ppo")
@@ -1442,6 +1442,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--graph-hidden-size", type=int, default=32)
     parser.add_argument("--graph-layers", type=int, default=2)
     parser.add_argument("--graph-neighbors", type=int, default=3)
+    parser.add_argument("--attention-heads", type=int, default=4)
     parser.add_argument("--slot-count", type=int, default=32)
     parser.add_argument(
         "--slot-assignment",
@@ -1608,6 +1609,7 @@ def main() -> None:
         graph_hidden_size=args.graph_hidden_size,
         graph_layers=args.graph_layers,
         graph_neighbors=args.graph_neighbors,
+        attention_heads=args.attention_heads,
         auxiliary_target_count=(
             len(AUXILIARY_TARGET_FEATURES) * len(auxiliary_horizons)
         ),

@@ -27,7 +27,7 @@ does not place live trades.
   evaluation reports. `features.py` computes causal features and `sequence.py`
   builds chronological windows. `recurrent.py` is an optional PyTorch GRU,
   LSTM, concatenated hybrid, or gated-mixture actor-critic with flat,
-  flattened-graph, or graph-set contract
+  flattened-graph, graph-set, or masked attention-set contract
   encoding. `trainer.py`
   owns factorized and exact single-leg-joint PPO/GAE optimization,
   deterministic evaluation, safe
@@ -439,6 +439,18 @@ adjacency/degree tensors, call graph multiplication, or register dead neighbor
 weights. This self-only Deep Sets configuration must remain selectable alongside
 the full neighbor graph in one validation-only tournament.
 
+The `attention_set` encoder is the learned-relation counterpart. It must have no
+slot or positional embedding: masked self-attention operates only among valid
+contracts, followed by the same invariant pooling and shared contract scorer.
+Permuting valid contracts must permute option logits and leave value,
+underlying logits, and auxiliary predictions unchanged for both action
+decoders. Padded node values must be inert, and an all-invalid surface must stay
+finite. `attention_heads` is positive, divides `graph_hidden_size`, and is
+persisted in checkpoint and walk-forward artifacts; `graph_neighbors` is
+normalized to zero because it has no meaning for learned global attention.
+Keep `graph_set` with zero and fixed neighbors as explicit baselines, and never
+promote attention from reconstruction literature or a training-loss result.
+
 Evaluation changes must preserve chronological order. `walk_forward_splits`
 uses half-open train/validation/test ranges with explicit embargoes and may
 return no folds when history is insufficient. Never relax requested sizes to
@@ -549,8 +561,9 @@ option-chain AAPL
 train-demo --symbol AAPL --encoder graph --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind hybrid --episodes 25
 train-demo --symbol AAPL --encoder graph_set --kind mixture --episodes 25
+train-demo --symbol AAPL --encoder attention_set --attention-heads 4 --kind hybrid --episodes 25
 train-demo --symbol AAPL --allow-collateralized-option-shorts --episodes 25
-train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:0 --candidate graph_set:mixture:ppo:0
+train-walk-forward --symbol AAPL --min-train-size 500 --validation-size 100 --test-size 100 --embargo 8 --candidate flat:gru --candidate graph_set:hybrid:ppo:0 --candidate attention_set:hybrid:ppo
 train-walk-forward --symbol AAPL --allow-collateralized-option-shorts --short-volatility-min-edge 0.02 --min-train-size 500 --validation-size 100 --test-size 100
 ```
 
