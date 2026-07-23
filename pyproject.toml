@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trading-bot"
-version = "0.89.1"
+version = "0.91.0"
 description = "A starting point for an options trading bot"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.115",
     "pandas>=2.0",
     "numpy>=1.26",
-    "streamlit>=1.40",
+    "uvicorn>=0.34",
     "yfinance>=0.2.54",
 ]
 
@@ -28,13 +29,17 @@ arena-service = "trading_bot.training.arena_service:main"
 paper-agents = "trading_bot.execution.agent_runtime:main"
 paper-agent-watch = "trading_bot.execution.agent_watch:main"
 paper-agent-service = "trading_bot.execution.agent_service:main"
+trading-desk = "trading_bot.interface.launcher:main"
 
 [project.optional-dependencies]
 ml = ["torch>=2.2"]
-dev = ["pytest>=8"]
+dev = ["httpx2>=0.1", "pytest>=8"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"trading_bot.interface" = ["web_dist/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

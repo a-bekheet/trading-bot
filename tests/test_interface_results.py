@@ -19,6 +19,8 @@ from trading_bot.interface.results import (
     heldout_results,
     load_arena_watch_status,
     load_paper_agent_watch_status,
+    model_structure,
+    model_structure_candidates,
     paper_agent_decisions,
     paper_agent_equity_curve,
     paper_agent_overview,
@@ -124,6 +126,86 @@ def result_summary():
 
 
 class InterfaceResultTests(TestCase):
+    def test_projects_selected_model_structure_without_loading_checkpoint(self):
+        summary = result_summary()
+        summary["training"] = {"sequence_length": 4}
+        fold = summary["folds"][0]
+        fold["checkpoint"] = "/tmp/TEST-fold-000-gru.pt"
+        candidate = fold["model_selection"]["candidates"][0]
+        candidate.update(
+            {
+                "active_input_count": 425,
+                "masked_input_count": 0,
+                "parameter_count": 12_345,
+                "episodes_completed": 9,
+                "optimizer_updates": 24,
+                "resolved_model": {
+                    "input_size": 425,
+                    "slot_count": 8,
+                    "action_slot_count": 9,
+                    "action_count": 3,
+                    "action_decoder": "single_leg",
+                    "encoder": "surface_graph_set",
+                    "kind": "gru",
+                    "contract_feature_count": 43,
+                    "market_feature_count": 61,
+                    "portfolio_feature_count": 12,
+                    "hidden_size": 16,
+                    "layers": 1,
+                    "graph_layers": 2,
+                    "graph_neighbors": 1,
+                    "graph_hidden_size": 32,
+                    "feature_vector_schema": "dimensionless.v24",
+                    "auxiliary_target_count": 9,
+                },
+                "inference_latency": {
+                    "median_microseconds": 87.5,
+                    "p95_microseconds": 110.0,
+                    "scope": "actor_only_streaming_batch_1",
+                },
+                "training_seed_aggregate": {
+                    "training_seed_count": 3,
+                    "training_seeds": [2026, 2027, 2028],
+                },
+            }
+        )
+        candidate["model"].update(
+            {
+                "encoder": "surface_graph_set",
+                "action_decoder": "single_leg",
+            }
+        )
+
+        structure = model_structure(summary)
+        fleet = model_structure_candidates(summary)
+
+        self.assertEqual(structure["agent_id"], "TEST-gru")
+        self.assertEqual(structure["architecture"], "Surface Graph Set / Gru")
+        self.assertEqual(structure["input_width"], 425)
+        self.assertEqual(structure["actor_output_width"], 19)
+        self.assertEqual(structure["parameters"], 12_345)
+        self.assertEqual(structure["checkpoint_name"], "TEST-fold-000-gru.pt")
+        self.assertEqual(len(structure["stages"]), 4)
+        self.assertEqual(
+            sum(item["width"] for item in structure["input_groups"]),
+            425,
+        )
+        self.assertEqual(fleet.iloc[0]["Selected"], "Winner")
+        self.assertEqual(fleet.iloc[0]["Encoder"], "Surface GNN")
+        self.assertEqual(fleet.iloc[0]["Training seeds"], 3)
+        json.dumps(structure)
+
+    def test_model_structure_handles_missing_or_legacy_contracts(self):
+        self.assertEqual(model_structure({}), {})
+        self.assertTrue(model_structure_candidates({}).empty)
+
+        structure = model_structure(result_summary())
+
+        self.assertEqual(structure["symbol"], "TEST")
+        self.assertEqual(structure["architecture"], "Flat / Gru")
+        self.assertEqual(structure["input_width"], 0)
+        self.assertEqual(structure["checkpoint"], "Unavailable")
+
     def test_loads_only_versioned_paper_agent_heartbeat(self):
         with TemporaryDirectory() as directory:
             data_dir = Path(directory)

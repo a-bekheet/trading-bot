@@ -1,3 +1,3 @@
 """Options data collection and analysis tools."""
 
-__version__ = "0.89.1"
+__version__ = "0.91.0"

@@ -105,21 +105,42 @@ v0.89.1 makes option execution records JSON-safe at the environment boundary.
 Encoded NumPy action quantities are converted to Python integers before fills,
 so an activated paper agent can atomically persist its first sandbox order.
 
+v0.91 replaces the Streamlit workspace with a local FastAPI and React control
+room. The application has persistent navigation, real allow-listed service
+controls, serialized jobs and logs, a dedicated Training route, an interactive
+model laboratory, a searchable paper order workspace, portfolio state, and
+research evidence. `trading-desk` serves the compiled application and API from
+one process; the browser remains paper-only and never invokes a shell.
+
 ## Explore data
 
+Launch the application with the packaged control:
+
 ```bash
-streamlit run src/trading_bot/interface/app.py
+trading-desk
 ```
 
-The interface is organized around five focused jobs. **Overview** is the compact
-operating dashboard for market eligibility, service health, measured outcomes,
-and fleet status. **Agent Desk** gives one ticker and one selected policy the
-full screen: model identity, activation gate, inference latency, online equity,
-and recent decisions. **Trade** puts a paper order ticket before the full option
-chain, while **Portfolio** combines marked positions and fill history. Dense
-walk-forward evidence, arena readiness, candidate rankings, GNN comparisons,
-feature ablations, and provenance live under **Research** rather than crowding
-the operating views.
+It serves the local workspace on `http://127.0.0.1:8765` and opens a browser.
+Use `trading-desk --headless --port 9000` for a terminal-managed instance, or
+`--data-dir PATH` to inspect another saved data directory.
+
+The application has eight focused routes. **Command Center** provides real
+start, stop, restart, and one-cycle controls for the collector, training
+watcher, and paper-agent watcher; every action is an allow-listed serialized
+job with captured output. **Agents** shows the selected fleet and decision
+timeline. **Models** renders the resolved input → encoder/GNN → recurrent core
+→ actor graph, with a runtime/training toggle and clickable component
+inspection. **Training** exposes ticker selection, strict readiness, training
+budget, replica count, confirmation, launch, and job state. **Trade** is the
+manual paper order workstation. **Portfolio**, **Research**, and **System**
+cover account state, saved evidence, and operational logs.
+
+Frontend source lives in `frontend/`; rebuild the compiled application with:
+
+```bash
+npm install --prefix frontend
+npm run build --prefix frontend
+```
 
 Saved runs under `data/agent_runs/` still expose the newest selected policy for
 every ticker with a stable ID, checkpoint, recurrent core, flat/GNN topology,

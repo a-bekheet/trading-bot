@@ -23,7 +23,9 @@ does not place live trades.
   isolated agent store, selected-checkpoint runtime, change-aware watcher, and
   its macOS service wrapper. It must remain independent of any future
   live-broker adapter.
-- `src/trading_bot/interface/`: the Streamlit data explorer and its data loader.
+- `src/trading_bot/interface/`: the FastAPI application API, serialized local
+  control plane, artifact projections, compiled React application, and
+  `trading-desk` launcher. `frontend/` owns the React/TypeScript source.
 - `src/trading_bot/training/`: versioned research-demo schemas, manifests,
   snapshot loader, fixed-slot environment, deterministic baselines, and
   evaluation reports. `features.py` computes causal features and `sequence.py`
@@ -78,15 +80,24 @@ Create those packages only when implementing their first real behavior.
 7. `market_data.status` validates heartbeat freshness, cycle failures, and
    continuous-process liveness. `market_data.service` manages the optional
    macOS LaunchAgent used for unattended restart-on-failure collection.
-8. `interface.app` displays saved walk-forward agent evidence and the latest
-   market snapshot; it never fetches markets. Agent results come only from
-   JSON artifacts under `data/agent_runs/` or `data/models/walk-forward/`.
-   Keep the five-task information architecture stable: Overview for operating
-   health, Agent Desk for one policy, Trade for the order ticket and chain,
-   Portfolio for positions and fills, and Research for dense training evidence.
-   Operator tabs should show conclusions and next actions before raw tables;
-   detailed readiness, candidate fleets, ablations, and provenance belong in
-   Research or expanders.
+8. `interface.api` displays saved walk-forward agent evidence and the latest
+   market snapshot; it never fetches markets. Agent results come only from JSON
+   artifacts under `data/agent_runs/` or `data/models/walk-forward/`.
+   `interface.control` is the only browser-facing process mutation boundary. It
+   accepts allow-listed typed actions, constructs argument arrays without a
+   shell, serializes jobs per service, and captures bounded output. A page load,
+   refresh, or route change must never start collection, training, or execution.
+   `interface.launcher` is the packaged `trading-desk` entry point and serves
+   the compiled React application and API from one local process.
+   Keep the eight-route information architecture stable: Command Center for
+   service controls, Agents for selected policy behavior, Models for interactive
+   architecture inspection, Training for explicit configuration/preflight/run
+   controls, Trade for the order ticket and chain, Portfolio for positions and
+   fills, Research for dense evidence, and System for jobs and logs.
+   Models must derive tensor widths, topology, recurrent core, decoder,
+   parameters, latency, training heads, checkpoint, and candidate comparison
+   from the persisted resolved model contract without importing Torch or
+   loading checkpoint weights.
    Candidate rankings are validation-only; only the fixed winner is labeled
    held out. The UI must keep exploratory sample-size and legacy execution-
    provenance warnings visible. It disables paper orders when the provider
@@ -409,7 +420,7 @@ activation state, latency, and test time range. Show every stored decision,
 including HOLD, and keep the research action separate from the sandbox action
 when the validation gate substitutes no-op. Guarded agents are real saved
 policies, not missing agents, and GNN challengers must remain visible even when
-a flat policy wins. Training and market fetching stay outside Streamlit reruns.
+a flat policy wins. Training and market fetching stay outside page renders.
 
 `agent-arena` is the reproducible integration-demo entry point. Keep candidate
 families, split sizes, training budget, costs, and risk rules identical across
@@ -489,7 +500,7 @@ contract therefore needs at least thirteen eligible states: six training, three
 validation, and four test. Do not engineer policy features until the ticker
 passes. Persist source, eligible, required, and exclusion counts together with
 per-partition readiness and time bounds. Readiness-only failures are expected
-status, not a crashed job, and must remain visible in Streamlit while the most
+status, not a crashed job, and must remain visible in the application while the most
 recent successful agents stay inspectable. `--allow-unready-tail` is an explicit
 plumbing override that retains the unfiltered source dataset and must never
 support an economic or alpha claim.
@@ -503,8 +514,10 @@ ordered symbol set, and watcher run-contract version. Never pass
 `--allow-unready-tail`. Hold
 one advisory lock for the watcher lifetime so manual and LaunchAgent instances
 cannot train the same session concurrently. The service checks frequently but
-trains at most once per completed contract/session; Streamlit only reads its
-status file and must not initiate training.
+trains at most once per completed contract/session. Ordinary page renders only
+inspect the status file. The Training route may launch the same strict
+arena only after an explicit confirmed POST through `interface.control`; it
+must never use `--allow-unready-tail`.
 
 Validation selection does not automatically authorize sandbox execution. After
 the research winner is fixed, evaluate deterministic no-op on validation only

@@ -572,6 +572,309 @@ def agent_leaderboard(summary: dict[str, Any]) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+def model_structure(summary: dict[str, Any]) -> dict[str, Any]:
+    """Describe the newest selected model from persisted artifact metadata.
+
+    This stays Torch-free: the UI explains the exact saved contract without
+    loading checkpoint weights or reconstructing a model from assumptions.
+    """
+    folds = summary.get("folds", [])
+    if not folds:
+        return {}
+    fold = max(folds, key=lambda item: int(item.get("fold", -1)))
+    winner = _selected_candidate(fold)
+    if not winner:
+        return {}
+
+    model = winner.get("model") or {}
+    resolved = winner.get("resolved_model") or {}
+    latency = winner.get("inference_latency") or {}
+    seed_aggregate = winner.get("training_seed_aggregate") or {}
+    training = summary.get("training") or {}
+    symbol = str(summary.get("symbol", "unknown")).upper()
+    model_id = str(winner.get("model_id", "unknown"))
+
+    slot_count = int(resolved.get("slot_count") or 0)
+    contract_width = int(resolved.get("contract_feature_count") or 0)
+    market_width = int(resolved.get("market_feature_count") or 0)
+    portfolio_width = int(resolved.get("portfolio_feature_count") or 0)
+    input_width = int(
+        resolved.get("input_size")
+        or winner.get("active_input_count")
+        or 0
+    )
+    masked_width = int(
+        winner.get(
+            "masked_input_count",
+            len(resolved.get("masked_input_indices") or ()),
+        )
+        or 0
+    )
+    active_width = int(
+        winner.get("active_input_count") or max(input_width - masked_width, 0)
+    )
+    action_slot_count = int(
+        resolved.get("action_slot_count") or slot_count or 0
+    )
+    action_count = int(resolved.get("action_count") or 0)
+    decoder = str(
+        resolved.get("action_decoder")
+        or model.get("action_decoder")
+        or "factorized"
+    )
+    actor_output_width = (
+        1 + action_slot_count * max(action_count - 1, 0)
+        if decoder == "single_leg"
+        else action_slot_count * action_count
+    )
+    encoder = str(resolved.get("encoder") or model.get("encoder") or "flat")
+    kind = str(resolved.get("kind") or model.get("kind") or "unknown")
+    hidden_size = int(
+        resolved.get("hidden_size") or model.get("hidden_size") or 0
+    )
+    recurrent_layers = int(
+        resolved.get("layers") or model.get("layers") or 0
+    )
+    graph_layers = int(
+        resolved.get("graph_layers") or model.get("graph_layers") or 0
+    )
+    graph_hidden_size = int(
+        resolved.get("graph_hidden_size")
+        or model.get("graph_hidden_size")
+        or 0
+    )
+    graph_neighbors = int(
+        resolved.get("graph_neighbors") or model.get("graph_neighbors") or 0
+    )
+    display_model = {
+        **model,
+        "encoder": encoder,
+        "kind": kind,
+        "action_decoder": decoder,
+    }
+    checkpoint = str(fold.get("checkpoint") or "Unavailable")
+
+    input_groups = [
+        {
+            "name": "Market context",
+            "width": market_width,
+            "detail": "regime, surface, quality, freshness, and benchmark factors",
+        },
+        {
+            "name": "Contract surface",
+            "width": slot_count * contract_width,
+            "detail": f"{slot_count} stable slots × {contract_width} causal features",
+        },
+        {
+            "name": "Portfolio state",
+            "width": portfolio_width,
+            "detail": "cash, NAV, positions, Greeks, shares, and collateral",
+        },
+        {
+            "name": "Slot validity",
+            "width": slot_count,
+            "detail": "one current-validity input per option slot",
+        },
+    ]
+    known_width = sum(int(item["width"]) for item in input_groups)
+    if input_width > known_width:
+        input_groups.append(
+            {
+                "name": "Additional contract inputs",
+                "width": input_width - known_width,
+                "detail": "persisted by the resolved model contract",
+            }
+        )
+
+    if encoder == "flat":
+        encoder_name = "Flat causal encoder"
+        encoder_detail = (
+            f"{active_width:,} active inputs compacted before Torch inference"
+        )
+    elif encoder == "attention_set":
+        encoder_name = "Masked attention set"
+        encoder_detail = (
+            f"{int(resolved.get('attention_heads') or model.get('attention_heads') or 0)} "
+            f"heads · {graph_hidden_size}-wide contract embeddings"
+        )
+    else:
+        encoder_name = _topology_label(display_model)
+        encoder_detail = (
+            f"{graph_layers} message-passing layers · {graph_neighbors} neighbors · "
+            f"{graph_hidden_size}-wide contract embeddings"
+        )
+
+    if kind == "mixture":
+        recurrent_name = "Gated GRU / LSTM mixture"
+        recurrent_detail = (
+            f"parallel {hidden_size}-wide cores with a learned causal gate"
+        )
+    elif kind == "hybrid":
+        recurrent_name = "Concatenated GRU + LSTM"
+        recurrent_detail = (
+            f"parallel {hidden_size}-wide recurrent cores concatenated for the heads"
+        )
+    else:
+        recurrent_name = f"{kind.upper()} temporal core"
+        recurrent_detail = (
+            f"{recurrent_layers} layer(s) · {hidden_size} hidden units · "
+            f"{int(training.get('sequence_length') or 0)}-state windows"
+        )
+
+    decoder_name = (
+        "Exact single-leg actor"
+        if decoder == "single_leg"
+        else "Factorized multi-leg actor"
+    )
+    decoder_detail = (
+        f"{actor_output_width:,} logits across {action_slot_count} tradable rows; "
+        "runtime evaluates the actor head only"
+    )
+    auxiliary_targets = int(resolved.get("auxiliary_target_count") or 0)
+
+    return {
+        "symbol": symbol,
+        "agent_id": f"{symbol}-{model_id}",
+        "model_id": model_id,
+        "fold": int(fold.get("fold", 0)),
+        "architecture": _architecture_label(display_model),
+        "topology": _topology_label(display_model),
+        "temporal_core": _humanize(kind),
+        "algorithm": str(model.get("algorithm", "unknown")).upper(),
+        "decoder": _decoder_label(display_model),
+        "feature_set": _feature_set_label(model),
+        "feature_schema": str(
+            resolved.get("feature_vector_schema", "Unknown")
+        ),
+        "parameters": int(winner.get("parameter_count") or 0),
+        "input_width": input_width,
+        "active_input_width": active_width,
+        "masked_input_width": masked_width,
+        "slot_count": slot_count,
+        "contract_feature_width": contract_width,
+        "hidden_size": hidden_size,
+        "recurrent_layers": recurrent_layers,
+        "sequence_length": int(training.get("sequence_length") or 0),
+        "actor_output_width": actor_output_width,
+        "action_slot_count": action_slot_count,
+        "action_count": action_count,
+        "auxiliary_target_count": auxiliary_targets,
+        "training_seed_count": int(
+            seed_aggregate.get("training_seed_count") or 1
+        ),
+        "training_seeds": list(seed_aggregate.get("training_seeds") or []),
+        "episodes_completed": int(winner.get("episodes_completed") or 0),
+        "optimizer_updates": int(winner.get("optimizer_updates") or 0),
+        "median_latency_us": _number(latency.get("median_microseconds")),
+        "p95_latency_us": _number(latency.get("p95_microseconds")),
+        "latency_scope": str(latency.get("scope", "Unknown")),
+        "checkpoint": checkpoint,
+        "checkpoint_name": Path(checkpoint).name,
+        "input_groups": input_groups,
+        "stages": [
+            {
+                "name": "Causal observation",
+                "detail": f"{input_width:,} persisted inputs · {slot_count} option slots",
+                "kind": "input",
+            },
+            {
+                "name": encoder_name,
+                "detail": encoder_detail,
+                "kind": "encoder",
+            },
+            {
+                "name": recurrent_name,
+                "detail": recurrent_detail,
+                "kind": "temporal",
+            },
+            {
+                "name": decoder_name,
+                "detail": decoder_detail,
+                "kind": "actor",
+            },
+        ],
+        "training_heads": {
+            "critic": "scalar state-value head",
+            "auxiliary_targets": auxiliary_targets,
+            "runtime": "excluded from actor-only paper inference",
+        },
+        "runtime_contract": (
+            "Streaming recurrent state is isolated per deployment, decisions are "
+            "strictly chronological, and guarded policies are forced to HOLD."
+        ),
+    }
+
+
+def model_structure_candidates(summary: dict[str, Any]) -> pd.DataFrame:
+    """Compare the newest fold's saved candidate architectures."""
+    folds = summary.get("folds", [])
+    if not folds:
+        return pd.DataFrame()
+    fold = max(folds, key=lambda item: int(item.get("fold", -1)))
+    selection = fold.get("model_selection") or {}
+    selected_model_id = str(selection.get("selected_model_id", ""))
+    records = []
+    for candidate in selection.get("candidates", []):
+        model = candidate.get("model") or {}
+        resolved = candidate.get("resolved_model") or {}
+        latency = candidate.get("inference_latency") or {}
+        seed_aggregate = candidate.get("training_seed_aggregate") or {}
+        candidate_selection = candidate.get("selection") or {}
+        display_model = {
+            **model,
+            "encoder": resolved.get("encoder") or model.get("encoder", "unknown"),
+            "kind": resolved.get("kind") or model.get("kind", "unknown"),
+            "action_decoder": (
+                resolved.get("action_decoder")
+                or model.get("action_decoder", "factorized")
+            ),
+        }
+        records.append(
+            {
+                "Selected": (
+                    "Winner"
+                    if str(candidate.get("model_id")) == selected_model_id
+                    else "Challenger"
+                ),
+                "Model": candidate.get("model_id", "unknown"),
+                "Core": _humanize(
+                    str(resolved.get("kind") or model.get("kind", "unknown"))
+                ),
+                "Encoder": _topology_label(display_model),
+                "Algorithm": str(model.get("algorithm", "unknown")).upper(),
+                "Decoder": _decoder_label(display_model),
+                "Parameters": int(candidate.get("parameter_count") or 0),
+                "Active inputs": int(candidate.get("active_input_count") or 0),
+                "Hidden width": int(
+                    resolved.get("hidden_size")
+                    or model.get("hidden_size")
+                    or 0
+                ),
+                "Validation score": _number(
+                    candidate_selection.get(
+                        "robust_training_seed_validation_score"
+                    )
+                ),
+                "Actor latency (us)": _number(
+                    latency.get("median_microseconds")
+                ),
+                "Training seeds": int(
+                    seed_aggregate.get("training_seed_count") or 1
+                ),
+            }
+        )
+    if not records:
+        return pd.DataFrame()
+    return (
+        pd.DataFrame(records)
+        .sort_values(
+            ["Selected", "Validation score"],
+            ascending=[False, False],
+        )
+        .reset_index(drop=True)
+    )
+
+
 def heldout_results(summary: dict[str, Any]) -> pd.DataFrame:
     """Return one row per genuinely held-out selected-agent path."""
     records = []
